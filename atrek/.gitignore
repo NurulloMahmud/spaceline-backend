@@ -1,9 +1,0 @@
-.env
-deploy.sh
-.DS_Store
-.idea
-.vscode
-.claude/
-.cursor/
-.cursorrules
-.aider*
