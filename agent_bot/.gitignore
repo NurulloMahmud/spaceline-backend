@@ -1,0 +1,13 @@
+env
+venv
+.venv
+__pycache__
+*.py[cod]
+.env
+.idea
+.vscode
+.DS_Store
+.claude/
+.cursor/
+.cursorrules
+.aider*

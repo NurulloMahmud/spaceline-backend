@@ -1,0 +1,17 @@
+env/
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+.idea/
+.vscode/
+.claude/
+.cursor/
+.cursorrules
+.aider*
+*.log
