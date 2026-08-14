@@ -14,6 +14,10 @@ DRIVER_COMPANY_FK_DISPLAY = {
     'driver': lambda obj: obj.driver.full_name if obj.driver else None,
 }
 
+DEPOSIT_FK_DISPLAY = {
+    'driver': lambda obj: obj.driver.full_name if obj.driver else None,
+}
+
 
 def build_change_description(old_instance, new_instance, updated_fields, fk_display):
     changes = []

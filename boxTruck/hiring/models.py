@@ -260,3 +260,41 @@ class VehicleHistory(models.Model):
         verbose_name = 'Vehicle History'
         verbose_name_plural = 'Vehicle Histories'
         db_table = 'vehicle_histories'
+
+
+class Deposit(models.Model):
+    driver = models.OneToOneField(Driver, on_delete=models.CASCADE)
+    company = models.CharField(max_length=255, null=True, blank=True)
+    city = models.CharField(max_length=255, null=True, blank=True)
+    state = models.CharField(max_length=255, null=True, blank=True)
+    zip_code = models.CharField(max_length=255, null=True, blank=True)
+    address = models.CharField(max_length=255, null=True, blank=True)
+    bank_name = models.CharField(max_length=255, null=True, blank=True)
+    routing_number = models.CharField(max_length=255, null=True, blank=True)
+    account_number = models.CharField(max_length=255, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Deposit for {self.driver.full_name}"
+
+    class Meta:
+        verbose_name = 'Deposit'
+        verbose_name_plural = 'Deposits'
+        db_table = 'deposits'
+
+
+class DepositHistory(models.Model):
+    deposit = models.ForeignKey(Deposit, on_delete=models.CASCADE)
+    changed_by = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    description = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Deposit history for {self.deposit.driver.full_name}"
+
+    class Meta:
+        verbose_name = 'Deposit History'
+        verbose_name_plural = 'Deposit Histories'
+        db_table = 'deposit_histories'
+

@@ -3,8 +3,8 @@ from rest_framework.routers import SimpleRouter
 from .excel import ImportDriversView
 from .views import (DriverBulkCreateHRView, DriverBulkCreateInviteView, DriverStatusViewSet, DriverViewSet, DriverDropdownAPIView,
                     DriverFileViewSet, CompanyFileViewSet, GenerateInviteLinkView, VehicleFileViewSet,
-                    VehicleViewSet, DriverCompanyViewSet, DriverListView, DriverCompanyModalView, DriverBulkView,
-                    VehicleEquipmentViewSet, CompanyHistoryViewSet, VehicleHistoryViewSet, DriverHistoryViewSet,
+                    VehicleViewSet, DriverCompanyViewSet, DepositViewSet, DriverListView, DriverCompanyModalView, DriverBulkView,
+                    VehicleEquipmentViewSet, CompanyHistoryViewSet, VehicleHistoryViewSet, DriverHistoryViewSet, DepositHistoryViewSet,
                     DriverLocationByIDAPIView, DriverNearbyView, VehicleDropdownView,
                     DriverAssignmentView, UnassignedDriversAPIView
                     )
@@ -17,10 +17,12 @@ router.register(r'company-files', CompanyFileViewSet, basename='company-files') 
 router.register(r'vehicle-files', VehicleFileViewSet, basename='vehicle-files') #checked
 router.register(r'vehicles', VehicleViewSet, basename='vehicles') #checked
 router.register(r'driver-companies', DriverCompanyViewSet, basename='driver-companies') #checked
+router.register(r'deposits', DepositViewSet, basename='deposits')
 router.register(r'vehicle-equipments', VehicleEquipmentViewSet, basename='vehicle-equipments') # checked
 router.register(r'company-history', CompanyHistoryViewSet, basename='company-history') # checked
 router.register(r'vehicle-history', VehicleHistoryViewSet, basename='vehicle-history') # checked
 router.register(r'driver-history', DriverHistoryViewSet, basename='driver-history') # checked
+router.register(r'deposit-history', DepositHistoryViewSet, basename='deposit-history')
 
 urlpattern = [
     path('driver-dropdown/', DriverDropdownAPIView.as_view(), name='driver-dropdown'), #checked

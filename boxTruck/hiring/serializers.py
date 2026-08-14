@@ -1,9 +1,9 @@
 from rest_framework import serializers
 
 from users.models import Company, CustomUser
-from .models import (Driver, DriverHistory, DriverStatus, Vehicle, VehicleEquipment, 
+from .models import (Driver, DriverHistory, DriverStatus, Vehicle, VehicleEquipment,
                      DriverCompany, DriverFile, CompanyFile, VehicleFile,
-                     CompanyHistory, VehicleHistory
+                     CompanyHistory, VehicleHistory, Deposit, DepositHistory
                      )
 from users.serializers import CompanySerializer
 
@@ -52,6 +52,7 @@ class DriverViewSerializer(serializers.ModelSerializer):
     vehicle = serializers.SerializerMethodField()
     team = serializers.SerializerMethodField()
     dispatcher = serializers.SerializerMethodField()
+    deposit = serializers.SerializerMethodField()
 
     class Meta:
         model = Driver
@@ -113,6 +114,12 @@ class DriverViewSerializer(serializers.ModelSerializer):
                     vehicle.vehicleequipment_set.all(), many=True
                 ).data,
             }
+        return None
+
+    def get_deposit(self, obj):
+        deposit = getattr(obj, 'deposit', None)
+        if deposit:
+            return DepositViewSerializer(deposit).data
         return None
 
 
@@ -197,6 +204,54 @@ class VehicleWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Vehicle
         fields = '__all__'
+
+
+class DepositWriteSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = Deposit
+        fields = '__all__'
+
+
+class DepositViewSerializer(serializers.ModelSerializer):
+    driver = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Deposit
+        fields = '__all__'
+
+    def get_driver(self, obj):
+        if obj.driver:
+            return {
+                "id": obj.driver.id,
+                "full_name": obj.driver.full_name,
+            }
+        return None
+
+
+class DepositHistoryWriteSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = DepositHistory
+        fields = '__all__'
+
+
+class DepositHistoryViewSerializer(serializers.ModelSerializer):
+    changed_by = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DepositHistory
+        fields = '__all__'
+
+    def get_changed_by(self, obj):
+        if obj.changed_by:
+            return {
+                    "id": obj.changed_by.id,
+                    "first_name": obj.changed_by.first_name,
+                    "last_name": obj.changed_by.last_name,
+                    "username": obj.changed_by.username,
+                }
+        return None
 
 
 class CompanyHistoryWriteSerializer(serializers.ModelSerializer):
@@ -421,6 +476,14 @@ class DriverBulkCreateSerializer(serializers.Serializer):
     vehicle__door_open_width = serializers.IntegerField(required=False, allow_null=True)
     vehicle__door_open_height = serializers.IntegerField(required=False, allow_null=True)
     vehicle__ramps = serializers.CharField(required=False, allow_blank=True)
+    deposit__company = serializers.CharField(required=False, allow_blank=True)
+    deposit__city = serializers.CharField(required=False, allow_blank=True)
+    deposit__state = serializers.CharField(required=False, allow_blank=True)
+    deposit__zip_code = serializers.CharField(required=False, allow_blank=True)
+    deposit__address = serializers.CharField(required=False, allow_blank=True)
+    deposit__bank_name = serializers.CharField(required=False, allow_blank=True)
+    deposit__routing_number = serializers.CharField(required=False, allow_blank=True)
+    deposit__account_number = serializers.CharField(required=False, allow_blank=True)
     driver_files = serializers.ListField(child=serializers.FileField(), required=False)
     driver_file_names = serializers.ListField(child=serializers.CharField(), required=False)
     company_files = serializers.ListField(child=serializers.FileField(), required=False)
@@ -461,11 +524,16 @@ class DriverBulkCreateSerializer(serializers.Serializer):
             k.replace('vehicle__', ''): validated_data.pop(k)
             for k in list(validated_data.keys()) if k.startswith('vehicle__')
         }
+        deposit_data = {
+            k.replace('deposit__', ''): validated_data.pop(k)
+            for k in list(validated_data.keys()) if k.startswith('deposit__')
+        }
 
         with transaction.atomic():
             driver = Driver.objects.create(**validated_data)
             driver_company = DriverCompany.objects.create(driver=driver, **company_data)
             vehicle = Vehicle.objects.create(driver=driver, **vehicle_data)
+            Deposit.objects.create(driver=driver, **deposit_data)
             DriverFile.objects.bulk_create([
                 DriverFile(driver=driver, name=name, document=file)
                 for file, name in zip(driver_files, driver_file_names)

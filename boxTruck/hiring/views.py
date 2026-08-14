@@ -14,13 +14,14 @@ from mobile.models import DriverLocation
 from mobile.serializers import DriverLocationViewSerializer
 from users.pagination import CustomPagination
 from users.permissions import IsAdminUser, IsDispatch, IsDispatchManager, IsInternalService, IsUpdater
-from .utils import build_change_description, DRIVER_COMPANY_FK_DISPLAY, DRIVER_FK_DISPLAY, VEHICLE_FK_DISPLAY
+from .utils import build_change_description, DEPOSIT_FK_DISPLAY, DRIVER_COMPANY_FK_DISPLAY, DRIVER_FK_DISPLAY, VEHICLE_FK_DISPLAY
 from users.models import CustomUser, Team
-from .models import (CompanyFile, Driver, DriverCompany, DriverFile, DriverHistory, DriverInviteLink, 
+from .models import (CompanyFile, Deposit, DepositHistory, Driver, DriverCompany, DriverFile, DriverHistory, DriverInviteLink,
                      DriverStatus, Vehicle, VehicleEquipment, VehicleFile,
                      CompanyHistory, VehicleHistory
                      )
-from .serializers import (DriverAssignSerializer, UnassignedDriverSerializer, CompanyFileSerializer, DriverBulkCreateSerializer, DriverCompanyModalSerializer, DriverFileSerializer, DriverHistoryViewSerializer, DriverHistoryWriteSerializer, DriverListSerializer, DriverViewSerializer, 
+from .serializers import (DriverAssignSerializer, UnassignedDriverSerializer, CompanyFileSerializer, DepositHistoryViewSerializer, DepositHistoryWriteSerializer, DepositViewSerializer, DepositWriteSerializer,
+                          DriverBulkCreateSerializer, DriverCompanyModalSerializer, DriverFileSerializer, DriverHistoryViewSerializer, DriverHistoryWriteSerializer, DriverListSerializer, DriverViewSerializer,
                           DriverWriteSerializer, DriverStatusSerializer, NearbyDriverSerializer, VehicleDropdownSerializer, VehicleFileSerializer, VehicleHistoryViewSerializer, VehicleHistoryWriteSerializer,
                           VehicleViewSerializer, VehicleWriteSerializer,
                           DriverCompanyViewSerializer, DriverCompanyWriteSerializer,
@@ -252,6 +253,47 @@ class DriverCompanyViewSet(viewsets.ModelViewSet):
         return Response(DriverCompanyViewSerializer(updated_company).data)
 
 
+class DepositViewSet(viewsets.ModelViewSet):
+    queryset = Deposit.objects.all()
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['driver']
+
+    def get_serializer_class(self):
+        if self.request.method in ['POST', 'PATCH']:
+            return DepositWriteSerializer
+        else:
+            return DepositViewSerializer
+
+    def get_queryset(self):
+        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll', 'hiring']:
+            return Deposit.objects.all()
+        return Deposit.objects.filter(driver__company=self.request.user.company)
+
+    def partial_update(self, request, *args, **kwargs):
+        deposit = self.get_object()
+        old_instance = copy.deepcopy(deposit)
+        old_instance.driver = deposit.driver
+        serializer = self.get_serializer(deposit, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        updated_deposit = serializer.save()
+        updated_deposit.refresh_from_db()
+        updated_deposit.driver
+        description = build_change_description(
+            old_instance,
+            updated_deposit,
+            list(request.data.keys()),
+            DEPOSIT_FK_DISPLAY,
+        )
+        if description:
+            DepositHistory.objects.create(
+                deposit=updated_deposit,
+                changed_by=request.user,
+                description=description,
+            )
+        return Response(DepositViewSerializer(updated_deposit).data)
+
+
 class DriverListView(generics.ListAPIView):
     serializer_class = DriverListSerializer
     permission_classes = [IsAuthenticated]
@@ -417,6 +459,23 @@ class VehicleHistoryViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return VehicleHistory.objects.select_related(
             'changed_by', 'vehicle'
+        ).all()
+
+
+class DepositHistoryViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['deposit']
+
+    def get_serializer_class(self):
+        if self.request.method in ['POST', 'PATCH']:
+            return DepositHistoryWriteSerializer
+        else:
+            return DepositHistoryViewSerializer
+
+    def get_queryset(self):
+        return DepositHistory.objects.select_related(
+            'changed_by', 'deposit'
         ).all()
 
 
