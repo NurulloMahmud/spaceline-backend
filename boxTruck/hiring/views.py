@@ -357,7 +357,7 @@ class GenerateInviteLinkView(views.APIView):
             company=request.user.company,
             expires_at=timezone.now() + timedelta(days=7)
         )
-        link = f"https://boxmanage.smartfleetllc.com/driver-form/?token={invite.token}"
+        link = f"https://spaceline.boxtruckmanage.com/driver-form/?token={invite.token}"
         return Response({'link': link}, status=201)
 
 

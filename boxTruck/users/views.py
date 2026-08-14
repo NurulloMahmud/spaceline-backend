@@ -261,7 +261,7 @@ class CreateInviteView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         invite = serializer.save()
-        invite_link = f"https://boxmanage.smartfleetllc.com/register/invite/{invite.token}/"
+        invite_link = f"https://spaceline.boxtruckmanage.com/register/invite/{invite.token}/"
         return Response({
             "message": "Invite link created successfully.",
             "invite_link": invite_link,
