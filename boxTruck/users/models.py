@@ -26,10 +26,11 @@ class Company(models.Model):
     mc = models.CharField(max_length=255, null=True, blank=True)
     website = models.CharField(max_length=255, null=True, blank=True)
     phone_number = models.CharField(max_length=255, null=True, blank=True)
-
-    # Letterhead and terms used when the email-agent bids on a load with a broker.
     logo = models.ImageField(upload_to='companies/logos/', null=True, blank=True)
     bid_validity_minutes = models.PositiveIntegerField(default=15)
+    contract_template_text = models.TextField(null=True, blank=True)
+    contract_signer_name = models.CharField(max_length=255, null=True, blank=True)
+    contract_signer_title = models.CharField(max_length=255, null=True, blank=True)
 
     def __str__(self):
         return f"{self.id}. {self.name}"

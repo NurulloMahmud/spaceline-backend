@@ -1,7 +1,9 @@
 from django.urls import path, include
 from rest_framework.routers import SimpleRouter
 from .excel import ImportDriversView
-from .views import (DriverBulkCreateHRView, DriverBulkCreateInviteView, DriverStatusViewSet, DriverViewSet, DriverDropdownAPIView,
+from .views import (DriverBulkCreateHRView, DriverBulkCreateInviteView, DriverExistsCheckView,
+                    DriverInviteSubmitView, DriverInviteDocumentUploadView,
+                    DriverStatusViewSet, DriverViewSet, DriverDropdownAPIView,
                     DriverFileViewSet, CompanyFileViewSet, GenerateInviteLinkView, VehicleFileViewSet,
                     VehicleViewSet, DriverCompanyViewSet, DepositViewSet, DriverListView, DriverCompanyModalView, DriverBulkView,
                     VehicleEquipmentViewSet, CompanyHistoryViewSet, VehicleHistoryViewSet, DriverHistoryViewSet, DepositHistoryViewSet,
@@ -31,6 +33,9 @@ urlpattern = [
     path('driver-company-modal/', DriverCompanyModalView.as_view(), name='driver-company-modal'), # checked
     path('hiring/request/', DriverBulkCreateHRView.as_view(), name='driver-create-hr'),
     path('driver/invite/', DriverBulkCreateInviteView.as_view(), name='driver-create-invite'),
+    path('driver/exists/', DriverExistsCheckView.as_view(), name='driver-exists-check'),
+    path('driver/invite/submit/', DriverInviteSubmitView.as_view(), name='driver-invite-submit'),
+    path('driver/invite/documents/', DriverInviteDocumentUploadView.as_view(), name='driver-invite-documents'),
     path('invite-link/', GenerateInviteLinkView.as_view(), name='generate-invite-link'),
     path('drivers-bulk/', DriverBulkView.as_view(), name='driver-bulk'),
     path('driver-location/<int:pk>/', DriverLocationByIDAPIView.as_view(), name='driver-location'),

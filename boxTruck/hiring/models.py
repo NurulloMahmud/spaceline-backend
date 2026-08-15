@@ -45,11 +45,11 @@ class Driver(models.Model):
     cdl_issue_date = models.DateField(null=True, blank=True)
     cdl_expiration = models.DateField(null=True, blank=True)
     cdl_endorsement = models.CharField(max_length=255, null=True, blank=True)
+    tax_exempt = models.BooleanField(default=False)
+    payee_code = models.CharField(max_length=255, null=True, blank=True)
+    fatca_reporting_code = models.CharField(max_length=255, null=True, blank=True)
     referral_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='referral_by')
     manager = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='manager')
-    # The dispatch team this driver belongs to, and the dispatcher on that team
-    # who runs them. `manager` is a separate, pre-existing relationship and is
-    # left alone.
     team = models.ForeignKey(
         Team, on_delete=models.SET_NULL, null=True, blank=True, related_name='drivers'
     )
@@ -103,7 +103,10 @@ class DriverCompany(models.Model):
     state = models.CharField(max_length=255)
     city = models.CharField(max_length=255)
     address = models.CharField(max_length=255)
-    
+    email = models.EmailField(null=True, blank=True)
+    applicant_first_name = models.CharField(max_length=255, null=True, blank=True)
+    applicant_last_name = models.CharField(max_length=255, null=True, blank=True)
+
     def __str__(self):
         return self.name
     
@@ -132,17 +135,18 @@ class CompanyFile(models.Model):
 class Vehicle(models.Model):
     driver = models.ForeignKey(Driver, on_delete=models.CASCADE, related_name='vehicles')
     second_driver = models.ForeignKey(Driver, on_delete=models.SET_NULL, null=True, blank=True, related_name='second_driver')
-    vehicle_type = models.CharField(max_length=255)
+    vehicle_type = models.CharField(max_length=255, null=True, blank=True)
     make = models.CharField(max_length=255)
     model = models.CharField(max_length=255)
     payload = models.IntegerField()
     gvw = models.IntegerField()
-    year = models.IntegerField()
+    year = models.IntegerField(null=True, blank=True)
     registration_plate = models.CharField(max_length=255, null=True, blank=True)
     registration_expiry_date = models.DateField(null=True, blank=True)
     registration_state = models.CharField(max_length=255, null=True, blank=True)
     insurance_company = models.CharField(max_length=255, null=True, blank=True)
     insurance_expiry_date = models.DateField(null=True, blank=True)
+    dock_height = models.CharField(max_length=255, null=True, blank=True)
     policy_number = models.CharField(max_length=255, null=True, blank=True)
     vin = models.CharField(max_length=255, null=True, blank=True)
     length = models.IntegerField(null=True, blank=True)

@@ -1,6 +1,8 @@
 from datetime import timedelta
 from django.utils import timezone
 import copy
+from django.db import transaction
+from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -15,7 +17,8 @@ from mobile.serializers import DriverLocationViewSerializer
 from users.pagination import CustomPagination
 from users.permissions import IsAdminUser, IsDispatch, IsDispatchManager, IsInternalService, IsUpdater
 from .utils import build_change_description, DEPOSIT_FK_DISPLAY, DRIVER_COMPANY_FK_DISPLAY, DRIVER_FK_DISPLAY, VEHICLE_FK_DISPLAY
-from users.models import CustomUser, Team
+from .pdf_generation import fill_w9, generate_contract
+from users.models import CustomUser, Team, Company
 from .models import (CompanyFile, Deposit, DepositHistory, Driver, DriverCompany, DriverFile, DriverHistory, DriverInviteLink,
                      DriverStatus, Vehicle, VehicleEquipment, VehicleFile,
                      CompanyHistory, VehicleHistory
@@ -409,6 +412,206 @@ class DriverBulkCreateInviteView(views.APIView):
             driver = serializer.save()
             return Response({'detail': 'Driver created.', 'driver_id': driver.id}, status=201)
         return Response(serializer.errors, status=400)
+
+
+class DriverExistsCheckView(views.APIView):
+    permission_classes = []
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip()
+        phone_number = (request.data.get('phone_number') or '').strip()
+
+        if not email and not phone_number:
+            return Response({'detail': 'email or phone_number is required.'}, status=400)
+
+        email_exists = False
+        if email:
+            email_exists = Driver.objects.filter(email__iexact=email).exists()
+
+        phone_exists = False
+        if phone_number:
+            phone_exists = Driver.objects.filter(phone_number=phone_number).exists()
+
+        return Response({'email_exists': email_exists, 'phone_exists': phone_exists}, status=200)
+
+
+class DriverInviteSubmitView(views.APIView):
+    """Public, token-based endpoint for the driver invite registration form.
+
+    Unlike DriverBulkCreateInviteView (multipart, files included), the frontend
+    for this flow sends plain JSON values only, with company/driver/vehicle
+    fields mixed flat and nested (some duplicated at both levels). Rather than
+    fight DRF's nested-serializer validation for that shape, fields are pulled
+    defensively with `_pick`. On success this also generates a W-9 and the
+    inviting company's contract PDF and returns their URLs.
+    """
+    permission_classes = []
+
+    def post(self, request):
+        token = request.query_params.get('token')
+        if not token:
+            return Response({'detail': 'Token is required.'}, status=400)
+
+        try:
+            invite = DriverInviteLink.objects.select_related('created_by', 'company').get(token=token)
+        except DriverInviteLink.DoesNotExist:
+            return Response({'detail': 'Invalid token.'}, status=400)
+
+        if not invite.is_valid():
+            return Response({'detail': 'Link has expired or is inactive.'}, status=400)
+
+        data = request.data
+        driver_data = data.get('driver') or {}
+        vehicle_data = data.get('vehicle') or {}
+
+        def pick(*sources_and_keys, default=''):
+            for source, key in sources_and_keys:
+                value = source.get(key)
+                if value not in (None, ''):
+                    return value
+            return default
+
+        full_name = pick((driver_data, 'driver_full_name'), (data, 'driver_full_name'))
+        phone_number = pick((driver_data, 'phone'), (data, 'phone'))
+        company_name = data.get('company_name') or ''
+
+        if not full_name or not company_name:
+            return Response(
+                {'detail': 'driver_full_name and company_name are required.'}, status=400
+            )
+
+        pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
+
+        dock = vehicle_data.get('dock')
+        if isinstance(dock, list):
+            dock = ', '.join(str(d) for d in dock if d)
+
+        equipment = vehicle_data.get('equipment') or []
+        if not isinstance(equipment, list):
+            equipment = [equipment]
+
+        with transaction.atomic():
+            driver = Driver.objects.create(
+                company=invite.company,
+                full_name=full_name,
+                phone_number=phone_number,
+                emergency_phone_number=data.get('company_emergency_phone') or '',
+                status=pending_status,
+                referral_by=invite.created_by,
+                tax_exempt=bool(data.get('tax_exempt', False)),
+                payee_code=data.get('payee_code') or '',
+                fatca_reporting_code=data.get('fatca_reporting_code') or '',
+            )
+            driver_company = DriverCompany.objects.create(
+                driver=driver,
+                name=company_name,
+                mc=data.get('company_mc') or '',
+                employer_id=data.get('company_employer_id') or '',
+                phone_number=data.get('company_phone') or '',
+                business_as=data.get('company_doing_business') or '',
+                business_type=str(data.get('company_type') or ''),
+                zipcode=pick((data, 'company_zip'), (data, 'company_zipcode')),
+                state=data.get('company_state') or '',
+                city=data.get('company_city') or '',
+                address=data.get('company_address') or '',
+                email=data.get('company_email') or None,
+                applicant_first_name=data.get('company_applicant_first_name') or '',
+                applicant_last_name=data.get('company_applicant_last_name') or '',
+            )
+            vehicle = Vehicle.objects.create(
+                driver=driver,
+                make=vehicle_data.get('make') or '',
+                model=vehicle_data.get('model') or '',
+                length=vehicle_data.get('useful_cargo_length') or None,
+                width=vehicle_data.get('useful_cargo_width') or None,
+                height=vehicle_data.get('useful_cargo_height') or None,
+                gvw=vehicle_data.get('GVW_lbs') or 0,
+                payload=vehicle_data.get('payload_lbs') or 0,
+                door_open_width=vehicle_data.get('door_width') or None,
+                door_open_height=vehicle_data.get('door_height') or None,
+                dock_height=dock or '',
+            )
+            VehicleEquipment.objects.bulk_create([
+                VehicleEquipment(vehicle=vehicle, name=str(name))
+                for name in equipment if name
+            ])
+
+            w9_bytes = fill_w9({
+                'company_name': company_name,
+                'company_doing_business': data.get('company_doing_business') or '',
+                'company_address': data.get('company_address') or '',
+                'company_city': data.get('company_city') or '',
+                'company_state': data.get('company_state') or '',
+                'company_zip': driver_company.zipcode,
+                'company_employer_id': data.get('company_employer_id') or '',
+                'company_type': data.get('company_type') or '',
+                'payee_code': driver.payee_code,
+                'fatca_reporting_code': driver.fatca_reporting_code,
+            }).getvalue()
+
+            try:
+                contractor_address = ', '.join(
+                    part for part in [
+                        data.get('company_address'), data.get('company_city'),
+                        data.get('company_state'), driver_company.zipcode,
+                    ] if part
+                )
+                today = timezone.now()
+                contract_bytes = generate_contract(invite.company, {
+                    'effective_day': today.strftime('%d'),
+                    'effective_month': today.strftime('%B'),
+                    'effective_year': today.strftime('%y'),
+                    'contractor_name': company_name,
+                    'contractor_address': contractor_address,
+                    'contractor_email': data.get('company_email') or '',
+                }).getvalue()
+            except ValueError as e:
+                return Response({'detail': str(e)}, status=422)
+
+            w9_file = DriverFile(driver=driver, name='W-9 (Generated)')
+            w9_file.document.save(f'w9_{driver.id}.pdf', ContentFile(w9_bytes), save=True)
+
+            contract_file = DriverFile(driver=driver, name='Contractor Agreement (Generated)')
+            contract_file.document.save(f'contract_{driver.id}.pdf', ContentFile(contract_bytes), save=True)
+
+        return Response({
+            'detail': 'Driver created.',
+            'driver_id': driver.id,
+            'w9_url': w9_file.document.url,
+            'contract_url': contract_file.document.url,
+        }, status=201)
+
+
+class DriverInviteDocumentUploadView(views.APIView):
+    permission_classes = []
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser]
+
+    def post(self, request):
+        token = request.query_params.get('token')
+        if not token:
+            return Response({'detail': 'Token is required.'}, status=400)
+
+        try:
+            invite = DriverInviteLink.objects.get(token=token)
+        except DriverInviteLink.DoesNotExist:
+            return Response({'detail': 'Invalid token.'}, status=400)
+
+        driver_id = request.data.get('driver_id')
+        driver = get_object_or_404(Driver, id=driver_id, company=invite.company)
+        files = request.FILES.getlist('files')
+        names = request.data.getlist('names') if hasattr(request.data, 'getlist') else request.data.get('names', [])
+        if len(files) != len(names):
+            return Response({'detail': 'files and names must have the same count.'}, status=400)
+
+        created = DriverFile.objects.bulk_create([
+            DriverFile(driver=driver, name=name, document=file)
+            for file, name in zip(files, names)
+        ])
+
+        return Response({
+            'detail': 'Documents uploaded.',
+            'files': [{'id': f.id, 'name': f.name, 'url': f.document.url} for f in created],
+        }, status=201)
 
 
 class CompanyHistoryViewSet(viewsets.ModelViewSet):

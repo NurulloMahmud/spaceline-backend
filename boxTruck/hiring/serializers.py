@@ -110,6 +110,7 @@ class DriverViewSerializer(serializers.ModelSerializer):
                 'height': vehicle.height,
                 'payload': vehicle.payload,
                 'ramps': vehicle.ramps,
+                'dock_height': vehicle.dock_height,
                 'equipments': VehicleEquipmentSerializer(
                     vehicle.vehicleequipment_set.all(), many=True
                 ).data,
@@ -444,6 +445,9 @@ class DriverBulkCreateSerializer(serializers.Serializer):
     cdl_issue_date = serializers.DateField(required=False, allow_null=True)
     cdl_expiration = serializers.DateField(required=False, allow_null=True)
     cdl_endorsement = serializers.CharField(required=False, allow_blank=True)
+    tax_exempt = serializers.BooleanField(required=False)
+    payee_code = serializers.CharField(required=False, allow_blank=True)
+    fatca_reporting_code = serializers.CharField(required=False, allow_blank=True)
     referral_by = serializers.PrimaryKeyRelatedField(queryset=CustomUser.objects.all(), required=False, allow_null=True)
     manager = serializers.PrimaryKeyRelatedField(queryset=CustomUser.objects.all(), required=False, allow_null=True)
     company__name = serializers.CharField()
@@ -475,6 +479,7 @@ class DriverBulkCreateSerializer(serializers.Serializer):
     vehicle__height = serializers.IntegerField(required=False, allow_null=True)
     vehicle__door_open_width = serializers.IntegerField(required=False, allow_null=True)
     vehicle__door_open_height = serializers.IntegerField(required=False, allow_null=True)
+    vehicle__dock_height = serializers.CharField(required=False, allow_blank=True)
     vehicle__ramps = serializers.CharField(required=False, allow_blank=True)
     deposit__company = serializers.CharField(required=False, allow_blank=True)
     deposit__city = serializers.CharField(required=False, allow_blank=True)
