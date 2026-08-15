@@ -460,6 +460,12 @@ class DriverInviteSubmitView(views.APIView):
         if not invite.is_valid():
             return Response({'detail': 'Link has expired or is inactive.'}, status=400)
 
+        if not invite.company.contract_template_text:
+            return Response(
+                {'detail': f"Company '{invite.company.name}' has no contract_template_text configured."},
+                status=422,
+            )
+
         data = request.data
         driver_data = data.get('driver') or {}
         vehicle_data = data.get('vehicle') or {}
@@ -549,24 +555,21 @@ class DriverInviteSubmitView(views.APIView):
                 'fatca_reporting_code': driver.fatca_reporting_code,
             }).getvalue()
 
-            try:
-                contractor_address = ', '.join(
-                    part for part in [
-                        data.get('company_address'), data.get('company_city'),
-                        data.get('company_state'), driver_company.zipcode,
-                    ] if part
-                )
-                today = timezone.now()
-                contract_bytes = generate_contract(invite.company, {
-                    'effective_day': today.strftime('%d'),
-                    'effective_month': today.strftime('%B'),
-                    'effective_year': today.strftime('%y'),
-                    'contractor_name': company_name,
-                    'contractor_address': contractor_address,
-                    'contractor_email': data.get('company_email') or '',
-                }).getvalue()
-            except ValueError as e:
-                return Response({'detail': str(e)}, status=422)
+            contractor_address = ', '.join(
+                part for part in [
+                    data.get('company_address'), data.get('company_city'),
+                    data.get('company_state'), driver_company.zipcode,
+                ] if part
+            )
+            today = timezone.now()
+            contract_bytes = generate_contract(invite.company, {
+                'effective_day': today.strftime('%d'),
+                'effective_month': today.strftime('%B'),
+                'effective_year': today.strftime('%y'),
+                'contractor_name': company_name,
+                'contractor_address': contractor_address,
+                'contractor_email': data.get('company_email') or '',
+            }).getvalue()
 
             w9_file = DriverFile(driver=driver, name='W-9 (Generated)')
             w9_file.document.save(f'w9_{driver.id}.pdf', ContentFile(w9_bytes), save=True)
