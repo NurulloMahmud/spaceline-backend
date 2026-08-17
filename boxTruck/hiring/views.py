@@ -355,9 +355,15 @@ class GenerateInviteLinkView(views.APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        manager_id = request.data.get('manager')
+        manager = None
+        if manager_id:
+            manager = get_object_or_404(CustomUser, id=manager_id)
+
         invite = DriverInviteLink.objects.create(
             created_by=request.user,
             company=request.user.company,
+            manager=manager,
             expires_at=timezone.now() + timedelta(days=7)
         )
         link = f"https://spaceline.boxtruckmanage.com/driver-form/?token={invite.token}"
@@ -407,6 +413,8 @@ class DriverBulkCreateInviteView(views.APIView):
         data['status'] = pending_status.id
         data['company'] = invite.company.id
         data['referral_by'] = invite.created_by.id
+        if invite.manager_id:
+            data['manager'] = invite.manager_id
         serializer = DriverBulkCreateSerializer(data=data)
         if serializer.is_valid():
             driver = serializer.save()
@@ -504,6 +512,7 @@ class DriverInviteSubmitView(views.APIView):
                 emergency_phone_number=data.get('company_emergency_phone') or '',
                 status=pending_status,
                 referral_by=invite.created_by,
+                manager=invite.manager,
                 tax_exempt=bool(data.get('tax_exempt', False)),
                 payee_code=data.get('payee_code') or '',
                 fatca_reporting_code=data.get('fatca_reporting_code') or '',

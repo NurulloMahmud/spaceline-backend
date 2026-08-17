@@ -219,6 +219,10 @@ class DriverInviteLink(models.Model):
     token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     created_by = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
     company = models.ForeignKey(Company, on_delete=models.CASCADE)
+    manager = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='managed_invite_links',
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(null=True, blank=True)
