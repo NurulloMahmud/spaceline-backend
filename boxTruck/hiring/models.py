@@ -25,6 +25,7 @@ class Driver(models.Model):
     medical_exp_date = models.DateField(null=True, blank=True)
     email = models.EmailField(null=True, blank=True)
     telegram_group_id = models.CharField(max_length=255, null=True, blank=True)
+    telegram_user_id = models.CharField(max_length=255, null=True, blank=True)
     driver_id = models.CharField(max_length=255, null=True, blank=True)
     address = models.CharField(max_length=255, null=True, blank=True)
     unit_number = models.CharField(max_length=255, null=True, blank=True)

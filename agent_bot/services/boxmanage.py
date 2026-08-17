@@ -53,6 +53,29 @@ class BoxManageService:
                 return []
             return resp.json().get("drivers", [])
 
+    async def list_active_drivers_with_telegram(self) -> list[dict]:
+        """Every Active driver that has a linked Telegram group, across all pages."""
+        drivers: list[dict] = []
+        async with httpx.AsyncClient(timeout=15) as client:
+            url = f"{self.base_url}/hiring/drivers/"
+            params = {"page_size": 500}
+            while url:
+                resp = await client.get(url, params=params, headers=self.headers)
+                if resp.status_code != 200:
+                    logger.error(f"boxmanage list_active_drivers failed: {resp.status_code}")
+                    break
+                data = resp.json()
+                results = data.get("results") if isinstance(data, dict) else data
+                if isinstance(results, list):
+                    drivers.extend(results)
+                url = data.get("next") if isinstance(data, dict) else None
+                params = None  # `next` already carries the full query string
+
+        return [
+            d for d in drivers
+            if (d.get("status") or {}).get("name") == "Active" and d.get("telegram_group_id")
+        ]
+
     async def busy_driver_ids(self) -> set[int]:
         """
         Drivers already running a load (Dispatched or In Transit in the TMS).
