@@ -302,6 +302,16 @@ class DriverListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     pagination_class = CustomPagination
 
+    ALLOWED_SORT_FIELDS = {
+        'created_at',
+        'full_name',
+        'hired_date',
+        'terminated_date',
+        'dob',
+        'company',
+        'status',
+    }
+
     def get_queryset(self):
         user = self.request.user
         department = user.department.name.lower()
@@ -320,7 +330,18 @@ class DriverListView(generics.ListAPIView):
             qs = qs.filter(status_id=status_id)
         if search:
             qs = qs.filter(full_name__icontains=search)
-        return qs.select_related('company', 'status', 'manager').order_by('-created_at')
+
+        sort = self.request.query_params.get('sort', '-created_at')
+        sort_field = sort.lstrip('-')
+        if sort_field in self.ALLOWED_SORT_FIELDS:
+            qs = qs.order_by(sort)
+        else:
+            qs = qs.order_by('-created_at')
+        return qs.select_related(
+            'company',
+            'status',
+            'manager'
+        )
 
 
 class DriverCompanyModalView(views.APIView):
