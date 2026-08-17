@@ -6,6 +6,8 @@ from services.ai import ai
 logger = logging.getLogger(__name__)
 
 VEHICLE_TYPE_MAP = {
+    "VAN":            "Van",
+    "SPRINTER":       "Sprinter",
     "CARGO VAN":      "Cargo Van",
     "SMALL STRAIGHT": "Small Straight",
     "LARGE STRAIGHT": "Large Straight",
