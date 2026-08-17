@@ -309,7 +309,6 @@ class DriverListView(generics.ListAPIView):
         'terminated_date',
         'dob',
         'company',
-        'status',
     }
 
     def get_queryset(self):
