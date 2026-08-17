@@ -124,7 +124,7 @@ class LoadAgent:
             logger.warning(f"Load {load.get('id')} missing pickup location")
             return
 
-        nearby = await boxtruck.get_nearby_drivers(zip_code=pick_up_zip, radius=50)
+        nearby = await boxtruck.get_nearby_drivers(zip_code=pick_up_zip, radius=100)
         logger.info(f"Load {load.get('id')} nearby drivers count: {len(nearby)}")
 
         if not nearby:

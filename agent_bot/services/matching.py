@@ -84,8 +84,8 @@ def matches_driver(
     if load_vtype.lower() != driver_vtype.lower():
         return False, f"type mismatch: load={load_vtype} driver={driver_vtype}"
 
-    if dead_head > 50:
-        return False, f"dead head {dead_head:.1f}mi > 50mi"
+    if dead_head > 100:
+        return False, f"dead head {dead_head:.1f}mi > 100mi"
 
     fits, reason = check_dimensions(load, vehicle)
     if not fits:

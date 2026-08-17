@@ -41,7 +41,7 @@ class BoxManageService:
                 logger.error(f"boxmanage update_location failed: {resp.status_code} {resp.text}")
             return resp.status_code == 200
 
-    async def get_nearby_drivers(self, zip_code: str, radius: float = 50) -> list[dict]:
+    async def get_nearby_drivers(self, zip_code: str, radius: float = 100) -> list[dict]:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
                 f"{self.base_url}/hiring/drivers-nearby/",
