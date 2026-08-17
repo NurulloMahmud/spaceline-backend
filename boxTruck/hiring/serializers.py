@@ -346,7 +346,7 @@ class DriverListSerializer(serializers.ModelSerializer):
             'email',
             'phone_number',
             'hired_date',
-            'created_at'
+            'created_at',
             'status',
             'manager',
             'docs_count'
