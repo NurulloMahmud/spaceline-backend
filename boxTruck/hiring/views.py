@@ -320,7 +320,7 @@ class DriverListView(generics.ListAPIView):
             qs = qs.filter(status_id=status_id)
         if search:
             qs = qs.filter(full_name__icontains=search)
-        return qs.select_related('company', 'status', 'manager')
+        return qs.select_related('company', 'status', 'manager').order_by('full_name')
 
 
 class DriverCompanyModalView(views.APIView):
