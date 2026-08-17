@@ -72,13 +72,27 @@ class RateconCheckOut(BaseModel):
     created_at: datetime
 
 
+class DriverInfoOut(BaseModel):
+    id: int
+    full_name: Optional[str] = None
+
+
+class DispatcherInfoOut(BaseModel):
+    id: int
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+
+
 class NegotiationOut(BaseModel):
     id: str
     company_id: int
     load_uuid: str
     driver_id: Optional[int]
+    driver: Optional[DriverInfoOut] = None
     driver_amount: Optional[float]
     dispatcher_user_id: Optional[int]
+    dispatcher: Optional[DispatcherInfoOut] = None
     bid_amount: float
     agreed_amount: Optional[float]
     broker_email: str
@@ -106,14 +120,16 @@ class Page(BaseModel):
     total: int
 
 
-def negotiation_to_out(n, pending: int = 0) -> dict:
+def negotiation_to_out(n, pending: int = 0, driver: Optional[dict] = None, dispatcher: Optional[dict] = None) -> dict:
     return {
         "id": str(n.id),
         "company_id": n.company_id,
         "load_uuid": n.load_uuid,
         "driver_id": n.driver_id,
+        "driver": driver,
         "driver_amount": n.driver_amount,
         "dispatcher_user_id": n.dispatcher_user_id,
+        "dispatcher": dispatcher,
         "bid_amount": n.bid_amount,
         "agreed_amount": n.agreed_amount,
         "broker_email": n.broker_email,

@@ -54,6 +54,36 @@ class BoxTruckService:
                 return None
             return resp.json()
 
+    async def get_drivers_bulk(self, ids: list[int]) -> dict[int, dict]:
+        """Batched driver lookup — one call for every distinct driver_id in a list response."""
+        if not ids:
+            return {}
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/hiring/drivers-bulk/",
+                params={"ids": ",".join(str(i) for i in ids)},
+                headers=self.headers,
+            )
+            if resp.status_code != 200:
+                logger.error(f"get_drivers_bulk -> {resp.status_code}")
+                return {}
+            return {d["id"]: d for d in resp.json()}
+
+    async def get_dispatchers_bulk(self, ids: list[int]) -> dict[int, dict]:
+        """Batched dispatcher lookup — one call for every distinct dispatcher_user_id in a list response."""
+        if not ids:
+            return {}
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/users/users-bulk/",
+                params={"ids": ",".join(str(i) for i in ids)},
+                headers=self.headers,
+            )
+            if resp.status_code != 200:
+                logger.error(f"get_dispatchers_bulk -> {resp.status_code}")
+                return {}
+            return {u["id"]: u for u in resp.json()}
+
     async def resolve_broker(
         self, name: str = "", mc: str = "", email: str = ""
     ) -> Optional[dict]:

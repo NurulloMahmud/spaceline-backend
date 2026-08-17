@@ -12,6 +12,7 @@ from services import negotiations as service
 from config.settings import config
 from services import maintenance
 from services.auth import Principal, current_user, require_internal, scoped_company
+from services.boxtruck import boxtruck
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ async def create_negotiation(
 
 
 @router.get("")
-def list_negotiations(
+async def list_negotiations(
     status: str = Query(default=""),
     mine: Optional[bool] = Query(
         default=None,
@@ -131,8 +132,21 @@ def list_negotiations(
     )
     pending = _pending_counts(session, [r.id for r in rows])
 
+    driver_ids = list({r.driver_id for r in rows if r.driver_id is not None})
+    dispatcher_ids = list({r.dispatcher_user_id for r in rows if r.dispatcher_user_id is not None})
+    drivers = await boxtruck.get_drivers_bulk(driver_ids)
+    dispatchers = await boxtruck.get_dispatchers_bulk(dispatcher_ids)
+
     return {
-        "items": [schemas.negotiation_to_out(r, pending.get(r.id, 0)) for r in rows],
+        "items": [
+            schemas.negotiation_to_out(
+                r,
+                pending.get(r.id, 0),
+                driver=drivers.get(r.driver_id),
+                dispatcher=dispatchers.get(r.dispatcher_user_id),
+            )
+            for r in rows
+        ],
         "page": page,
         "limit": limit,
         "total": total,
@@ -140,7 +154,7 @@ def list_negotiations(
 
 
 @router.get("/{negotiation_id}")
-def get_negotiation(
+async def get_negotiation(
     negotiation_id: str,
     company_id: int = Depends(scoped_company),
     session: Session = Depends(session_dependency),
@@ -157,7 +171,18 @@ def get_negotiation(
         raise HTTPException(404, detail={"error": "Negotiation not found", "code": "not_found"})
 
     pending = sum(1 for s in negotiation.suggestions if s.status == models.PENDING)
-    data = schemas.negotiation_to_out(negotiation, pending)
+    driver_ids = [negotiation.driver_id] if negotiation.driver_id is not None else []
+    dispatcher_ids = (
+        [negotiation.dispatcher_user_id] if negotiation.dispatcher_user_id is not None else []
+    )
+    drivers = await boxtruck.get_drivers_bulk(driver_ids)
+    dispatchers = await boxtruck.get_dispatchers_bulk(dispatcher_ids)
+    data = schemas.negotiation_to_out(
+        negotiation,
+        pending,
+        driver=drivers.get(negotiation.driver_id),
+        dispatcher=dispatchers.get(negotiation.dispatcher_user_id),
+    )
     data["load_snapshot"] = negotiation.load_snapshot or {}
     data["messages"] = [schemas.message_to_out(m) for m in negotiation.messages]
     # A suggestion that was sent is the same email as the outbound message
