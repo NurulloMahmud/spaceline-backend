@@ -438,6 +438,8 @@ class DriverBulkCreateInviteView(views.APIView):
         serializer = DriverBulkCreateSerializer(data=data)
         if serializer.is_valid():
             driver = serializer.save()
+            invite.is_active = False
+            invite.save(update_fields=['is_active'])
             return Response({'detail': 'Driver created.', 'driver_id': driver.id}, status=201)
         return Response(serializer.errors, status=400)
 
@@ -512,6 +514,11 @@ class DriverInviteSubmitView(views.APIView):
         if not full_name or not company_name:
             return Response(
                 {'detail': 'driver_full_name and company_name are required.'}, status=400
+            )
+
+        if phone_number and Driver.objects.filter(phone_number=phone_number).exists():
+            return Response(
+                {'detail': 'A driver with this phone number already exists.'}, status=400
             )
 
         pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
@@ -599,12 +606,12 @@ class DriverInviteSubmitView(views.APIView):
                 'contractor_address': contractor_address,
                 'contractor_email': data.get('company_email') or '',
             }).getvalue()
-
             w9_file = DriverFile(driver=driver, name='W-9 (Generated)')
             w9_file.document.save(f'w9_{driver.id}.pdf', ContentFile(w9_bytes), save=True)
-
             contract_file = DriverFile(driver=driver, name='Contractor Agreement (Generated)')
             contract_file.document.save(f'contract_{driver.id}.pdf', ContentFile(contract_bytes), save=True)
+            invite.is_active = False
+            invite.save(update_fields=['is_active'])
 
         return Response({
             'detail': 'Driver created.',

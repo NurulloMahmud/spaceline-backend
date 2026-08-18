@@ -42,6 +42,16 @@ class DriverWriteSerializer(serializers.ModelSerializer):
         model = Driver
         fields = '__all__'
 
+    def validate_phone_number(self, value):
+        if not value:
+            return value
+        qs = Driver.objects.filter(phone_number=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError('A driver with this phone number already exists.')
+        return value
+
 
 class DriverViewSerializer(serializers.ModelSerializer):
     company = CompanySerializer()
@@ -421,6 +431,13 @@ class DriverBulkCreateSerializer(serializers.Serializer):
     ssn = serializers.CharField(required=False, allow_blank=True)
     status = serializers.PrimaryKeyRelatedField(queryset=DriverStatus.objects.all())
     company = serializers.PrimaryKeyRelatedField(queryset=Company.objects.all())
+
+    def validate_phone_number(self, value):
+        if not value:
+            return value
+        if Driver.objects.filter(phone_number=value).exists():
+            raise serializers.ValidationError('A driver with this phone number already exists.')
+        return value
     phone_number = serializers.CharField(required=False, allow_blank=True)
     emergency_phone_number = serializers.CharField(required=False, allow_blank=True)
     medical_exp_date = serializers.DateField(required=False, allow_null=True)
