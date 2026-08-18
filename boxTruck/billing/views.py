@@ -60,12 +60,6 @@ class BrokerListView(generics.ListAPIView):
 
 
 class BrokerStarViewSet(viewsets.ModelViewSet):
-    """
-    A company's own ratings of brokers. Reads are scoped to the requesting
-    user's company — one company never sees another's scores or comments on
-    the same broker. Only the dispatcher who left a rating can edit or
-    delete it; management/billing/payroll/hiring see and moderate everything.
-    """
     serializer_class = BrokerStarSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = CustomPagination
