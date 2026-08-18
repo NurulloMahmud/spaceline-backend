@@ -395,8 +395,8 @@ class DriverBulkCreateHRView(views.APIView):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request):
-        if request.user.department.name.lower() not in ['management', 'payroll', 'billing', 'hiring']:
-            return Response({'detail': 'Not allowed.'}, status=403)
+        # if request.user.department.name.lower() not in ['management', 'payroll', 'billing', 'hiring']:
+        #     return Response({'detail': 'Not allowed.'}, status=403)
 
         data = request.data.copy()
         pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
