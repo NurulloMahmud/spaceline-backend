@@ -2,17 +2,40 @@ from rest_framework import serializers
 from django.db import transaction
 
 from payroll.models import StatementLoad
-from .models import (Broker,
+from .models import (Broker, BrokerStar,
                      LoadStatus, Load, LoadHistory, LoadFile, LoadStop,
                      Batch, BatchLoad, PaymentType, Tag, LoadTag
                      )
 
 
 class BrokersSerializer(serializers.ModelSerializer):
-    
+
     class Meta:
         model = Broker
         fields = '__all__'
+
+
+class BrokerStarSerializer(serializers.ModelSerializer):
+    company_name = serializers.CharField(source='company.name', read_only=True)
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BrokerStar
+        fields = [
+            'id', 'broker', 'company', 'company_name', 'user', 'user_name',
+            'stars', 'comment', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['company', 'user', 'created_at', 'updated_at']
+
+    def get_user_name(self, obj):
+        if not obj.user:
+            return None
+        return f"{obj.user.first_name} {obj.user.last_name}".strip() or obj.user.username
+
+    def validate_stars(self, value):
+        if not (1 <= value <= 5):
+            raise serializers.ValidationError('stars must be between 1 and 5.')
+        return value
 
 
 class BrokersUseSerializer(serializers.ModelSerializer):

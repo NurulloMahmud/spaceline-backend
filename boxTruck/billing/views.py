@@ -3,10 +3,11 @@ from django.conf import settings
 from rest_framework import generics, viewsets, status, views
 from rest_framework.response import Response
 from django.utils.dateparse import parse_date
-from django.db.models import F, Value, DecimalField, ExpressionWrapper, Q, Count
+from django.db.models import F, Value, DecimalField, ExpressionWrapper, Q, Count, Avg
 from django.db.models.functions import Coalesce
 from django.db import transaction
-from rest_framework.exceptions import ValidationError
+from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError, PermissionDenied
 import pandas as pd
 from datetime import date, datetime, time
 from django.db.models import Count, Sum, Q
@@ -17,15 +18,15 @@ from rest_framework.permissions import IsAuthenticated
 from users.serializers import UserListSerializer
 from django.db.models import Q
 from users.models import CustomUser
-from .models import (Broker, LoadStatus, Load, LoadHistory, LoadFile, LoadStop, 
+from .models import (Broker, BrokerStar, LoadStatus, Load, LoadHistory, LoadFile, LoadStop,
                      Batch, BatchLoad, PaymentType, Tag, LoadTag
                      )
-from .serializers import (BrokersSerializer, BatchUseSerializer,
-                          LoadStopViewSerializer, LoadStatusesSerializer, 
+from .serializers import (BrokersSerializer, BrokerStarSerializer, BatchUseSerializer,
+                          LoadStopViewSerializer, LoadStatusesSerializer,
                           LoadsViewSerializer, LoadByDriverSerializer,
                           LoadUseSerializer, LoadStopWriteSerializer, BatchMultipleLoadSerializer,
-                          LoadsWriteSerializer, LoadHistoryViewSerializer, 
-                          LoadFilesViewSerializer, LoadFilesWriteSerializer, 
+                          LoadsWriteSerializer, LoadHistoryViewSerializer,
+                          LoadFilesViewSerializer, LoadFilesWriteSerializer,
                           BrokersUseSerializer, PaymentTypeSerializer, LoadTagWriteSerializer, LoadTagViewSerializer,
                           BatchViewSerializer, BatchWriteSerializer, BatchLoadViewSerializer, BatchLoadWriteSerializer, TagSerializer,
                           )
@@ -56,6 +57,60 @@ class BrokersViewSet(viewsets.ModelViewSet):
 class BrokerListView(generics.ListAPIView):
     queryset = Broker.objects.all()
     serializer_class = BrokersUseSerializer
+
+
+class BrokerStarViewSet(viewsets.ModelViewSet):
+    """
+    A company's own ratings of brokers. Reads are scoped to the requesting
+    user's company — one company never sees another's scores or comments on
+    the same broker. Only the dispatcher who left a rating can edit or
+    delete it; management/billing/payroll/hiring see and moderate everything.
+    """
+    serializer_class = BrokerStarSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = CustomPagination
+    filter_backends = [DjangoFilterBackend, OrderingFilter]
+    filterset_fields = ['broker']
+
+    def _is_privileged(self):
+        return self.request.user.department.name.lower() in [
+            'management', 'billing', 'payroll', 'hiring',
+        ]
+
+    def get_queryset(self):
+        qs = BrokerStar.objects.select_related('company', 'user', 'broker')
+        if self._is_privileged():
+            return qs
+        return qs.filter(company=self.request.user.company)
+
+    def perform_create(self, serializer):
+        serializer.save(company=self.request.user.company, user=self.request.user)
+
+    def _check_owner(self, instance):
+        if not self._is_privileged() and instance.user_id != self.request.user.id:
+            raise PermissionDenied('You can only edit or delete your own rating.')
+
+    def perform_update(self, serializer):
+        self._check_owner(serializer.instance)
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        self._check_owner(instance)
+        instance.delete()
+
+    @action(detail=False, methods=['get'])
+    def average(self, request):
+        broker_id = request.query_params.get('broker')
+        if not broker_id:
+            return Response({'detail': 'broker query param is required.'}, status=400)
+
+        qs = self.get_queryset().filter(broker_id=broker_id)
+        result = qs.aggregate(average=Avg('stars'), count=Count('id'))
+        return Response({
+            'broker': int(broker_id),
+            'average': round(result['average'], 2) if result['average'] is not None else None,
+            'count': result['count'],
+        })
 
 
 class LoadsViewSet(viewsets.ModelViewSet):
