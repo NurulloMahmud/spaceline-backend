@@ -390,6 +390,92 @@ class GenerateInviteLinkView(views.APIView):
         return Response({'link': link}, status=201)
 
 
+SIGN_FILE_NAMES = ('W-9 (Generated)', 'Contractor Agreement (Generated)')
+
+
+class GenerateDriverSignLinkView(views.APIView):
+    """Staff-facing: mint a one-shot, unauthenticated link for an existing
+    driver to review and sign their W-9 and contractor agreement."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        driver_id = request.data.get('driver_id')
+        if not driver_id:
+            return Response({'detail': 'driver_id is required.'}, status=400)
+
+        driver = get_object_or_404(Driver, id=driver_id)
+
+        invite = DriverInviteLink.objects.create(
+            created_by=request.user,
+            company=driver.company,
+            driver=driver,
+            expires_at=timezone.now() + timedelta(days=7),
+        )
+        link = f"https://spaceline.boxtruckmanage.com/driver-sign/?token={invite.token}"
+        return Response({'link': link}, status=201)
+
+
+class DriverSignInfoView(views.APIView):
+    """Public, token-based. Curated driver/vehicle/company info plus the
+    W-9 and contract files, for the signing page — deliberately excludes
+    SSN and banking (Deposit) fields since this endpoint carries no auth."""
+    permission_classes = []
+
+    def get(self, request):
+        token = request.query_params.get('token')
+        if not token:
+            return Response({'detail': 'Token is required.'}, status=400)
+
+        try:
+            invite = DriverInviteLink.objects.select_related('driver').get(token=token)
+        except DriverInviteLink.DoesNotExist:
+            return Response({'detail': 'Invalid token.'}, status=400)
+
+        if not invite.is_valid():
+            return Response({'detail': 'Link has expired or is inactive.'}, status=400)
+
+        driver = invite.driver
+        if not driver:
+            return Response({'detail': 'This link is not a document-signing link.'}, status=400)
+
+        vehicle = driver.vehicles.first()
+        driver_company = DriverCompany.objects.filter(driver=driver).first()
+        sign_files = DriverFile.objects.filter(driver=driver, name__in=SIGN_FILE_NAMES)
+
+        return Response({
+            'driver': {
+                'id': driver.id,
+                'full_name': driver.full_name,
+                'phone_number': driver.phone_number,
+                'email': driver.email,
+                'address': driver.address,
+                'unit_number': driver.unit_number,
+                'city': driver.city,
+                'state': driver.state,
+                'zip_code': driver.zip_code,
+            },
+            'vehicle': {
+                'id': vehicle.id,
+                'vehicle_type': vehicle.vehicle_type,
+                'make': vehicle.make,
+                'model': vehicle.model,
+                'year': vehicle.year,
+            } if vehicle else None,
+            'company': {
+                'name': driver_company.name,
+                'mc': driver_company.mc,
+                'address': driver_company.address,
+                'city': driver_company.city,
+                'state': driver_company.state,
+                'zipcode': driver_company.zipcode,
+            } if driver_company else None,
+            'files': [
+                {'id': f.id, 'name': f.name, 'url': f.document.url}
+                for f in sign_files
+            ],
+        })
+
+
 class DriverBulkCreateHRView(views.APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
@@ -635,6 +721,9 @@ class DriverInviteDocumentUploadView(views.APIView):
         except DriverInviteLink.DoesNotExist:
             return Response({'detail': 'Invalid token.'}, status=400)
 
+        if not invite.is_valid():
+            return Response({'detail': 'Link has expired or is inactive.'}, status=400)
+
         driver_id = request.data.get('driver_id')
         driver = get_object_or_404(Driver, id=driver_id, company=invite.company)
         files = request.FILES.getlist('files')
@@ -646,6 +735,9 @@ class DriverInviteDocumentUploadView(views.APIView):
             DriverFile(driver=driver, name=name, document=file)
             for file, name in zip(files, names)
         ])
+
+        invite.is_active = False
+        invite.save(update_fields=['is_active'])
 
         return Response({
             'detail': 'Documents uploaded.',

@@ -223,6 +223,10 @@ class DriverInviteLink(models.Model):
         CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='managed_invite_links',
     )
+    driver = models.ForeignKey(
+        Driver, on_delete=models.CASCADE, null=True, blank=True,
+        related_name='sign_links',
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(null=True, blank=True)
