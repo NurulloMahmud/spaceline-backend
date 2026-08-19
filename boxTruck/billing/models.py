@@ -5,12 +5,14 @@ from users.models import Company, CustomUser
 # Create your models here.
 class Broker(models.Model):
     name = models.CharField(max_length=100)
-    mc = models.CharField(max_length=100, unique=True)
+    mc = models.CharField(max_length=100, null=True, blank=True)
     address = models.CharField(max_length=200, null=True, blank=True)
     city = models.CharField(max_length=100, null=True, blank=True)
     state = models.CharField(max_length=100, null=True, blank=True)
     zipcode = models.CharField(max_length=100, null=True, blank=True)
     phone_number = models.CharField(max_length=100, null=True, blank=True)
+    star = models.IntegerField(default=0)
+    comment = models.TextField(null=True, blank=True)
     email = models.EmailField(null=True, blank=True)
     billing_email = models.EmailField(null=True, blank=True)
     ai_type = models.CharField(max_length=100, default='GPT')
@@ -25,24 +27,6 @@ class Broker(models.Model):
         db_table = 'brokers'
         verbose_name = 'Broker'
         verbose_name_plural = 'Brokers'
-
-
-class BrokerStar(models.Model):
-    broker = models.ForeignKey(Broker, on_delete=models.CASCADE, related_name='stars')
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='broker_stars')
-    user = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='broker_stars')
-    stars = models.PositiveSmallIntegerField()
-    comment = models.TextField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return f"{self.company} -> {self.broker} ({self.stars}★)"
-
-    class Meta:
-        db_table = 'broker_stars'
-        verbose_name = 'Broker Star'
-        verbose_name_plural = 'Broker Stars'
 
 
 class LoadStatus(models.Model):

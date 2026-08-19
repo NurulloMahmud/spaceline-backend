@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.db import transaction
 
 from payroll.models import StatementLoad
-from .models import (Broker, BrokerStar,
+from .models import (Broker,
                      LoadStatus, Load, LoadHistory, LoadFile, LoadStop,
                      Batch, BatchLoad, PaymentType, Tag, LoadTag
                      )
@@ -14,28 +14,23 @@ class BrokersSerializer(serializers.ModelSerializer):
         model = Broker
         fields = '__all__'
 
-
-class BrokerStarSerializer(serializers.ModelSerializer):
-    company_name = serializers.CharField(source='company.name', read_only=True)
-    user_name = serializers.SerializerMethodField()
-
-    class Meta:
-        model = BrokerStar
-        fields = [
-            'id', 'broker', 'company', 'company_name', 'user', 'user_name',
-            'stars', 'comment', 'created_at', 'updated_at',
-        ]
-        read_only_fields = ['company', 'user', 'created_at', 'updated_at']
-
-    def get_user_name(self, obj):
-        if not obj.user:
-            return None
-        return f"{obj.user.first_name} {obj.user.last_name}".strip() or obj.user.username
-
-    def validate_stars(self, value):
-        if not (1 <= value <= 5):
-            raise serializers.ValidationError('stars must be between 1 and 5.')
+    def validate_mc(self, value):
+        if not value:
+            return value
+        qs = Broker.objects.filter(mc=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError('A broker with this MC already exists.')
         return value
+
+    def create(self, validated_data):
+        if not validated_data.get('mc'):
+            name = validated_data.get('name') or ''
+            existing = Broker.objects.filter(name__iexact=name).first()
+            if existing:
+                return existing
+        return super().create(validated_data)
 
 
 class BrokersUseSerializer(serializers.ModelSerializer):

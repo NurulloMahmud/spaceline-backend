@@ -1,6 +1,6 @@
 from django.urls import path
 from rest_framework.routers import SimpleRouter
-from .views import (BrokersViewSet, BrokerStarViewSet, LoadStopsViewSet,
+from .views import (BrokersViewSet, LoadStopsViewSet,
                     LoadsViewSet, LoadStatusesViewSet, BatchListView, PaymentTypeViewSet, BestProfitLoadsAPIView,
                     LoadFilesAPIView, LoadHistoryByIdAPIView, BrokerListView, LoadsCountByProcessView, RateConfirmationUploadView,
                     BatchViewSet, BatchLoadViewSet, BatchLoadDropDown, MultipleBatchLoadCreateView, LoadByDriverForStatementView, BatchLoadByIDListAPIView,
@@ -11,7 +11,6 @@ from .internal_views import (InternalBookLoadView, InternalBrokerResolveView, In
 
 router = SimpleRouter()
 router.register(r'brokers', BrokersViewSet, basename="brokers") #checked
-router.register(r'broker-stars', BrokerStarViewSet, basename="broker-stars")
 router.register(r'loads', LoadsViewSet, basename="loads") #checked
 router.register(r'load-statuses', LoadStatusesViewSet, basename="load-statuses") #checked
 router.register(r'load-stops', LoadStopsViewSet, basename="load-stops") #checked
