@@ -32,7 +32,7 @@ from .serializers import (BrokersSerializer, BatchUseSerializer,
                           )
 from users.permissions import IsAdminUser, IsBilling, IsDispatch, IsDispatchManager, IsUpdater, IsPayroll
 from hiring.views import CustomPagination
-from .utils import debounce_recalculate_miles
+from .utils import broker_missing_info, debounce_recalculate_miles
 import logging
 
 logger = logging.getLogger(__name__)
@@ -601,6 +601,10 @@ class BatchLoadViewSet(viewsets.ModelViewSet):
         return BatchLoadViewSerializer
 
     def perform_create(self, serializer):
+        load = serializer.validated_data.get('load')
+        reason = broker_missing_info(load) if load else 'load has no broker assigned'
+        if reason:
+            raise ValidationError({'load': f'Cannot add this load to a batch: {reason}.'})
         serializer.save(created_by=self.request.user, status='In Review')
 
     def perform_update(self, serializer):
@@ -642,10 +646,27 @@ class MultipleBatchLoadCreateView(generics.CreateAPIView):
         except Batch.DoesNotExist:
             return Response({'error': 'Batch not found.'}, status=status.HTTP_404_NOT_FOUND)
         already_assigned_loads = BatchLoad.objects.filter(load_id__in=load_ids).values_list('load_id', flat=True)
-        valid_load_ids = set(load_ids) - set(already_assigned_loads)
-        if not valid_load_ids:
+        remaining_ids = set(load_ids) - set(already_assigned_loads)
+        if not remaining_ids:
             return Response({'error': 'All selected loads are already assigned to batches.'}, status=status.HTTP_400_BAD_REQUEST)
-        loads = Load.objects.filter(id__in=valid_load_ids)
+
+        candidate_loads = Load.objects.filter(id__in=remaining_ids).select_related('broker')
+        skipped_missing_broker_info = []
+        loads = []
+        for load in candidate_loads:
+            reason = broker_missing_info(load)
+            if reason:
+                skipped_missing_broker_info.append({'load': load.id, 'reason': reason})
+            else:
+                loads.append(load)
+
+        if not loads:
+            return Response({
+                'error': 'No loads could be added to the batch.',
+                'skipped_loads': list(already_assigned_loads),
+                'skipped_missing_broker_info': skipped_missing_broker_info,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         batch_loads = [
             BatchLoad(
                 batch=batch,
@@ -655,10 +676,12 @@ class MultipleBatchLoadCreateView(generics.CreateAPIView):
             ) for load in loads
         ]
         BatchLoad.objects.bulk_create(batch_loads)
+        valid_load_ids = [load.id for load in loads]
         async_generate_invoices(batch_id, valid_load_ids, request.user.id)
         return Response({
             'message': f'{len(batch_loads)} BatchLoad records created successfully.',
-            'skipped_loads': list(already_assigned_loads)
+            'skipped_loads': list(already_assigned_loads),
+            'skipped_missing_broker_info': skipped_missing_broker_info,
         }, status=status.HTTP_201_CREATED)
 
 
