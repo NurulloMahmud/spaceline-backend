@@ -1,5 +1,8 @@
+from django.core.files.base import ContentFile
+from django.utils import timezone
 from rest_framework import serializers
 
+from .pdf_generation import fill_w9, generate_contract
 from users.models import Company, CustomUser
 from .models import (Driver, DriverHistory, DriverStatus, Vehicle, VehicleEquipment,
                      DriverCompany, DriverFile, CompanyFile, VehicleFile,
@@ -529,6 +532,11 @@ class DriverBulkCreateSerializer(serializers.Serializer):
         if len(vehicle_files) != len(vehicle_file_names):
             raise serializers.ValidationError('vehicle_files and vehicle_file_names must have the same count.')
 
+        company = attrs.get('company')
+        if company and not company.contract_template_text:
+            raise serializers.ValidationError(
+                {'company': f"Company '{company.name}' has no contract_template_text configured."}
+            )
         return attrs
 
     def create(self, validated_data):
@@ -557,6 +565,37 @@ class DriverBulkCreateSerializer(serializers.Serializer):
             driver_company = DriverCompany.objects.create(driver=driver, **company_data)
             vehicle = Vehicle.objects.create(driver=driver, **vehicle_data)
             Deposit.objects.create(driver=driver, **deposit_data)
+            contractor_address = ', '.join(
+                part for part in [
+                    company_data.get('address'), company_data.get('city'),
+                    company_data.get('state'), company_data.get('zipcode'),
+                ] if part
+            )
+            w9_bytes = fill_w9({
+                'company_name': company_data.get('name') or '',
+                'company_doing_business': company_data.get('business_as') or '',
+                'company_address': company_data.get('address') or '',
+                'company_city': company_data.get('city') or '',
+                'company_state': company_data.get('state') or '',
+                'company_zip': company_data.get('zipcode') or '',
+                'company_employer_id': company_data.get('employer_id') or '',
+                'company_type': company_data.get('business_type') or '',
+                'payee_code': driver.payee_code,
+                'fatca_reporting_code': driver.fatca_reporting_code,
+            }).getvalue()
+            today = timezone.now()
+            contract_bytes = generate_contract(driver.company, {
+                'effective_day': today.strftime('%d'),
+                'effective_month': today.strftime('%B'),
+                'effective_year': today.strftime('%y'),
+                'contractor_name': company_data.get('name') or '',
+                'contractor_address': contractor_address,
+                'contractor_email': driver.email or '',
+            }).getvalue()
+            w9_file = DriverFile(driver=driver, name='W-9 (Generated)')
+            w9_file.document.save(f'w9_{driver.id}.pdf', ContentFile(w9_bytes), save=True)
+            contract_file = DriverFile(driver=driver, name='Contractor Agreement (Generated)')
+            contract_file.document.save(f'contract_{driver.id}.pdf', ContentFile(contract_bytes), save=True)
             DriverFile.objects.bulk_create([
                 DriverFile(driver=driver, name=name, document=file)
                 for file, name in zip(driver_files, driver_file_names)
