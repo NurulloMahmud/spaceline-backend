@@ -130,6 +130,19 @@ class InternalBrokerResolveView(views.APIView):
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
+class InternalBrokersBulkView(views.APIView):
+    """
+    Full broker list for the atrek Go service's in-memory cache, polled
+    every 30s. Deliberately unpaginated — the caller wants the whole table
+    in one response, not a page at a time.
+    """
+    permission_classes = [IsInternalService]
+
+    def get(self, request):
+        brokers = Broker.objects.values('id', 'name', 'star', 'comment')
+        return Response(list(brokers))
+
+
 class InternalRateConParseView(views.APIView):
     """
     Same parsing the dispatcher-facing rate-con-upload view performs, reachable

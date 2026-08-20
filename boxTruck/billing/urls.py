@@ -6,7 +6,7 @@ from .views import (BrokersViewSet, LoadStopsViewSet,
                     BatchViewSet, BatchLoadViewSet, BatchLoadDropDown, MultipleBatchLoadCreateView, LoadByDriverForStatementView, BatchLoadByIDListAPIView,
                     GenerateCSVView, DailyReportByDispatchersAPIView, LoadsPaySummaryAPIView, BrokerImportAPIView, TagViewSet, LoadTagViewSet
                     )
-from .internal_views import (InternalBookLoadView, InternalBrokerResolveView, InternalBusyDriversView,
+from .internal_views import (InternalBookLoadView, InternalBrokerResolveView, InternalBrokersBulkView, InternalBusyDriversView,
                              InternalCompanyProfileView, InternalDispatcherView, InternalRateConParseView)
 
 router = SimpleRouter()
@@ -42,6 +42,7 @@ urlpattern = ([
     path('internal/company/<int:company_id>/', InternalCompanyProfileView.as_view(), name='internal-company'),
     path('internal/dispatcher/<int:user_id>/', InternalDispatcherView.as_view(), name='internal-dispatcher'),
     path('internal/brokers/resolve/', InternalBrokerResolveView.as_view(), name='internal-broker-resolve'),
+    path('internal/brokers-bulk/', InternalBrokersBulkView.as_view(), name='internal-brokers-bulk'),
     path('internal/parse-ratecon/', InternalRateConParseView.as_view(), name='internal-parse-ratecon'),
     path('internal/book-load/', InternalBookLoadView.as_view(), name='internal-book-load'),
     path('internal/busy-drivers/', InternalBusyDriversView.as_view(), name='internal-busy-drivers'),
