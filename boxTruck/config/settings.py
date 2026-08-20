@@ -309,3 +309,9 @@ DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', 'noreply@boxmanage.smartfleetl
 
 # assistant
 INTERNAL_SERVICE_SECRET = config('INTERNAL_SERVICE_SECRET')
+
+# atrek (Go loads/bids service) — for the handful of calls boxTruck makes
+# outbound to it, e.g. telling its broker cache to refresh immediately
+# after a broker is created/updated here, instead of it finding out on its
+# own next 30s poll.
+ATREK_BASE_URL = config('ATREK_BASE_URL', default='https://spaceline.boxtruckmanage.com/api/v1')

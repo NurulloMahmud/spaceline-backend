@@ -1,4 +1,5 @@
 import boto3
+import requests
 from django.conf import settings
 from rest_framework import generics, viewsets, status, views
 from rest_framework.response import Response
@@ -38,6 +39,22 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def notify_atrek_broker_cache_refresh():
+    """
+    Tell atrek's in-memory broker cache to refill right now. Best-effort — a
+    broker save must never fail just because atrek is briefly unreachable —
+    worst case, it self-corrects on its own next 30s poll anyway.
+    """
+    try:
+        requests.post(
+            f"{settings.ATREK_BASE_URL}/brokers/refresh-cache",
+            headers={'X-Internal-Secret': settings.INTERNAL_SERVICE_SECRET},
+            timeout=3,
+        )
+    except requests.RequestException as e:
+        logger.warning(f"could not notify atrek to refresh its broker cache: {e}")
+
+
 class BrokersViewSet(viewsets.ModelViewSet):
     queryset = Broker.objects.all()
     serializer_class = BrokersSerializer
@@ -52,6 +69,14 @@ class BrokersViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated]
         return [permission() for permission in permission_classes]
+
+    def perform_create(self, serializer):
+        serializer.save()
+        notify_atrek_broker_cache_refresh()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        notify_atrek_broker_cache_refresh()
 
 
 class BrokerListView(generics.ListAPIView):
