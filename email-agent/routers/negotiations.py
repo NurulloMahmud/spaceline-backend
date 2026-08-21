@@ -11,6 +11,7 @@ from routers import schemas
 from services import negotiations as service
 from config.settings import config
 from services import maintenance
+from services import suggestions as suggestion_service
 from services.auth import Principal, current_user, require_internal, scoped_company
 from services.boxtruck import boxtruck
 
@@ -185,16 +186,23 @@ async def get_negotiation(
     )
     data["load_snapshot"] = negotiation.load_snapshot or {}
     data["messages"] = [schemas.message_to_out(m) for m in negotiation.messages]
-    # A suggestion that was sent is the same email as the outbound message
-    # already in `messages`, so returning it too made the dispatcher's own
-    # action read as a second event in the conversation. Pending ones need a
-    # decision and ignored ones record that a reply was deliberately not sent,
-    # so both stay. The full history is still on GET /suggestions.
+    # The thread carries only what still says something. A sent draft is the
+    # same email as the outbound message already in `messages`, and a
+    # superseded one is a reply that never went anywhere because the
+    # conversation moved on — showing either turned the thread into a list of
+    # the dispatcher's own past actions. Pending ones need a decision, and
+    # ignored ones record a deliberate choice not to reply, so both stay.
+    # Everything remains available on GET /suggestions.
     data["suggestions"] = [
         schemas.suggestion_to_out(s)
         for s in negotiation.suggestions
-        if s.status not in (models.SENT, models.EDITED_SENT)
+        if s.status not in (models.SENT, models.EDITED_SENT, models.SUPERSEDED)
     ]
+    # Surfaced as a count so the panel can say "3 drafts were closed
+    # automatically" without listing nine of them.
+    data["superseded_suggestions"] = sum(
+        1 for s in negotiation.suggestions if s.status == models.SUPERSEDED
+    )
     data["ratecon_checks"] = [
         schemas.ratecon_check_to_out(c) for c in negotiation.ratecon_checks
     ]
@@ -224,5 +232,8 @@ def close_negotiation(
         )
 
     negotiation.status = models.CLOSED
+    suggestion_service.supersede_pending(
+        session, negotiation.id, suggestion_service.NEGOTIATION_CLOSED
+    )
     session.flush()
     return schemas.negotiation_to_out(negotiation)

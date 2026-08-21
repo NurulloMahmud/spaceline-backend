@@ -16,7 +16,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from database import models
-from services import booking, events
+from services import booking, events, suggestions
 from services.ai import ai
 from services.boxtruck import BoxTruckError, boxtruck
 from services.negotiations import load_summary_text, reply_subject
@@ -293,13 +293,11 @@ async def handle_own_send(
         f"({nylas_message_id})"
     )
 
-    pending = (
-        session.query(models.Suggestion)
-        .filter(
-            models.Suggestion.negotiation_id == negotiation.id,
-            models.Suggestion.status == models.PENDING,
-        )
-        .count()
+    # The dispatcher has answered this broker themselves, so every draft the
+    # agent was still holding for them is moot. Left pending, they piled up in
+    # the panel asking for a decision that had already been made in Gmail.
+    superseded = suggestions.supersede_pending(
+        session, negotiation.id, suggestions.REPLIED_ELSEWHERE
     )
 
     events.publish(
@@ -310,9 +308,8 @@ async def handle_own_send(
         status=negotiation.status,
         message_id=str(stored.id),
         sent_outside_app=True,
-        # A colleague answered from their mail client; any draft still sitting
-        # in the inbox would be a second reply to the same message.
-        pending_suggestions=pending,
+        superseded=superseded,
+        pending_suggestions=0,
     )
 
 
@@ -352,6 +349,12 @@ async def create_reply_suggestion(
             ai_reasoning=draft.get("reasoning"),
             status=models.PENDING,
         )
+
+    # The new draft is written against the whole thread, so anything older is
+    # answering a message this one already accounts for.
+    suggestions.supersede_pending(
+        session, negotiation.id, suggestions.NEWER_DRAFT, keep_id=suggestion.id
+    )
 
     session.add(suggestion)
     session.flush()

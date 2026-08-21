@@ -407,3 +407,46 @@ def test_sent_suggestions_remain_in_the_suggestions_list(
 
     body = client.get("/api/v1/suggestions?status=sent", headers=auth_headers).json()
     assert body["total"] == 1
+
+
+def test_superseded_drafts_leave_the_thread_and_the_badge(
+    client, session, auth_headers, negotiation
+):
+    """
+    The reported problem, seen through the API: drafts the conversation moved
+    past must stop asking for a decision.
+    """
+    from services import suggestions as suggestion_service
+
+    _suggestion(session, negotiation, models.PENDING)
+    _suggestion(session, negotiation, models.PENDING)
+    session.commit()
+
+    before = client.get(f"/api/v1/negotiations/{negotiation.id}", headers=auth_headers).json()
+    assert before["pending_suggestions"] == 2
+    assert len(before["suggestions"]) == 2
+
+    suggestion_service.supersede_pending(
+        session, negotiation.id, suggestion_service.REPLIED_ELSEWHERE)
+    session.commit()
+
+    after = client.get(f"/api/v1/negotiations/{negotiation.id}", headers=auth_headers).json()
+    assert after["pending_suggestions"] == 0
+    assert after["suggestions"] == []
+    assert after["superseded_suggestions"] == 2
+
+
+def test_a_superseded_draft_still_says_why(client, session, auth_headers, negotiation):
+    """The panel should never have to explain itself."""
+    from services import suggestions as suggestion_service
+
+    _suggestion(session, negotiation, models.PENDING)
+    suggestion_service.supersede_pending(
+        session, negotiation.id, suggestion_service.REPLIED_ELSEWHERE)
+    session.commit()
+
+    body = client.get("/api/v1/suggestions?status=superseded", headers=auth_headers).json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["status"] == "superseded"
+    assert "mail client" in item["resolved_reason"]

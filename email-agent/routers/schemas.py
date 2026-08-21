@@ -54,6 +54,9 @@ class SuggestionOut(BaseModel):
     status: str
     final_body: Optional[str]
     resolved_by_user_id: Optional[int]
+    # Set when the system closed the draft rather than a person. Written as a
+    # sentence for a dispatcher to read as-is.
+    resolved_reason: Optional[str]
     created_at: datetime
 
 
@@ -172,6 +175,7 @@ def suggestion_to_out(s) -> dict:
         "status": s.status,
         "final_body": s.final_body,
         "resolved_by_user_id": s.resolved_by_user_id,
+        "resolved_reason": s.resolved_reason,
         "created_at": s.created_at,
     }
 

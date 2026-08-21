@@ -10,7 +10,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from database import models
-from services import events, telegram
+from services import events, suggestions, telegram
 from services.boxtruck import BoxTruckError, boxtruck
 
 logger = logging.getLogger(__name__)
@@ -103,6 +103,8 @@ async def book_verified_load(
 
     negotiation.tms_load_id = result.get("load_id")
     negotiation.status = models.BOOKED
+    # The load is booked; nothing still drafted for this thread needs sending.
+    suggestions.supersede_pending(session, negotiation.id, suggestions.LOAD_BOOKED)
     session.flush()
 
     logger.info(

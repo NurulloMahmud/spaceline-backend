@@ -1,7 +1,7 @@
 import logging
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from config.settings import config
@@ -20,8 +20,21 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 
+# Columns added to tables that already exist. create_all() only creates
+# missing tables, so a new column on a live database needs saying explicitly.
+# Each statement is idempotent, so this is safe on every boot.
+ADDITIVE_COLUMNS = (
+    "ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS resolved_reason TEXT",
+)
+
+
 def init_db() -> None:
     Base.metadata.create_all(engine)
+
+    with engine.begin() as conn:
+        for statement in ADDITIVE_COLUMNS:
+            conn.execute(text(statement))
+
     logger.info("Database schema ready")
 
 

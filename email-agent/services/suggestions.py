@@ -144,6 +144,12 @@ async def send(
 
     if negotiation.status in (models.BID_SENT, models.MISMATCH):
         negotiation.status = models.NEGOTIATING
+
+    # Sending one reply answers the broker; any other draft on this thread was
+    # written for a message we have now responded to.
+    superseded = supersede_pending(
+        session, negotiation.id, REPLIED_IN_APP, keep_id=suggestion.id
+    )
     session.flush()
 
     events.publish(
@@ -154,5 +160,63 @@ async def send(
         suggestion_id=str(suggestion.id),
         suggestion_status=suggestion.status,
         status=negotiation.status,
+        superseded=superseded,
     )
     return suggestion
+
+
+# --- drafts the conversation moved past --------------------------------------
+
+REPLIED_ELSEWHERE = (
+    "Not needed — this conversation was answered from a mail client "
+    "before the draft was sent."
+)
+REPLIED_IN_APP = "Not needed — a different reply was sent on this conversation."
+NEWER_DRAFT = "Not needed — a newer reply was drafted for this conversation."
+ANSWERED_ALREADY = (
+    "Not needed — this conversation was answered after the draft was written."
+)
+NEGOTIATION_CLOSED = "Not needed — the bid was closed before the draft was sent."
+LOAD_BOOKED = "Not needed — the load was booked before the draft was sent."
+
+
+def supersede_pending(
+    session: Session,
+    negotiation_id,
+    reason: str,
+    *,
+    keep_id=None,
+) -> int:
+    """
+    Close every pending draft on a negotiation because it is no longer needed.
+
+    A dispatcher who answers the broker from Gmail never comes back to dismiss
+    the draft the agent wrote, so drafts used to pile up forever and the panel
+    asked for decisions that had already been made somewhere else.
+
+    `reason` is shown to the dispatcher verbatim, so it is written as a
+    sentence rather than a code. `keep_id` spares the draft that is itself
+    being sent.
+    """
+    query = session.query(models.Suggestion).filter(
+        models.Suggestion.negotiation_id == negotiation_id,
+        models.Suggestion.status == models.PENDING,
+    )
+    if keep_id is not None:
+        query = query.filter(models.Suggestion.id != keep_id)
+
+    stale = query.all()
+    if not stale:
+        return 0
+
+    for suggestion in stale:
+        suggestion.status = models.SUPERSEDED
+        suggestion.resolved_reason = reason
+        suggestion.resolved_at = datetime.now(timezone.utc)
+
+    session.flush()
+    logger.info(
+        f"negotiation {negotiation_id}: closed {len(stale)} draft(s) "
+        f"no longer needed — {reason}"
+    )
+    return len(stale)

@@ -39,6 +39,12 @@ PENDING = "pending"
 IGNORED = "ignored"
 SENT = "sent"
 EDITED_SENT = "edited_sent"
+# Closed by the system, not by a person: the conversation moved on and the
+# draft was never needed. Distinct from `ignored`, which is a human decision.
+SUPERSEDED = "superseded"
+
+# Statuses that no longer ask anything of a dispatcher.
+RESOLVED_STATUSES = (IGNORED, SENT, EDITED_SENT, SUPERSEDED)
 
 # suggestion.kind
 KIND_REPLY = "reply"
@@ -172,6 +178,9 @@ class Suggestion(Base):
     final_body = Column(Text, nullable=True)
     resolved_by_user_id = Column(Integer, nullable=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
+    # Plain English, written to be shown to a dispatcher as-is. Set when the
+    # system resolves a draft so the panel never has to explain itself.
+    resolved_reason = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=_now, nullable=False)
 

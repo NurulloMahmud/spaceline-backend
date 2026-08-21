@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from config.settings import config
 from database import models
 from database.connection import get_session
-from services import events
+from services import events, suggestions
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,9 @@ def close_stale_bids(session: Session, now: datetime | None = None) -> list[mode
             f"Closed automatically: the broker did not reply within "
             f"{config.STALE_BID_MINUTES} minutes."
         )
+        suggestions.supersede_pending(
+            session, negotiation.id, suggestions.NEGOTIATION_CLOSED
+        )
         logger.info(
             f"negotiation {negotiation.id}: closed automatically, no broker reply "
             f"in {config.STALE_BID_MINUTES} minutes"
@@ -63,6 +66,42 @@ def close_stale_bids(session: Session, now: datetime | None = None) -> list[mode
     return stale
 
 
+def close_answered_drafts(session: Session) -> int:
+    """
+    Close pending drafts on conversations that have since been replied to.
+
+    The live paths already do this as it happens. This is the safety net that
+    catches anything they missed — a webhook that arrived while the service was
+    down, a reply recorded by a path added later — so the panel converges on
+    "only what still needs a decision" rather than drifting away from it again.
+    """
+    later_reply = (
+        session.query(models.EmailMessage)
+        .filter(
+            models.EmailMessage.negotiation_id == models.Suggestion.negotiation_id,
+            models.EmailMessage.direction == "outbound",
+            models.EmailMessage.created_at > models.Suggestion.created_at,
+        )
+        .exists()
+    )
+
+    stale = (
+        session.query(models.Suggestion)
+        .filter(models.Suggestion.status == models.PENDING, later_reply)
+        .all()
+    )
+
+    for suggestion in stale:
+        suggestion.status = models.SUPERSEDED
+        suggestion.resolved_reason = suggestions.ANSWERED_ALREADY
+        suggestion.resolved_at = datetime.now(timezone.utc)
+
+    if stale:
+        session.flush()
+        logger.info(f"closed {len(stale)} draft(s) already answered on their thread")
+    return len(stale)
+
+
 async def sweep_forever() -> None:
     """Runs for the life of the process. A failed pass never stops the loop."""
     logger.info(
@@ -74,7 +113,8 @@ async def sweep_forever() -> None:
             await asyncio.sleep(config.SWEEP_INTERVAL_SECONDS)
             with get_session() as session:
                 closed = close_stale_bids(session)
-                if closed:
+                answered = close_answered_drafts(session)
+                if closed or answered:
                     session.commit()
         except asyncio.CancelledError:
             logger.info("stale-bid sweeper stopping")
