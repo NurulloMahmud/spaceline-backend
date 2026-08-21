@@ -23,9 +23,9 @@ def safe_send(message):
 def upload_to_rts(batch, pdf_files: List[Tuple[str, BytesIO]], csv_file: BytesIO) -> Tuple[bool, List[str]]:
     failed = []
     batch_name = batch.name.lower()
-    if "shipluxe" in batch_name:
-        client = settings.SHIPLUXE_CLIENT
-        password = settings.SHIPLUXE_PASSWORD
+    if "space" in batch_name:
+        client = settings.SPACELINE_CLIENT
+        password = settings.SPACELINE_PASSWORD
     elif "priority" in batch_name:
         client = settings.PRIORITY_CLIENT
         password = settings.PRIORITY_PASSWORD
@@ -148,8 +148,8 @@ def generate_invoice_pdf(load):
 def generate_rts_csv(batch, loads):
     def get_rts_client(batch_name: str):
         name = batch_name.lower()
-        if "shipluxe" in name:
-            return settings.SHIPLUXE_CLIENT
+        if "space" in name:
+            return settings.SPACELINE_CLIENT
         elif "priority" in name:
             return settings.PRIORITY_CLIENT
         elif "roadpulse logistics" in name:

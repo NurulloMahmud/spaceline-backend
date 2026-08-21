@@ -13,8 +13,8 @@ def get_normalized_carrier_name(name):
     name = name.upper()
     if name.startswith("PRIORITY"):
         return "PRIORITY FREIGHT LLC"
-    elif name.startswith("SHIPLUXE"):
-        return "SHIPLUXE LLC"
+    elif name.startswith("SPACE"):
+        return "SPACE LINE LLC"
     elif name.startswith("ROADPULSE LOGISTICS"):
         return "ROADPULSE LOGISTICS LLC"
     return name
