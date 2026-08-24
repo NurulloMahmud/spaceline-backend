@@ -6,6 +6,7 @@ from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.exceptions import ValidationError
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework import status, viewsets, views, generics, parsers
@@ -39,7 +40,7 @@ class DriverStatusViewSet(viewsets.ModelViewSet):
 
 class DriverViewSet(viewsets.ModelViewSet):
     queryset = Driver.objects.all()
-    permission_classes = [IsAuthenticated | IsInternalService]
+    permission_classes = [IsAuthenticated]
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['status', 'company', 'telegram_group_id', 'team', 'dispatcher']
@@ -50,7 +51,7 @@ class DriverViewSet(viewsets.ModelViewSet):
             return DriverWriteSerializer
         else:
             return DriverViewSerializer
-        
+
     def get_queryset(self):
         if self.request.headers.get('X-Internal-Secret'):
             qs = Driver.objects.all()
@@ -110,6 +111,15 @@ class DriverViewSet(viewsets.ModelViewSet):
                     description=description,
                 )
         return Response(DriverViewSerializer(updated_driver).data)
+
+    def destroy(self, request, *args, **kwargs):
+        from billing.models import Load
+        driver = self.get_object()
+        if Load.objects.filter(driver=driver).exists():
+            raise ValidationError({"detail": "Cannot delete driver: driver has loads on file."})
+        with transaction.atomic():
+            driver.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class DriverDropdownAPIView(generics.ListAPIView):
