@@ -153,6 +153,17 @@ async def create_negotiation(
     dispatcher = await boxtruck.get_dispatcher(dispatcher_user_id)
     driver = await boxtruck.get_driver(driver_id) if driver_id else None
 
+    # DIMENSIONS, MILES OUT and Truck equipment all come from the driver. If
+    # the lookup failed we still send the bid — the price and the load are what
+    # the broker is waiting on — but the email goes out visibly poorer, so say
+    # so plainly rather than leaving three N/As to be noticed by a customer.
+    if driver_id and not driver:
+        logger.error(
+            f"load {load_uuid}: driver {driver_id} could not be read from the TMS, "
+            f"so this bid email will show N/A for dimensions, miles out and "
+            f"equipment. Check that the driver endpoint accepts the internal secret."
+        )
+
     subject = bid_email.build_subject(load_detail)
     body = bid_email.build_html_body(
         bid_amount=bid_amount,
