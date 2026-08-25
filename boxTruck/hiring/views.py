@@ -40,11 +40,6 @@ class DriverStatusViewSet(viewsets.ModelViewSet):
 
 class DriverViewSet(viewsets.ModelViewSet):
     queryset = Driver.objects.all()
-    # The email-agent reads a driver here to fill the truck's dimensions,
-    # equipment and deadhead into the bid email, and the telegram bot looks a
-    # driver up by group id. Dropping IsInternalService silently degraded both:
-    # get_queryset below still branches on X-Internal-Secret, which is what
-    # that branch is for.
     permission_classes = [IsAuthenticated | IsInternalService]
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
