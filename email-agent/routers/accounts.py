@@ -2,8 +2,9 @@
 Connecting a company's shared dispatch mailbox through Nylas hosted auth.
 
 The `state` parameter carries the company id so the callback knows which
-company the returned grant belongs to; it is signed to keep it from being
-forged into a grant on another company's behalf.
+company the returned grant belongs to, and the mailbox we expect back when
+management named one; it is signed to keep either from being forged into a
+grant on another company's behalf.
 """
 import hashlib
 import hmac
@@ -26,22 +27,39 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/accounts", tags=["accounts"])
 
 
-def _sign(company_id: int) -> str:
+def _sign(company_id: int, expected_email: str = "") -> str:
+    """
+    The expected mailbox travels inside the signature rather than as a
+    separate parameter, so it cannot be edited in the address bar between
+    the consent screen and the callback — which would defeat the check it
+    exists to drive.
+    """
+    payload = f"{company_id}.{expected_email}" if expected_email else str(company_id)
     mac = hmac.new(
-        config.INTERNAL_SECRET_KEY.encode(), str(company_id).encode(), hashlib.sha256
+        config.INTERNAL_SECRET_KEY.encode(), payload.encode(), hashlib.sha256
     ).hexdigest()[:32]
-    return f"{company_id}.{mac}"
+    return f"{payload}.{mac}"
 
 
-def _verify(state: str) -> int:
+def _verify(state: str) -> tuple[int, str]:
+    """
+    Returns the company id and the mailbox the grant must match, which is ""
+    when the URL was issued without one. States signed before the expected
+    mailbox existed carry no address and still verify, so a connect already
+    in flight when this deploys completes instead of erroring.
+
+    The mac is taken from the right: an email address contains dots, the
+    company id and the mac do not.
+    """
     try:
-        raw_company, mac = state.split(".", 1)
-        company_id = int(raw_company)
+        payload, mac = state.rsplit(".", 1)
+        company_id = int(payload.split(".", 1)[0])
     except (ValueError, AttributeError):
         raise HTTPException(400, "malformed state")
-    if not hmac.compare_digest(_sign(company_id), state):
+    expected_email = payload.split(".", 1)[1] if "." in payload else ""
+    if not hmac.compare_digest(_sign(company_id, expected_email), state):
         raise HTTPException(400, "state signature mismatch")
-    return company_id
+    return company_id, expected_email
 
 
 def _settings_redirect(status: str, **params) -> RedirectResponse:
@@ -101,7 +119,16 @@ def connect(
     if not config.NYLAS_CLIENT_ID or not config.NYLAS_CALLBACK_URI:
         raise HTTPException(500, "Nylas hosted auth is not configured")
 
-    return {"auth_url": nylas.hosted_auth_url(state=_sign(target))}
+    # Lowercased once here so the hint, the signature and the comparison in
+    # the callback all speak of the same address; providers are free to
+    # return a different casing than the one that was typed.
+    expected_email = (body.email_address or "").strip().lower()
+
+    return {
+        "auth_url": nylas.hosted_auth_url(
+            state=_sign(target, expected_email), login_hint=expected_email
+        )
+    }
 
 
 @router.get("/callback")
@@ -125,7 +152,7 @@ async def callback(
         return _settings_redirect("error", reason="missing_params")
 
     try:
-        company_id = _verify(state)
+        company_id, expected_email = _verify(state)
     except HTTPException as e:
         logger.warning(f"mailbox callback rejected: {e.detail}")
         return _settings_redirect("error", reason="invalid_state")
@@ -142,6 +169,24 @@ async def callback(
         logger.error(f"nylas returned no grant_id for company {company_id}")
         return _settings_redirect("error", reason="no_grant")
 
+    # `login_hint` only preselects an account; the person at the consent
+    # screen can still sign into a different one. Storing that grant would
+    # point a company's dispatch mail at the wrong mailbox — sending its bids
+    # from it and reading a stranger's inbox — so the address that came back
+    # decides, not the one we asked for.
+    if expected_email and (email_address or "").strip().lower() != expected_email:
+        logger.error(
+            f"mailbox mismatch for company {company_id}: authorised "
+            f"{email_address or '<none>'}, expected {expected_email} — grant rejected"
+        )
+        try:
+            await nylas.revoke_grant(grant_id)
+        except NylasError as e:
+            # The grant is already refused; failing to hand it back is worth
+            # knowing about but must not change what the user is told.
+            logger.error(f"could not revoke rejected grant for company {company_id}: {e}")
+        return _settings_redirect("error", reason="wrong_mailbox")
+
     account = (
         session.query(models.EmailAccount)
         .filter(models.EmailAccount.company_id == company_id)
@@ -151,12 +196,15 @@ async def callback(
         account.nylas_grant_id = grant_id
         account.email_address = email_address or account.email_address
         account.status = "active"
+        if expected_email:
+            account.expected_email_address = expected_email
     else:
         session.add(
             models.EmailAccount(
                 company_id=company_id,
                 nylas_grant_id=grant_id,
                 email_address=email_address or "",
+                expected_email_address=expected_email or None,
                 status="active",
             )
         )

@@ -3,9 +3,12 @@ Only management can connect (or reconnect) a company's dispatch mailbox — it
 sends every bid and receives every broker reply for the whole company, so a
 regular dispatcher must not be able to repoint it.
 """
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 
 from config.settings import config
+from routers.accounts import _sign
 from tests.test_auth import make_token
 
 
@@ -82,3 +85,54 @@ def test_reading_connection_status_still_needs_no_special_role(client, nylas_con
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200
+
+
+def test_the_auth_url_carries_the_offline_access_type(client, nylas_configured):
+    """Without it the grant has no refresh token and dies with the first access token."""
+    token = make_token(department="Management")
+    resp = client.post(
+        "/api/v1/accounts/connect",
+        headers={"Authorization": f"Bearer {token}"},
+        json={},
+    )
+    assert "access_type=offline" in resp.json()["auth_url"]
+
+
+def test_naming_a_mailbox_preselects_it_on_the_consent_screen(client, nylas_configured):
+    token = make_token(department="Management")
+    resp = client.post(
+        "/api/v1/accounts/connect",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email_address": "dispatch@shipluxellc.com"},
+    )
+    assert resp.status_code == 200
+    query = parse_qs(urlparse(resp.json()["auth_url"]).query)
+    assert query["login_hint"] == ["dispatch@shipluxellc.com"]
+    # and it rides along in the signed state, so the callback can insist on it
+    assert query["state"] == [_sign(1, "dispatch@shipluxellc.com")]
+
+
+def test_a_mailbox_is_optional(client, nylas_configured):
+    """Omitting it accepts whichever mailbox is authorised, as before."""
+    token = make_token(department="Management")
+    resp = client.post(
+        "/api/v1/accounts/connect",
+        headers={"Authorization": f"Bearer {token}"},
+        json={},
+    )
+    assert "login_hint" not in parse_qs(urlparse(resp.json()["auth_url"]).query)
+
+
+def test_the_named_mailbox_is_normalised_before_it_is_signed(client, nylas_configured):
+    """
+    The provider decides the casing it reports back. Folding both sides once,
+    here, keeps a capitalised entry from failing its own verification later.
+    """
+    token = make_token(department="Management")
+    resp = client.post(
+        "/api/v1/accounts/connect",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email_address": "Dispatch@ShipLuxeLLC.com"},
+    )
+    query = parse_qs(urlparse(resp.json()["auth_url"]).query)
+    assert query["login_hint"] == ["dispatch@shipluxellc.com"]

@@ -67,6 +67,20 @@ a $3,000 ratecon from booking a $3,200 agreement.
 ### Nylas
 
 One grant per company — a shared dispatch mailbox, not per-dispatcher inboxes.
+The grant id and address live on `email_accounts`, keyed by company, so each
+customer's mailbox is its own row; nothing about a connection comes from env.
+
+`POST /api/v1/accounts/connect` builds the hosted-auth URL (management only)
+and takes an optional `email_address`. That address is sent as `login_hint`
+*and* signed into `state`, and the callback refuses a grant for any other
+mailbox — handing the unwanted grant back to Nylas rather than keeping live
+access to an inbox it just rejected. Without it, whichever mailbox is
+authorised is accepted, which is what accounts connected before this existed
+still do (their `expected_email_address` is null).
+
+The authorization code is single-use: a failed exchange redirects with
+`reason=exchange_failed` and the flow has to be restarted from `connect`.
+Retrying the same code cannot succeed, so nothing here retries it.
 
 Broker mail arrives here **directly from Nylas**. This service owns the Nylas
 application (client id `4ee94420-d0d6-46f3-b789-999263f0e18d`, US region); no
