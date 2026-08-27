@@ -26,7 +26,11 @@ Rules you must never break:
 
 class AIService:
     def __init__(self):
-        self.client = OpenAI(api_key=config.OPENAI_API_KEY)
+        self.client = OpenAI(
+            api_key=config.OPENAI_API_KEY,
+            timeout=config.OPENAI_TIMEOUT_SECONDS,
+            max_retries=config.OPENAI_MAX_RETRIES,
+        )
         self.model = config.OPENAI_MODEL
 
     def _json_call(

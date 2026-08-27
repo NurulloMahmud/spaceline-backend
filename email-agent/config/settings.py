@@ -73,6 +73,12 @@ class Config:
     # openai
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+    # A single model request that hangs past this many seconds is abandoned.
+    # The SDK default is 600s; with the client running on the event loop that
+    # is ten minutes of every send, webhook and sweep frozen behind it.
+    OPENAI_TIMEOUT_SECONDS: int = _int("OPENAI_TIMEOUT_SECONDS", 30)
+    # SDK-level retries on top of the two attempts _json_call already makes.
+    OPENAI_MAX_RETRIES: int = _int("OPENAI_MAX_RETRIES", 1)
 
     # telegram — same bot as agent_bot, used to notify driver groups
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")

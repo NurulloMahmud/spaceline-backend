@@ -8,6 +8,7 @@ Every inbound message produces exactly one dispatcher-visible outcome:
 
 Nothing is ever sent to the broker from here.
 """
+import asyncio
 import logging
 import re
 from html import unescape
@@ -188,7 +189,8 @@ async def handle_inbound_message(
         return
 
     history = thread_text(negotiation)
-    classification = ai.classify_inbound(
+    classification = await asyncio.to_thread(
+        ai.classify_inbound,
         thread_text=history,
         message_text=body_text,
         attachments=[a.get("filename") for a in attachments],
@@ -321,7 +323,8 @@ async def create_reply_suggestion(
     history: str,
     body_text: str,
 ) -> Optional[models.Suggestion]:
-    draft = ai.draft_reply(
+    draft = await asyncio.to_thread(
+        ai.draft_reply,
         context=negotiation_context(negotiation),
         thread_text=history,
         message_text=body_text,
@@ -423,12 +426,15 @@ async def handle_ratecon(
 
     # The agreed rate is our bid unless the thread clearly settled on another.
     agreed = negotiation.bid_amount
-    rate_reading = ai.extract_agreed_rate(history, negotiation.bid_amount)
+    rate_reading = await asyncio.to_thread(
+        ai.extract_agreed_rate, history, negotiation.bid_amount
+    )
     if rate_reading and rate_reading.get("confident") and rate_reading.get("agreed_amount") is not None:
         agreed = float(rate_reading["agreed_amount"])
     negotiation.agreed_amount = agreed
 
-    verdict = ai.verify_ratecon(
+    verdict = await asyncio.to_thread(
+        ai.verify_ratecon,
         agreed_amount=agreed,
         load_summary=load_summary_text(negotiation.load_snapshot or {}),
         thread_text=history,
@@ -554,7 +560,8 @@ async def record_mismatch(
         f"negotiation {negotiation.id}: ratecon rejected — {'; '.join(discrepancies)}"
     )
 
-    draft = ai.draft_mismatch_reply(
+    draft = await asyncio.to_thread(
+        ai.draft_mismatch_reply,
         context=negotiation_context(negotiation),
         discrepancies=discrepancies,
     )
