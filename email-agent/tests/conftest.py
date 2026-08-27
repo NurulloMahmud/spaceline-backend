@@ -21,10 +21,15 @@ if not _db_name.endswith("_test"):
 os.environ["DATABASE_URL"] = _TEST_DATABASE_URL
 os.environ.setdefault("JWT_SECRET", "test-signing-key")
 os.environ.setdefault("INTERNAL_SECRET_KEY", "test-internal-secret")
-os.environ.setdefault("NYLAS_WEBHOOK_SECRET", "test-webhook-secret")
-os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
-os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-token")
 os.environ.setdefault("PRICE_TOLERANCE_CENTS", "0")
+
+# Forced, never setdefault: a real .env sits next to this suite, and these are
+# live credentials. A stub that slips means a test authenticating against
+# production Nylas or OpenAI with the deployment's own keys.
+os.environ["NYLAS_API_KEY"] = "test-nylas-key"
+os.environ["NYLAS_WEBHOOK_SECRET"] = "test-webhook-secret"
+os.environ["OPENAI_API_KEY"] = "test-openai-key"
+os.environ["TELEGRAM_BOT_TOKEN"] = "test-telegram-token"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -33,6 +38,27 @@ import main  # noqa: E402
 from database import models  # noqa: E402
 from database.connection import SessionLocal, engine, session_dependency  # noqa: E402
 from services import events  # noqa: E402
+from services.boxtruck import boxtruck  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def no_outbound_network(monkeypatch):
+    """
+    Every outbound call is stubbed; a test that reaches the network has a hole
+    in its stubs. Fail loudly instead of silently calling a real vendor.
+
+    Only the real transports are blocked — TestClient drives the app through
+    httpx's ASGI transport, which never leaves the process.
+    """
+    import httpx
+
+    def blocked(self, request, *args, **kwargs):
+        raise AssertionError(
+            f"test made a real network call to {request.url} — stub it instead"
+        )
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", blocked)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", blocked)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -155,6 +181,17 @@ def client(session, monkeypatch):
 
     main.app.dependency_overrides[session_dependency] = override
     monkeypatch.setattr(events.hub, "publish", lambda e: None)
+
+    # The negotiation list endpoints decorate rows with driver and dispatcher
+    # names. Left unstubbed these reached the live TMS on every list request;
+    # the endpoint tolerates the failure, so the suite passed while quietly
+    # calling production. Tests that care about the names override these.
+    async def no_people(ids):
+        return {}
+
+    monkeypatch.setattr(boxtruck, "get_drivers_bulk", no_people)
+    monkeypatch.setattr(boxtruck, "get_dispatchers_bulk", no_people)
+
     with TestClient(main.app) as c:
         yield c
     main.app.dependency_overrides.clear()

@@ -67,9 +67,48 @@ a $3,000 ratecon from booking a $3,200 agreement.
 ### Nylas
 
 One grant per company — a shared dispatch mailbox, not per-dispatcher inboxes.
-Point the Nylas webhook at `POST /internal/v1/webhooks/nylas` for the
-`message.created` trigger, and set `NYLAS_CALLBACK_URI` to this service's
-`/api/v1/accounts/callback`.
+
+Broker mail arrives here **directly from Nylas**. This service owns the Nylas
+application (client id `4ee94420-d0d6-46f3-b789-999263f0e18d`, US region); no
+peer server relays deliveries, so the only thing standing between the public
+internet and the pipeline is the HMAC signature on each request.
+
+Two URLs have to be registered on the Nylas application, and they are not
+interchangeable:
+
+| Purpose | URL | Env |
+|---|---|---|
+| OAuth redirect after hosted auth | `https://spaceline.boxtruckmanage.com/email-agent/api/v1/accounts/callback` | `NYLAS_CALLBACK_URI` |
+| Webhook delivery | `https://spaceline.boxtruckmanage.com/email-agent/internal/v1/webhooks/nylas` | — |
+
+The OAuth redirect cannot double as the webhook URL: it answers with a 302 to
+the frontend settings page, and Nylas only registers a webhook whose endpoint
+echoes the `challenge` query parameter back as plain text (`70005
+unable.verify.webhook_url` otherwise).
+
+Registering both, on a fresh application:
+
+```bash
+export NYLAS_API_KEY=...   # the value from your .env
+
+curl -X POST https://api.us.nylas.com/v3/applications/callback-uris \
+  -H "Authorization: Bearer $NYLAS_API_KEY" -H "Content-Type: application/json" \
+  -d '{"url":"https://spaceline.boxtruckmanage.com/email-agent/api/v1/accounts/callback","platform":"web"}'
+
+curl -X POST https://api.us.nylas.com/v3/webhooks \
+  -H "Authorization: Bearer $NYLAS_API_KEY" -H "Content-Type: application/json" \
+  -d '{"trigger_types":["message.created","grant.expired","grant.deleted"],
+       "webhook_url":"https://spaceline.boxtruckmanage.com/email-agent/internal/v1/webhooks/nylas",
+       "description":"email-agent inbound broker mail"}'
+```
+
+The webhook response carries `webhook_secret` **once**. Put it in
+`NYLAS_WEBHOOK_SECRET` before the service handles traffic; until it matches,
+every delivery is rejected with a 401 and the broker replies are lost.
+
+`grant.expired` and `grant.deleted` set the company's mailbox `status` to
+`expired`/`revoked`, which `GET /api/v1/accounts` reports so a dispatcher is
+told to reconnect instead of watching a dead mailbox look healthy.
 
 ## Deploying
 
