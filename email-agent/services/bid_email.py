@@ -66,10 +66,27 @@ def miles_out(driver: Optional[dict], load: dict) -> str:
         return "N/A"
 
 
+# The reference a broker recognises, in the order we prefer it. `order_number`
+# is the broker's own number for the load and is the only one of these that
+# means anything on their side — it is what the bid board shows as
+# "Reference#". `id` is atrek's internal row id: always present, always
+# plausible-looking, and meaningless to the broker, so it sits last and only
+# runs when a feed gives us nothing better.
+REFERENCE_FIELDS = ("order_number", "load_id", "reference_number", "id")
+
+
+def load_reference(load: dict) -> str:
+    for field in REFERENCE_FIELDS:
+        value = load.get(field)
+        if value not in (None, "", 0):
+            return str(value).strip()
+    return ""
+
+
 def build_subject(load: dict) -> str:
     pickup = load.get("pick_up_at") or "Pickup"
     delivery = load.get("deliver_to") or "Delivery"
-    ref = load.get("load_id") or load.get("id") or ""
+    ref = load_reference(load)
     base = f"Bid — {pickup} to {delivery}"
     return f"{base} (Ref {ref})" if ref else base
 

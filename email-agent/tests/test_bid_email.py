@@ -89,3 +89,49 @@ def test_subject_references_the_lane(load_snapshot):
     assert bid_email.build_subject(load_snapshot) == (
         "Bid — Chicago, IL to Detroit, MI (Ref 55012)"
     )
+
+
+# --- the reference number the broker reads -----------------------------------
+#
+# A real atrek payload carries `order_number` (the broker's own number for the
+# load) and `id` (atrek's internal row id). It carries no `load_id` at all —
+# the fixture above does, which is why quoting the wrong number went unnoticed
+# until a broker was emailed "Ref 2129500" for their load 1183963.
+
+ATREK_SHAPED_LOAD = {
+    "id": 2129500,
+    "order_number": "1183963",
+    "pick_up_at": "Lake Orion, MI 48359",
+    "deliver_to": "Fountain Inn, SC 29644",
+}
+
+
+def test_subject_quotes_the_brokers_own_reference_not_our_row_id():
+    """order_number is the number the broker can look up; id means nothing to them."""
+    subject = bid_email.build_subject(ATREK_SHAPED_LOAD)
+    assert subject == (
+        "Bid — Lake Orion, MI 48359 to Fountain Inn, SC 29644 (Ref 1183963)"
+    )
+    assert "2129500" not in subject
+
+
+def test_reference_falls_back_through_to_the_row_id():
+    """Each fallback runs only when everything ahead of it is absent."""
+    assert bid_email.load_reference({"order_number": "A1", "load_id": 2, "id": 3}) == "A1"
+    assert bid_email.load_reference({"load_id": 2, "id": 3}) == "2"
+    assert bid_email.load_reference({"reference_number": "R9", "id": 3}) == "R9"
+    assert bid_email.load_reference({"id": 3}) == "3"
+
+
+def test_blank_reference_fields_are_skipped():
+    """A feed that sends an empty or zero reference must not print '(Ref )'."""
+    assert bid_email.load_reference({"order_number": "", "id": 7}) == "7"
+    assert bid_email.load_reference({"order_number": None, "id": 7}) == "7"
+    assert bid_email.load_reference({"order_number": 0, "id": 7}) == "7"
+    assert bid_email.load_reference({}) == ""
+
+
+def test_subject_omits_the_reference_when_there_is_none():
+    assert bid_email.build_subject(
+        {"pick_up_at": "Chicago, IL", "deliver_to": "Detroit, MI"}
+    ) == "Bid — Chicago, IL to Detroit, MI"
