@@ -45,6 +45,24 @@ class Config:
         "postgresql+psycopg2://postgres:postgres@localhost:5432/email_agent",
     )
 
+    # Database resilience. This service runs a single event loop and talks to
+    # Postgres with blocking psycopg2, so any wait that is not bounded can
+    # freeze every request, webhook and the sweeper at once until the process
+    # is killed. Every wait below is therefore capped.
+    #   POOL_TIMEOUT      — how long a connection checkout may block the loop
+    #                       before giving up (was the SQLAlchemy default of 30s)
+    #   STATEMENT_TIMEOUT — Postgres aborts any single query that runs longer
+    #   IDLE_TX_TIMEOUT   — Postgres drops a transaction left open between
+    #                       queries this long, so a connection pinned by a
+    #                       stalled handler returns to the pool on its own
+    DB_POOL_SIZE: int = _int("DB_POOL_SIZE", 10)
+    DB_MAX_OVERFLOW: int = _int("DB_MAX_OVERFLOW", 20)
+    DB_POOL_TIMEOUT_SECONDS: int = _int("DB_POOL_TIMEOUT_SECONDS", 10)
+    DB_POOL_RECYCLE_SECONDS: int = _int("DB_POOL_RECYCLE_SECONDS", 1800)
+    DB_CONNECT_TIMEOUT_SECONDS: int = _int("DB_CONNECT_TIMEOUT_SECONDS", 10)
+    DB_STATEMENT_TIMEOUT_MS: int = _int("DB_STATEMENT_TIMEOUT_MS", 15000)
+    DB_IDLE_TX_TIMEOUT_MS: int = _int("DB_IDLE_TX_TIMEOUT_MS", 60000)
+
     # auth — JWT_SECRET must match Django's SIMPLE_JWT signing key exactly
     JWT_SECRET: str = os.getenv("JWT_SECRET", "")
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")

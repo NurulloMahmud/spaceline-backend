@@ -9,11 +9,45 @@ from database.models import Base
 
 logger = logging.getLogger(__name__)
 
+
+def _connect_args() -> dict:
+    """
+    psycopg2-level guards. Only Postgres understands these, so a non-Postgres
+    URL (a throwaway sqlite in a one-off script) gets none of them.
+
+      statement_timeout / idle_in_transaction_session_timeout — server-side
+      caps so a slow query or a transaction left open by a stalled handler
+      cannot pin a pooled connection forever.
+
+      connect_timeout + TCP keepalives — a dead connection is noticed in
+      seconds instead of hanging on a silent socket.
+    """
+    if not config.DATABASE_URL.startswith(("postgresql", "postgres://")):
+        return {}
+    return {
+        "connect_timeout": config.DB_CONNECT_TIMEOUT_SECONDS,
+        "options": (
+            f"-c statement_timeout={config.DB_STATEMENT_TIMEOUT_MS} "
+            f"-c idle_in_transaction_session_timeout={config.DB_IDLE_TX_TIMEOUT_MS}"
+        ),
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 3,
+    }
+
+
 engine = create_engine(
     config.DATABASE_URL,
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=config.DB_POOL_SIZE,
+    max_overflow=config.DB_MAX_OVERFLOW,
+    # A checkout that cannot be satisfied fails the one request that asked for
+    # it after this long, instead of blocking the whole event loop until a
+    # connection frees up.
+    pool_timeout=config.DB_POOL_TIMEOUT_SECONDS,
+    pool_recycle=config.DB_POOL_RECYCLE_SECONDS,
+    connect_args=_connect_args(),
     future=True,
 )
 
