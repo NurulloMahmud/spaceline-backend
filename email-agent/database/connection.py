@@ -25,6 +25,7 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 # Each statement is idempotent, so this is safe on every boot.
 ADDITIVE_COLUMNS = (
     "ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS resolved_reason TEXT",
+    "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS expected_email_address VARCHAR",
 )
 
 

@@ -29,7 +29,15 @@ class NylasService:
 
     # --- auth -----------------------------------------------------------
 
-    def hosted_auth_url(self, state: str) -> str:
+    def hosted_auth_url(self, state: str, login_hint: str = "") -> str:
+        """
+        `access_type=offline` is what earns the refresh token; without it the
+        grant stops working once the provider's first access token expires.
+
+        `login_hint` preselects the mailbox on the provider's consent screen.
+        It is a convenience, not a control — the user can still authorise a
+        different account, which is why the callback verifies what came back.
+        """
         from urllib.parse import urlencode
 
         params = {
@@ -39,6 +47,8 @@ class NylasService:
             "access_type": "offline",
             "state": state,
         }
+        if login_hint:
+            params["login_hint"] = login_hint
         return f"{self.base_url}/v3/connect/auth?{urlencode(params)}"
 
     async def exchange_code(self, code: str) -> dict:
@@ -57,6 +67,22 @@ class NylasService:
         if resp.status_code not in (200, 201):
             raise NylasError(f"code exchange failed ({resp.status_code}): {resp.text[:400]}")
         return resp.json()
+
+    async def revoke_grant(self, grant_id: str) -> None:
+        """
+        Hands back a grant we decided not to keep. The callback creates a
+        grant before it can see which mailbox was authorised, so rejecting a
+        mismatch has to give up the access it just gained — otherwise we sit
+        on a live connection to a mailbox we refused.
+        """
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.delete(
+                f"{self.base_url}/v3/grants/{grant_id}",
+                headers=self.headers,
+            )
+        # 404 means it is already gone, which is the state we wanted.
+        if resp.status_code not in (200, 202, 204, 404):
+            raise NylasError(f"grant revoke failed ({resp.status_code}): {resp.text[:400]}")
 
     # --- messages -------------------------------------------------------
 

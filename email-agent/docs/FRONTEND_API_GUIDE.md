@@ -420,6 +420,27 @@ Management users may still pass `{"company_id": N}` to connect a **different**
 company's mailbox (unchanged from before) — that ability was never
 department-gated separately, it's covered by the same management check now.
 
+### Naming the mailbox up front
+
+`POST /accounts/connect` also accepts an optional `email_address`:
+
+```json
+{ "company_id": 7, "email_address": "dispatch@customer.com" }
+```
+
+It does two things. It preselects that account on the provider's consent
+screen, and it becomes the address the callback **insists** on: if a different
+mailbox is authorised, the grant is refused and handed back to Nylas rather
+than stored (`?mailbox=error&reason=wrong_mailbox`). Send it whenever the
+company's dispatch mailbox is known — it is what stops someone signing into
+their personal inbox at the consent screen and silently repointing the whole
+company's broker mail at it.
+
+Omit it and the flow behaves exactly as before: whichever mailbox is
+authorised is accepted. The address travels inside the signed `state`, so it
+cannot be swapped in the address bar between the consent screen and the
+callback.
+
 ## The redirect back from Nylas
 
 Open `auth_url` as a full-page navigation (`window.location.href = auth_url`,
@@ -436,6 +457,7 @@ page (`/settings`) with a query string:
 | `?mailbox=error&reason=invalid_state` | The one-time state token was tampered with or expired. |
 | `?mailbox=error&reason=exchange_failed` | Nylas rejected the authorization code. |
 | `?mailbox=error&reason=no_grant` | Nylas responded but returned no grant id. |
+| `?mailbox=error&reason=wrong_mailbox` | A mailbox was named on `connect`, and a different one was authorised. Nothing was stored and any existing connection is untouched. Worth surfacing as more than a toast: the fix is to retry and sign into the right account. |
 
 Reading `mailbox`/`reason` off `location.search` on the settings page is
 optional — enough to show a toast — but the connect card itself doesn't need

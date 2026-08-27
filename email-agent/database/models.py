@@ -65,6 +65,11 @@ class EmailAccount(Base):
     company_id = Column(Integer, nullable=False, unique=True, index=True)
     nylas_grant_id = Column(String, nullable=False, unique=True, index=True)
     email_address = Column(String, nullable=False)
+    # The mailbox management named when it generated the auth URL. The
+    # callback refuses a grant for anything else, so authorising the wrong
+    # account at the provider cannot quietly repoint a company's dispatch
+    # mail. Null on accounts connected before the check existed.
+    expected_email_address = Column(String, nullable=True)
     status = Column(String, default="active", nullable=False)
     created_at = Column(DateTime(timezone=True), default=_now, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)

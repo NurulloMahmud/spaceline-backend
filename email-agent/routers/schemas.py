@@ -25,6 +25,15 @@ class ConnectAccountRequest(BaseModel):
     company_id: Optional[int] = Field(
         None, description="management only; defaults to the caller's company"
     )
+    email_address: Optional[EmailStr] = Field(
+        None,
+        description=(
+            "the mailbox this company should connect. Preselects the account "
+            "on the provider's consent screen, and the callback rejects a "
+            "grant for any other address. Omit to accept whichever mailbox "
+            "is authorised."
+        ),
+    )
 
 
 class MessageOut(BaseModel):
