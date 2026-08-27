@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config.settings import config
@@ -187,6 +188,28 @@ async def callback(
             logger.error(f"could not revoke rejected grant for company {company_id}: {e}")
         return _settings_redirect("error", reason="wrong_mailbox")
 
+    # One mailbox backs exactly one company: `nylas_grant_id` is unique. A
+    # mailbox another company already uses reached the write below and died on
+    # that index, so the browser got a raw 500 in the middle of the consent
+    # flow instead of being told what happened. The clash is caught here, and
+    # the grant is deliberately *not* revoked — the other company is sending
+    # on it right now.
+    clash = (
+        session.query(models.EmailAccount)
+        .filter(
+            models.EmailAccount.nylas_grant_id == grant_id,
+            models.EmailAccount.company_id != company_id,
+        )
+        .first()
+    )
+    if clash:
+        logger.error(
+            f"mailbox {email_address or '<unknown>'} is already connected to "
+            f"company {clash.company_id}; refusing to attach it to company "
+            f"{company_id}"
+        )
+        return _settings_redirect("error", reason="mailbox_in_use")
+
     account = (
         session.query(models.EmailAccount)
         .filter(models.EmailAccount.company_id == company_id)
@@ -208,6 +231,15 @@ async def callback(
                 status="active",
             )
         )
-    session.flush()
+    try:
+        session.flush()
+    except IntegrityError:
+        # Lost a race with a simultaneous consent for the same mailbox.
+        session.rollback()
+        logger.error(
+            f"mailbox {email_address or '<unknown>'} was claimed concurrently; "
+            f"company {company_id} not connected"
+        )
+        return _settings_redirect("error", reason="mailbox_in_use")
 
     return _settings_redirect("connected")

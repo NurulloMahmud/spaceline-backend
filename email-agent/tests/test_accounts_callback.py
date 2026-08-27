@@ -280,3 +280,46 @@ def test_a_revoke_failure_still_refuses_the_grant(client, monkeypatch, session):
     _, params = _redirect_query(resp)
     assert params["reason"] == "wrong_mailbox"
     assert session.query(models.EmailAccount).filter_by(company_id=1).count() == 0
+
+
+def test_a_mailbox_already_used_by_another_company_is_refused_not_a_500(
+    client, monkeypatch, session, account
+):
+    """
+    The `account` fixture holds grant-1 for company 1. Company 2 authorising
+    the same mailbox returns the same grant id from Nylas, which collides with
+    the unique index on `nylas_grant_id`.
+
+    That used to surface as a raw 500 in the middle of the consent flow — the
+    exact failure seen in production when a second company connected
+    expedited@spaceline23llc.com.
+    """
+    async def fake_exchange(code):
+        return {"grant_id": "grant-1", "email": "dispatch@shipluxellc.com"}
+
+    revoked = []
+
+    async def fake_revoke(grant_id):
+        revoked.append(grant_id)
+
+    monkeypatch.setattr(nylas, "exchange_code", fake_exchange)
+    monkeypatch.setattr(nylas, "revoke_grant", fake_revoke)
+
+    resp = client.get(
+        "/api/v1/accounts/callback",
+        params={"code": "abc", "state": _sign(2)},
+        follow_redirects=False,
+    )
+
+    _, params = _redirect_query(resp)
+    assert params["mailbox"] == "error"
+    assert params["reason"] == "mailbox_in_use"
+
+    # Company 1 keeps working: no second row, and its grant is untouched.
+    assert session.query(models.EmailAccount).count() == 1
+    assert session.query(models.EmailAccount).filter_by(company_id=1).one().nylas_grant_id == "grant-1"
+    assert session.query(models.EmailAccount).filter_by(company_id=2).count() == 0
+
+    # The grant belongs to the company already using it — revoking it here
+    # would cut off a working mailbox.
+    assert revoked == []
