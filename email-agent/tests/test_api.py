@@ -218,6 +218,65 @@ def test_sending_a_suggestion_replies_on_the_thread(
     assert "Our rate is $3,200." in sent[0]["body"]
 
 
+def test_sending_a_suggestion_learns_a_missing_thread_id(
+    client, auth_headers, account, session, negotiation, monkeypatch
+):
+    """
+    The thread id is captured on the send that opens a negotiation, but a
+    provider does not always return one there. Without it the broker's replies
+    match only by subject, so every later send is a chance to learn it.
+    """
+    negotiation.nylas_thread_id = None
+    monkeypatch.setattr(
+        nylas, "send_message",
+        lambda **k: _async({"id": "msg-out-4", "thread_id": "thread-learned"}),
+    )
+    suggestion = models.Suggestion(
+        negotiation_id=negotiation.id,
+        kind=models.KIND_REPLY,
+        draft_subject="Re: Bid",
+        draft_body="Our rate is $3,200.",
+        status=models.PENDING,
+    )
+    session.add(suggestion)
+    session.commit()
+
+    resp = client.post(
+        f"/api/v1/suggestions/{suggestion.id}/send", headers=auth_headers, json={}
+    )
+    assert resp.status_code == 200
+
+    session.refresh(negotiation)
+    assert negotiation.nylas_thread_id == "thread-learned"
+
+
+def test_sending_a_suggestion_does_not_move_a_known_thread(
+    client, auth_headers, account, session, negotiation, monkeypatch
+):
+    """A send that comes back on another thread must not repoint the thread."""
+    monkeypatch.setattr(
+        nylas, "send_message",
+        lambda **k: _async({"id": "msg-out-5", "thread_id": "some-other-thread"}),
+    )
+    suggestion = models.Suggestion(
+        negotiation_id=negotiation.id,
+        kind=models.KIND_REPLY,
+        draft_subject="Re: Bid",
+        draft_body="Our rate is $3,200.",
+        status=models.PENDING,
+    )
+    session.add(suggestion)
+    session.commit()
+
+    resp = client.post(
+        f"/api/v1/suggestions/{suggestion.id}/send", headers=auth_headers, json={}
+    )
+    assert resp.status_code == 200
+
+    session.refresh(negotiation)
+    assert negotiation.nylas_thread_id == "thread-1"
+
+
 def test_editing_before_sending_is_recorded_separately(
     client, auth_headers, account, session, negotiation, monkeypatch
 ):

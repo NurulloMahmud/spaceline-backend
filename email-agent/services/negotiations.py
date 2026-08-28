@@ -214,6 +214,14 @@ async def create_negotiation(
         )
 
     negotiation.nylas_thread_id = sent.get("thread_id")
+    if not negotiation.nylas_thread_id:
+        # Not fatal: inbound.match_negotiation falls back to the broker address
+        # and subject, and adopts the thread id off the first reply. Worth
+        # knowing about, because every reply on this negotiation takes the
+        # slower path until then.
+        logger.warning(
+            f"negotiation {negotiation.id}: the send response carried no thread id"
+        )
     session.add(
         models.EmailMessage(
             negotiation_id=negotiation.id,

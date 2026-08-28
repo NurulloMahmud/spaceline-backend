@@ -2,6 +2,8 @@ import hashlib
 import hmac
 import json
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from database import models
@@ -285,6 +287,204 @@ async def test_messages_on_unknown_threads_are_ignored(
     assert session.query(models.EmailMessage).count() == 0
     assert session.query(models.Suggestion).count() == 0
     assert captured == []
+
+
+def test_normalize_subject_strips_stacked_reply_prefixes():
+    assert inbound.normalize_subject("Re: Bid — Chicago") == "bid — chicago"
+    assert inbound.normalize_subject("FWD: RE: Bid  —  Chicago") == "bid — chicago"
+    assert inbound.normalize_subject("RE[2]: Bid — Chicago") == "bid — chicago"
+    assert inbound.normalize_subject(None) == ""
+
+
+async def test_a_reply_is_matched_when_the_thread_id_was_never_recorded(
+    session, account, negotiation, captured, monkeypatch
+):
+    """
+    The production shape: the send response carried no thread id, so every
+    broker reply arrived on a thread we had never seen and was dropped. The
+    negotiation showed our side of the conversation and nothing else.
+    """
+    negotiation.nylas_thread_id = None
+    session.flush()
+    monkeypatch.setattr(
+        ai, "classify_inbound",
+        lambda **k: {"intent": "counter_offer", "contains_ratecon": False,
+                     "ratecon_attachment_name": None, "quoted_amount": 2900, "reasoning": ""},
+    )
+    monkeypatch.setattr(
+        ai, "draft_reply",
+        lambda **k: {"intent": "counter_offer", "draft_subject": "Re: Bid",
+                     "draft_body": "We can do $3,000.", "reasoning": ""},
+    )
+
+    await inbound.handle_inbound_message(
+        session, account,
+        make_message(
+            thread_id="thread-nylas-never-told-us",
+            subject="RE: Bid — Chicago, IL to Detroit, MI",
+        ),
+    )
+    session.commit()
+
+    stored = session.query(models.EmailMessage).one()
+    assert stored.direction == "inbound"
+    assert stored.body_text == "We can do 2900, can you meet us there?"
+    # Learned from the reply, so the next message matches on the thread alone.
+    assert negotiation.nylas_thread_id == "thread-nylas-never-told-us"
+
+
+async def test_a_reply_on_a_new_thread_is_matched_by_subject_and_broker(
+    session, account, negotiation, captured, monkeypatch
+):
+    """Some broker systems answer on a thread of their own making."""
+    monkeypatch.setattr(
+        ai, "classify_inbound",
+        lambda **k: {"intent": "question", "contains_ratecon": False,
+                     "ratecon_attachment_name": None, "quoted_amount": None, "reasoning": ""},
+    )
+    monkeypatch.setattr(
+        ai, "draft_reply",
+        lambda **k: {"intent": "question", "draft_subject": "Re: Bid",
+                     "draft_body": "Yes.", "reasoning": ""},
+    )
+
+    await inbound.handle_inbound_message(
+        session, account,
+        make_message(thread_id="a-thread-of-their-own",
+                     subject="Re: Bid — Chicago, IL to Detroit, MI"),
+    )
+    session.commit()
+
+    assert session.query(models.EmailMessage).count() == 1
+    # The recorded thread is not overwritten: it is still the one we opened.
+    assert negotiation.nylas_thread_id == "thread-1"
+
+
+async def test_a_reply_from_a_colleague_at_the_broker_is_matched(
+    session, account, negotiation, captured, monkeypatch
+):
+    """Brokerages answer from shared desks and covering agents."""
+    monkeypatch.setattr(
+        ai, "classify_inbound",
+        lambda **k: {"intent": "question", "contains_ratecon": False,
+                     "ratecon_attachment_name": None, "quoted_amount": None, "reasoning": ""},
+    )
+    monkeypatch.setattr(
+        ai, "draft_reply",
+        lambda **k: {"intent": "question", "draft_subject": "Re: Bid",
+                     "draft_body": "Yes.", "reasoning": ""},
+    )
+
+    await inbound.handle_inbound_message(
+        session, account,
+        make_message(
+            thread_id="unknown-thread",
+            subject="Re: Bid — Chicago, IL to Detroit, MI",
+            **{"from": [{"email": "dispatch@acme-logistics.com"}]},
+        ),
+    )
+    session.commit()
+
+    stored = session.query(models.EmailMessage).one()
+    assert stored.from_email == "dispatch@acme-logistics.com"
+
+
+async def test_a_stranger_on_the_same_subject_is_not_matched(
+    session, account, negotiation, captured, monkeypatch
+):
+    """Subject alone must never attach a message to someone else's load."""
+    await inbound.handle_inbound_message(
+        session, account,
+        make_message(
+            thread_id="unknown-thread",
+            subject="Re: Bid — Chicago, IL to Detroit, MI",
+            **{"from": [{"email": "someone@unrelated-brokerage.com"}]},
+        ),
+    )
+    session.commit()
+
+    assert session.query(models.EmailMessage).count() == 0
+
+
+async def test_a_lookalike_domain_is_not_treated_as_the_broker(
+    session, account, load_snapshot, captured, monkeypatch
+):
+    """The domain is a LIKE pattern; its wildcards must not match literally."""
+    n = models.Negotiation(
+        company_id=1,
+        load_uuid="load-uuid-9",
+        load_snapshot=load_snapshot,
+        bid_amount=3200.0,
+        broker_email="broker@acmexlogistics.com",
+        subject="Bid — Chicago, IL to Detroit, MI",
+        status=models.BID_SENT,
+    )
+    session.add(n)
+    session.flush()
+
+    await inbound.handle_inbound_message(
+        session, account,
+        make_message(
+            thread_id="unknown-thread",
+            subject="Re: Bid — Chicago, IL to Detroit, MI",
+            **{"from": [{"email": "someone@acme_logistics.com"}]},
+        ),
+    )
+    session.commit()
+
+    assert session.query(models.EmailMessage).count() == 0
+
+
+async def test_a_reply_on_a_different_subject_is_not_matched(
+    session, account, negotiation, captured, monkeypatch
+):
+    await inbound.handle_inbound_message(
+        session, account,
+        make_message(thread_id="unknown-thread", subject="Re: A different load entirely"),
+    )
+    session.commit()
+
+    assert session.query(models.EmailMessage).count() == 0
+
+
+async def test_subject_matching_does_not_reach_back_indefinitely(
+    session, account, negotiation, captured, monkeypatch
+):
+    """A broker answering a months-old bid is not this negotiation's reply."""
+    negotiation.nylas_thread_id = None
+    negotiation.created_at = datetime.now(timezone.utc) - timedelta(
+        days=inbound.MATCH_WINDOW_DAYS + 1
+    )
+    session.flush()
+
+    await inbound.handle_inbound_message(
+        session, account,
+        make_message(thread_id="unknown-thread",
+                     subject="Re: Bid — Chicago, IL to Detroit, MI"),
+    )
+    session.commit()
+
+    assert session.query(models.EmailMessage).count() == 0
+
+
+async def test_an_out_of_app_reply_is_matched_without_a_thread_id(
+    session, account, negotiation, captured, monkeypatch
+):
+    """A dispatcher answering from Gmail must land on the negotiation too."""
+    negotiation.nylas_thread_id = None
+    session.flush()
+
+    await inbound.handle_own_send(
+        session, account,
+        make_own_send(thread_id="unknown-thread",
+                      subject="Re: Bid — Chicago, IL to Detroit, MI"),
+    )
+    session.commit()
+
+    stored = session.query(models.EmailMessage).one()
+    assert stored.direction == "outbound"
+    assert stored.sent_by_user_id is None
+    assert negotiation.nylas_thread_id == "unknown-thread"
 
 
 async def test_a_duplicate_delivery_is_stored_once(

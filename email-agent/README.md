@@ -176,6 +176,7 @@ services/
   boxtruck.py atrek.py telegram.py    peer services
   events.py              SSE hub
 routers/                 HTTP surface
+scripts/                 one-off maintenance run by hand
 ```
 
 ## Operational notes
@@ -186,3 +187,25 @@ routers/                 HTTP surface
   guarded by `negotiations.tms_load_id` plus a `load_number` check in the TMS.
 - **Failures are never silent.** Every parse, verify, and booking failure writes a
   row and emits an SSE event a dispatcher can see.
+- **A message is matched to its negotiation by thread id, then by broker address
+  and subject.** The fallback exists because the thread id is not always there
+  to use: some providers return none on the send that opens the thread, and some
+  broker systems answer under a thread of their own. Without it, replies were
+  dropped and a negotiation showed only the emails this service sent. A
+  negotiation missing a thread id adopts the one it matched on, so the fallback
+  runs once per thread. A message from a broker we are negotiating with that
+  still matches nothing is logged at WARNING.
+
+### Backfilling stored message text
+
+`strip_quoted` runs once, when a message is stored, so a fix to it leaves older
+rows as they were. `scripts/backfill_message_text.py` re-runs the current
+version over the table. It changes nothing without `--apply`, is safe to re-run,
+and can be scoped:
+
+```bash
+cd /home/api/email-agent
+./venv/bin/python -m scripts.backfill_message_text                  # look
+./venv/bin/python -m scripts.backfill_message_text --apply          # write
+./venv/bin/python -m scripts.backfill_message_text --company 1 --apply
+```

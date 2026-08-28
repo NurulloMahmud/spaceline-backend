@@ -123,6 +123,13 @@ async def send(
             f"Could not send the email: {e}", status_code=502, code="send_failed"
         )
 
+    # The thread id is captured on the send that opened the negotiation, but a
+    # provider does not always return one there. Every later send is another
+    # chance to learn it, and without it the broker's replies match only by
+    # subject.
+    if not negotiation.nylas_thread_id and sent.get("thread_id"):
+        negotiation.nylas_thread_id = sent["thread_id"]
+
     session.add(
         models.EmailMessage(
             negotiation_id=negotiation.id,

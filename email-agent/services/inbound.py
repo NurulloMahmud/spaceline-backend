@@ -11,9 +11,11 @@ Nothing is ever sent to the broker from here.
 import asyncio
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from typing import Optional
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from database import models
@@ -153,6 +155,134 @@ def negotiation_context(negotiation: models.Negotiation) -> str:
     ])
 
 
+# "Re:", "RE:", "Fwd: Re:" — every layer a mail client stacks on a reply.
+SUBJECT_PREFIX = re.compile(r"^(?:\s*(?:re|fw|fwd|aw|sv|vs|antw)\s*(?:\[\d+\])?\s*:\s*)+", re.IGNORECASE)
+
+# How far back a reply may still be matched by subject. A broker answering a
+# months-old bid is not the thread this one belongs to.
+MATCH_WINDOW_DAYS = 45
+
+
+def normalize_subject(subject: Optional[str]) -> str:
+    """Strip reply prefixes and whitespace so "RE: Load 123" meets "Load 123"."""
+    text = SUBJECT_PREFIX.sub("", (subject or "").strip())
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def message_participants(message: dict, *fields: str) -> set[str]:
+    out = set()
+    for field in fields:
+        for entry in message.get(field) or []:
+            if isinstance(entry, dict) and entry.get("email"):
+                out.add(entry["email"].strip().lower())
+    return out
+
+
+def match_negotiation(
+    session: Session,
+    account: models.EmailAccount,
+    message: dict,
+    counterparties: set[str],
+) -> Optional[models.Negotiation]:
+    """
+    Find the negotiation a mailbox message belongs to.
+
+    The thread id is the reliable key, but it is not always there to use: a
+    provider may not return one on the send that opened the thread, and a
+    broker whose mail system starts a fresh thread replies under an id we have
+    never seen. Matching on the thread alone meant those replies were dropped
+    on the floor — the negotiation showed our side of a conversation and
+    nothing the broker said.
+
+    So the thread is tried first, then the pair that actually identifies a
+    negotiation: who is on the other end, and what the subject is once reply
+    prefixes are stripped. A negotiation still missing a thread id adopts the
+    one that matched, so this only has to happen once per thread.
+    """
+    thread_id = message.get("thread_id")
+    if thread_id:
+        negotiation = (
+            session.query(models.Negotiation)
+            .filter(
+                models.Negotiation.company_id == account.company_id,
+                models.Negotiation.nylas_thread_id == thread_id,
+            )
+            .first()
+        )
+        if negotiation:
+            return negotiation
+
+    if not counterparties:
+        return None
+
+    subject = normalize_subject(message.get("subject"))
+    if not subject:
+        return None
+
+    # The address narrows this in SQL, so an unrelated message in the dispatch
+    # mailbox — and most of them are — costs one selective query and stops.
+    # The domain is a LIKE pattern, so its wildcards are escaped: an address
+    # holding an underscore would otherwise match a domain that does not.
+    domains = {email.split("@")[-1] for email in counterparties if "@" in email}
+    addresses = [func.lower(models.Negotiation.broker_email).in_(sorted(counterparties))]
+    addresses += [
+        models.Negotiation.broker_email.ilike(
+            "%@" + d.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"),
+            escape="\\",
+        )
+        for d in sorted(domains)
+    ]
+    cutoff = datetime.now(timezone.utc) - timedelta(days=MATCH_WINDOW_DAYS)
+
+    candidates = (
+        session.query(models.Negotiation)
+        .filter(
+            models.Negotiation.company_id == account.company_id,
+            models.Negotiation.created_at >= cutoff,
+            or_(*addresses),
+        )
+        .order_by(models.Negotiation.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    if not candidates:
+        return None
+
+    matched = [n for n in candidates if normalize_subject(n.subject) == subject]
+    if not matched:
+        # Worth saying out loud: this is someone we are negotiating with, and
+        # their message is going nowhere. An unrelated sender never gets here.
+        logger.warning(
+            f"message on thread {thread_id} from {sorted(counterparties)} matched "
+            f"no negotiation, though {len(candidates)} with that broker exist "
+            f"(subject {message.get('subject')!r})"
+        )
+        return None
+
+    # An exact address beats a colleague at the same broker, and a live
+    # negotiation beats one already booked or closed.
+    def rank(negotiation: models.Negotiation) -> tuple[int, int]:
+        broker = (negotiation.broker_email or "").strip().lower()
+        exact = 0 if broker in counterparties else 1
+        live = 1 if negotiation.status in (models.BOOKED, models.CLOSED) else 0
+        return (exact, live)
+
+    negotiation = sorted(matched, key=rank)[0]
+    if not negotiation.nylas_thread_id and thread_id:
+        # Learn it, so the next message in this thread matches directly.
+        negotiation.nylas_thread_id = thread_id
+        logger.info(
+            f"negotiation {negotiation.id}: adopted thread {thread_id} "
+            f"matched on subject and broker address"
+        )
+    else:
+        logger.info(
+            f"negotiation {negotiation.id}: matched message on subject and broker "
+            f"address (thread {thread_id} is not the one we recorded)"
+        )
+    return negotiation
+
+
 def pdf_attachments(message: dict) -> list[dict]:
     out = []
     for att in message.get("attachments") or []:
@@ -172,16 +302,13 @@ async def handle_inbound_message(
     nylas_message_id = message.get("id")
     thread_id = message.get("thread_id")
 
-    negotiation = (
-        session.query(models.Negotiation)
-        .filter(
-            models.Negotiation.company_id == account.company_id,
-            models.Negotiation.nylas_thread_id == thread_id,
-        )
-        .first()
-    )
+    senders = message_participants(message, "from", "reply_to")
+    negotiation = match_negotiation(session, account, message, senders)
     if not negotiation:
-        logger.info(f"inbound message {nylas_message_id}: no negotiation for thread {thread_id}, ignoring")
+        logger.info(
+            f"inbound message {nylas_message_id}: no negotiation for thread "
+            f"{thread_id} from {sorted(senders)}, ignoring"
+        )
         return
 
     if negotiation.status in (models.BOOKED, models.CLOSED):
@@ -197,9 +324,9 @@ async def handle_inbound_message(
         return
 
     from_email = ""
-    senders = message.get("from") or []
-    if senders and isinstance(senders[0], dict):
-        from_email = senders[0].get("email", "")
+    from_entries = message.get("from") or []
+    if from_entries and isinstance(from_entries[0], dict):
+        from_email = from_entries[0].get("email", "")
 
     body_text = strip_quoted(message.get("body") or message.get("snippet") or "")
     attachments = pdf_attachments(message)
@@ -279,16 +406,13 @@ async def handle_own_send(
     nylas_message_id = message.get("id")
     thread_id = message.get("thread_id")
 
-    negotiation = (
-        session.query(models.Negotiation)
-        .filter(
-            models.Negotiation.company_id == account.company_id,
-            models.Negotiation.nylas_thread_id == thread_id,
-        )
-        .first()
-    )
+    recipients = message_participants(message, "to", "cc")
+    negotiation = match_negotiation(session, account, message, recipients)
     if not negotiation:
-        logger.info(f"own send {nylas_message_id}: no negotiation for thread {thread_id}, ignoring")
+        logger.info(
+            f"own send {nylas_message_id}: no negotiation for thread "
+            f"{thread_id} to {sorted(recipients)}, ignoring"
+        )
         return
 
     already = (
@@ -301,10 +425,10 @@ async def handle_own_send(
         logger.info(f"own send {nylas_message_id} already stored, skipping")
         return
 
-    recipients = message.get("to") or []
+    to_entries = message.get("to") or []
     to_email = ""
-    if recipients and isinstance(recipients[0], dict):
-        to_email = recipients[0].get("email", "")
+    if to_entries and isinstance(to_entries[0], dict):
+        to_email = to_entries[0].get("email", "")
 
     attachments = pdf_attachments(message)
     stored = models.EmailMessage(
