@@ -81,6 +81,84 @@ def test_strip_quoted_keeps_prose_mentioning_wrote():
     assert inbound.strip_quoted(None) == ""
 
 
+def test_strip_quoted_removes_outlook_vml_stylesheet():
+    """
+    The shape that reached dispatchers: Word-generated mail carries a <head> of
+    VML behaviour rules, and flattening the tags left the stylesheet sitting on
+    top of the broker's sentence.
+    """
+    body = (
+        '<html xmlns:v="urn:schemas-microsoft-com:vml" '
+        'xmlns:o="urn:schemas-microsoft-com:office:office">'
+        "<head>"
+        '<meta name="Generator" content="Microsoft Word 15 (filtered medium)">'
+        "<!--[if !mso]><style>v\\:* {behavior:url(#default#VML);}\n"
+        "o\\:* {behavior:url(#default#VML);}\n"
+        "w\\:* {behavior:url(#default#VML);}\n"
+        ".shape {behavior:url(#default#VML);}\n"
+        "</style><![endif]-->"
+        "<style><!--\n/* Font Definitions */\n"
+        '@font-face\n\t{font-family:"Cambria Math";\n\tpanose-1:2 4 5 3 5 4 6 3 2 4;}\n'
+        "p.MsoNormal, li.MsoNormal\n\t{margin:0in;\n\tfont-size:11.0pt;}\n--></style>"
+        "<!--[if gte mso 9]><xml>\n"
+        '<o:shapedefaults v:ext="edit" spidmax="1026" />\n</xml><![endif]-->'
+        "</head>"
+        '<body lang="EN-US"><div class="WordSection1">'
+        '<p class="MsoNormal">We can do $2,850 all in.<o:p></o:p></p>'
+        "</div></body></html>"
+    )
+    assert inbound.strip_quoted(body) == "We can do $2,850 all in."
+
+
+def test_strip_quoted_survives_an_unclosed_stylesheet():
+    """A truncated <style> still must not leak CSS into the broker's words."""
+    body = (
+        "<html><head><style>\n"
+        "v\\:* {behavior:url(#default#VML);}\n"
+        ".shape {behavior:url(#default#VML);}\n"
+        "<div>Rate works, send the ratecon.</div>"
+    )
+    cleaned = inbound.strip_quoted(body)
+    assert cleaned == "Rate works, send the ratecon."
+    assert "VML" not in cleaned
+
+
+def test_strip_quoted_keeps_prose_containing_braces():
+    """The CSS safety net must not eat a sentence that happens to use braces."""
+    body = "<div>Use the template {name} on the BOL. Rate is $900.</div>"
+    assert inbound.strip_quoted(body) == "Use the template {name} on the BOL. Rate is $900."
+
+
+def test_strip_quoted_keeps_text_revealed_to_non_outlook_clients():
+    """
+    A downlevel-revealed conditional wraps real content in comment syntax.
+    Stripping comments must not take the sentence between them with it.
+    """
+    body = (
+        "<!--[if !mso]><!--><div>Confirmed at $3,100.</div><!--<![endif]-->"
+        "<!--[if mso]><div>Outlook-only filler</div><![endif]-->"
+    )
+    assert inbound.strip_quoted(body) == "Confirmed at $3,100."
+
+
+def test_strip_quoted_drops_html_quote_header_line():
+    """Outlook's flattened "From:" header block is history, not a new message."""
+    body = (
+        "<div>Sounds good.</div>"
+        "<div>From: Dispatch &lt;d@x.com&gt;<br>Sent: Monday<br>"
+        "We offered $3,200.</div>"
+    )
+    cleaned = inbound.strip_quoted(body)
+    assert cleaned == "Sounds good."
+    assert "3,200" not in cleaned
+
+
+def test_strip_quoted_leaves_no_ragged_indentation():
+    """Each flattened line starts where the words do, not where a tag was."""
+    body = "<div>Line one.</div><div>Line two.</div><div>&nbsp;</div><div>Line three.</div>"
+    assert inbound.strip_quoted(body) == "Line one.\nLine two.\n\nLine three."
+
+
 def test_pdf_attachments_only():
     message = {
         "attachments": [

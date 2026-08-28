@@ -50,6 +50,29 @@ ATTRIBUTION = re.compile(r"\bon\b.{0,200}?\bwrote:", re.IGNORECASE | re.DOTALL)
 
 FORWARD_MARKER = re.compile(r"-+\s*forwarded message\s*-+", re.IGNORECASE)
 
+# Outlook and Word send a <head> full of VML behaviour rules and CSS. Those are
+# markup machinery, not words: flattening tags alone leaves the stylesheet
+# sitting on top of the broker's actual sentence, which is how replies started
+# arriving as "v\:* {behavior:url(#default#VML);} ... We can do $2,850".
+NON_CONTENT_BLOCK = re.compile(r"(?is)<(style|script|head|title|xml)\b[^>]*>.*?</\1\s*>")
+HTML_COMMENT = re.compile(r"(?s)<!--.*?-->")
+
+# Safety net for a stylesheet that arrives unclosed and so survives the pass
+# above. Only a line that is *entirely* a CSS rule is dropped, and only when its
+# braces hold declarations, so prose containing braces is kept.
+CSS_LEFTOVER = re.compile(
+    r"""(?x)
+    ^(?:
+        [-\w.\#*\\:,\[\]="'~+>()\s]{0,200}\{[^{}]{0,2000}:[^{}]{0,2000}\}
+      | [{}]
+      | @(?:media|font-face|import|charset|page|namespace)\b.{0,300}
+    )$"""
+)
+
+# Zero-width characters mail clients use for spacing. They render as nothing and
+# only make the stored text harder to read.
+INVISIBLE = re.compile(r"[\u200b-\u200d\u2060\ufeff\u00ad]")
+
 
 def strip_quoted(body: str) -> str:
     """
@@ -70,15 +93,25 @@ def strip_quoted(body: str) -> str:
             cut = min(cut, match.start())
     text = body[:cut]
 
-    # 2. Flatten to text. Block-level tags become newlines so the line-based
+    # 2. Drop the markup machinery before flattening, or its contents survive
+    #    as prose. Comments go second, so a stylesheet commented out the old
+    #    Netscape way (<style><!-- ... --></style>) is already gone.
+    text = NON_CONTENT_BLOCK.sub(" ", text)
+    text = HTML_COMMENT.sub(" ", text)
+
+    # 3. Flatten to text. Block-level tags become newlines so the line-based
     #    checks below still see structure.
     text = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = unescape(text)
     text = text.replace(" ", " ")
+    text = INVISIBLE.sub("", text)
     text = re.sub(r"[ \t]+", " ", text)
+    # Every line carries the space its opening tag became. Trimming it here,
+    # rather than at the end, lets the quote markers below match.
+    text = re.sub(r"(?m)^[ \t]+|[ \t]+$", "", text)
 
-    # 3. Cut on textual markers, for plain-text mail and anything the
+    # 4. Cut on textual markers, for plain-text mail and anything the
     #    structural pass missed.
     lowered = text.lower()
     cut = len(text)
@@ -92,7 +125,11 @@ def strip_quoted(body: str) -> str:
             cut = min(cut, match.start())
     text = text[:cut]
 
-    lines = [line for line in text.splitlines() if not line.strip().startswith(">")]
+    # 5. Keep only the lines a person would have typed.
+    lines = [
+        line for line in text.splitlines()
+        if not line.startswith(">") and not CSS_LEFTOVER.match(line)
+    ]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
