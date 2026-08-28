@@ -586,6 +586,15 @@ class DriverInviteSubmitView(views.APIView):
         if not invite.is_valid():
             return Response({'detail': 'Link has expired or is inactive.'}, status=400)
 
+        # A link carrying a driver has already done its registration (or was
+        # minted as a sign-link for an existing driver). Registering again
+        # would create a second driver from one invite.
+        if invite.driver_id:
+            return Response(
+                {'detail': 'This link has already been used to register a driver.'},
+                status=409,
+            )
+
         if not invite.company.contract_template_text:
             return Response(
                 {'detail': f"Company '{invite.company.name}' has no contract_template_text configured."},
@@ -706,8 +715,18 @@ class DriverInviteSubmitView(views.APIView):
             w9_file.document.save(f'w9_{driver.id}.pdf', ContentFile(w9_bytes), save=True)
             contract_file = DriverFile(driver=driver, name='Contractor Agreement (Generated)')
             contract_file.document.save(f'contract_{driver.id}.pdf', ContentFile(contract_bytes), save=True)
-            invite.is_active = False
-            invite.save(update_fields=['is_active'])
+
+            # The link deliberately stays active. Registration is only half the
+            # flow: the driver still has to sign the two PDFs generated above
+            # and post them back to /driver/invite/documents/, which
+            # authenticates with this same token. Deactivating here left every
+            # driver unable to return their signed W-9 and contract.
+            #
+            # Claiming the invite with the driver it just created is what stops
+            # it being re-registered — spent for this step, still usable for the
+            # next. The upload endpoint is what finally deactivates it.
+            invite.driver = driver
+            invite.save(update_fields=['driver'])
 
         return Response({
             'detail': 'Driver created.',
@@ -727,15 +746,31 @@ class DriverInviteDocumentUploadView(views.APIView):
             return Response({'detail': 'Token is required.'}, status=400)
 
         try:
-            invite = DriverInviteLink.objects.get(token=token)
+            invite = DriverInviteLink.objects.select_related('driver').get(token=token)
         except DriverInviteLink.DoesNotExist:
             return Response({'detail': 'Invalid token.'}, status=400)
 
         if not invite.is_valid():
             return Response({'detail': 'Link has expired or is inactive.'}, status=400)
 
-        driver_id = request.data.get('driver_id')
-        driver = get_object_or_404(Driver, id=driver_id, company=invite.company)
+        # The driver comes from the invite, not the request body. This endpoint
+        # is unauthenticated, so a token holder who could name any driver_id
+        # could attach files to any driver in the company.
+        driver = invite.driver
+        if driver is None:
+            return Response(
+                {'detail': 'Submit the registration form before uploading documents.'},
+                status=409,
+            )
+
+        # driver_id is still accepted for the documented request shape, but it
+        # only ever confirms what the token already decided.
+        requested_id = request.data.get('driver_id')
+        if requested_id not in (None, '') and str(requested_id) != str(driver.id):
+            return Response(
+                {'detail': 'driver_id does not match this link.'}, status=400
+            )
+
         files = request.FILES.getlist('files')
         names = request.data.getlist('names') if hasattr(request.data, 'getlist') else request.data.get('names', [])
         if len(files) != len(names):
