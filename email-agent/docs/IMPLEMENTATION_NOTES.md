@@ -110,7 +110,7 @@ FastAPI + SQLAlchemy + Postgres. See its `README.md`. Roughly:
 
 ## Deployment (live as of 2026-07-23)
 
-Server `95.169.204.54`, all processes under supervisor, all behind nginx on
+Server `95.169.204.245`, all processes under supervisor, all behind nginx on
 `boxmanage.smartfleetllc.com`.
 
 | Service | Path | Process | Route |

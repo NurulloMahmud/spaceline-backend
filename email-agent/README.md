@@ -130,7 +130,7 @@ The server pulls from GitHub. Authentication comes from a git credential file
 outside the repo, so no token appears in the remote URL or in `git remote -v`:
 
 ```bash
-ssh root@95.169.204.54 'cd /home/api/email-agent && bash deploy.sh'
+ssh root@95.169.204.245 'cd /home/api/email-agent && bash deploy.sh'
 ```
 
 That pulls `main`, installs dependencies, restarts the service and waits on the
