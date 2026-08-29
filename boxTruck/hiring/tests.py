@@ -11,7 +11,11 @@ surfaced when the driver came back to hand the signed copies in.
 import io
 from unittest.mock import patch
 
-from django.core.files.uploadedfile import SimpleUploadedFile
+from django.conf import settings
+from django.core.files.uploadedfile import (
+    SimpleUploadedFile, TemporaryUploadedFile,
+)
+from django.http import QueryDict
 from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
@@ -21,6 +25,7 @@ from hiring import document_ai
 from hiring.models import (
     Driver, DriverCompany, DriverFile, DriverInviteLink, DriverStatus, Vehicle,
 )
+from hiring.views import SIGN_FILE_NAMES, mutable_request_data
 from users.models import Company, CustomUser
 
 
@@ -538,3 +543,120 @@ class DocumentRequestShapeTests(TestCase):
             result = document_ai.parse_document(upload)
         self.assertEqual(result['error'], 'Could not analyze this file.')
         self.assertNotIn('org-secret-123', result['error'])
+
+
+class LargeUploadTests(TestCase):
+    """Files over FILE_UPLOAD_MAX_MEMORY_SIZE arrive as TemporaryUploadedFile,
+    wrapping an on-disk handle that cannot be deep-copied. `request.data.copy()`
+    did exactly that, so the driver-creation endpoints 500'd on any real scan
+    or phone photo while every small test fixture sailed through.
+    """
+
+    def setUp(self):
+        self.company = Company.objects.create(
+            name='Space Line LLC',
+            contract_template_text='Agreement with {contractor_name}.',
+        )
+        self.staff = CustomUser.objects.create_user(
+            username='recruiter', password='x', company=self.company,
+        )
+        DriverStatus.objects.create(name='pending')
+        self.client = APIClient()
+        self.client.force_authenticate(self.staff)
+
+    def _big_file(self, name='license.pdf'):
+        # Comfortably over the 2.5MB default, so Django spills it to disk.
+        size = settings.FILE_UPLOAD_MAX_MEMORY_SIZE + 1024
+        return SimpleUploadedFile(name, b'%PDF-1.4' + b'x' * size, content_type='application/pdf')
+
+    def _payload(self):
+        return {
+            'full_name': 'Bob Driver',
+            'company__name': 'Bob Hauling LLC',
+            'company__mc': '846834',
+            'company__employer_id': '12-3456789',
+            'company__phone_number': '+15550001111',
+            'vehicle__vehicle_type': 'Box Truck',
+            'vehicle__make': 'Ford',
+            'vehicle__model': 'Transit',
+            'vehicle__year': 2018,
+            'vehicle__payload': 3800,
+            'vehicle__gvw': 9500,
+        }
+
+    def _post(self, url, extra):
+        payload = self._payload()
+        payload.update(extra)
+        with patch('hiring.serializers.fill_w9', return_value=_pdf()), \
+             patch('hiring.serializers.generate_contract', return_value=_pdf()):
+            return self.client.post(url, payload, format='multipart')
+
+    def test_hr_endpoint_accepts_a_file_too_big_to_hold_in_memory(self):
+        response = self._post(reverse('driver-create-hr'), {
+            'driver_files': self._big_file(),
+            'driver_file_names': "Driver's License",
+        })
+
+        self.assertEqual(response.status_code, 201, response.data)
+        driver = Driver.objects.get(id=response.data['driver_id'])
+        self.assertTrue(
+            DriverFile.objects.filter(driver=driver, name="Driver's License").exists()
+        )
+
+    def test_invite_endpoint_accepts_a_file_too_big_to_hold_in_memory(self):
+        invite = DriverInviteLink.objects.create(
+            created_by=self.staff, company=self.company,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        url = f"{reverse('driver-create-invite')}?token={invite.token}"
+        response = self._post(url, {
+            'vehicle_files': self._big_file('registration.pdf'),
+            'vehicle_file_names': 'Registration',
+        })
+
+        self.assertEqual(response.status_code, 201, response.data)
+
+    def test_every_file_in_a_multi_file_upload_survives_the_copy(self):
+        response = self._post(reverse('driver-create-hr'), {
+            'driver_files': [self._big_file('license.pdf'), self._big_file('medical.pdf')],
+            'driver_file_names': ["Driver's License", 'Medical Card'],
+        })
+
+        self.assertEqual(response.status_code, 201, response.data)
+        driver = Driver.objects.get(id=response.data['driver_id'])
+        self.assertEqual(
+            sorted(DriverFile.objects.filter(driver=driver)
+                   .exclude(name__in=SIGN_FILE_NAMES).values_list('name', flat=True)),
+            ["Driver's License", 'Medical Card'],
+        )
+
+
+class MutableRequestDataTests(TestCase):
+    def test_multi_value_keys_are_kept_as_lists(self):
+        source = QueryDict('', mutable=True)
+        source.setlist('driver_file_names', ['License', 'Medical Card'])
+        source['full_name'] = 'Bob Driver'
+
+        copied = mutable_request_data(source)
+
+        self.assertEqual(copied.getlist('driver_file_names'), ['License', 'Medical Card'])
+        self.assertEqual(copied['full_name'], 'Bob Driver')
+
+    def test_the_copy_is_writable_and_does_not_touch_the_original(self):
+        source = QueryDict('', mutable=False)
+        copied = mutable_request_data(source)
+        copied['status'] = 1
+
+        self.assertEqual(copied['status'], 1)
+        self.assertNotIn('status', source)
+
+    def test_an_unpicklable_file_is_carried_over_by_reference(self):
+        upload = TemporaryUploadedFile('license.pdf', 'application/pdf', 3_000_000, None)
+        upload.write(b'%PDF-1.4')
+        source = QueryDict('', mutable=True)
+        source['driver_files'] = upload
+
+        # QueryDict.copy() deep-copies and dies here; this must not.
+        with self.assertRaises(TypeError):
+            source.copy()
+        self.assertIs(mutable_request_data(source)['driver_files'], upload)

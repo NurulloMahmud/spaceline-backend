@@ -12,6 +12,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework import status, viewsets, views, generics, parsers
 from django.db.models import Q
+from django.http import QueryDict
 from hiring.google_maps import geocode_zip
 from hiring.haversine import haversine
 from mobile.models import DriverLocation
@@ -488,6 +489,13 @@ class DriverSignInfoView(views.APIView):
         })
 
 
+def mutable_request_data(data):
+    copied = QueryDict('', mutable=True)
+    for key in data:
+        copied.setlist(key, data.getlist(key))
+    return copied
+
+
 class DriverBulkCreateHRView(views.APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
@@ -496,7 +504,7 @@ class DriverBulkCreateHRView(views.APIView):
         # if request.user.department.name.lower() not in ['management', 'payroll', 'billing', 'hiring']:
         #     return Response({'detail': 'Not allowed.'}, status=403)
 
-        data = request.data.copy()
+        data = mutable_request_data(request.data)
         pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
         data['status'] = pending_status.id
         data['company'] = request.user.company.id
@@ -526,7 +534,7 @@ class DriverBulkCreateInviteView(views.APIView):
 
         if not invite.is_valid():
             return Response({'detail': 'Link has expired or is inactive.'}, status=400)
-        data = request.data.copy()
+        data = mutable_request_data(request.data)
         pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
         data['status'] = pending_status.id
         data['company'] = invite.company.id
