@@ -3,6 +3,7 @@ from rest_framework.routers import SimpleRouter
 from .excel import ImportDriversView
 from .views import (DriverBulkCreateHRView, DriverBulkCreateInviteView, DriverExistsCheckView,
                     DriverInviteSubmitView, DriverInviteDocumentUploadView,
+                    DriverDocumentParseView,
                     GenerateDriverSignLinkView, DriverSignInfoView,
                     DriverStatusViewSet, DriverViewSet, DriverDropdownAPIView,
                     DriverFileViewSet, CompanyFileViewSet, GenerateInviteLinkView, VehicleFileViewSet,
@@ -37,6 +38,7 @@ urlpattern = [
     path('driver/exists/', DriverExistsCheckView.as_view(), name='driver-exists-check'),
     path('driver/invite/submit/', DriverInviteSubmitView.as_view(), name='driver-invite-submit'),
     path('driver/invite/documents/', DriverInviteDocumentUploadView.as_view(), name='driver-invite-documents'),
+    path('documents/parse/', DriverDocumentParseView.as_view(), name='driver-documents-parse'),
     path('invite-link/', GenerateInviteLinkView.as_view(), name='generate-invite-link'),
     path('driver/sign-link/', GenerateDriverSignLinkView.as_view(), name='generate-driver-sign-link'),
     path('driver/sign-info/', DriverSignInfoView.as_view(), name='driver-sign-info'),

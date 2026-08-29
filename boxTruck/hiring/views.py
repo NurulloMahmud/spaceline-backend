@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from django.utils import timezone
 import copy
@@ -19,6 +20,7 @@ from users.pagination import CustomPagination
 from users.permissions import IsAdminUser, IsDispatch, IsDispatchManager, IsInternalService, IsUpdater
 from .utils import build_change_description, DEPOSIT_FK_DISPLAY, DRIVER_COMPANY_FK_DISPLAY, DRIVER_FK_DISPLAY, VEHICLE_FK_DISPLAY
 from .pdf_generation import fill_w9, generate_contract
+from .document_ai import MAX_FILES_PER_REQUEST, build_prefill, parse_document
 from users.models import CustomUser, Team, Company
 from .models import (CompanyFile, Deposit, DepositHistory, Driver, DriverCompany, DriverFile, DriverHistory, DriverInviteLink,
                      DriverStatus, Vehicle, VehicleEquipment, VehicleFile,
@@ -788,6 +790,60 @@ class DriverInviteDocumentUploadView(views.APIView):
             'detail': 'Documents uploaded.',
             'files': [{'id': f.id, 'name': f.name, 'url': f.document.url} for f in created],
         }, status=201)
+
+
+class DriverDocumentParseView(views.APIView):
+    """Read a batch of onboarding documents with AI and return form values.
+
+    Staff uploads whatever the driver sent — license, registration, COI, W-9,
+    a voided check — and gets back the fields printed on them, grouped by the
+    form section they belong to, ready to prefill the driver-creation form.
+
+    This endpoint is read-only by design: nothing is saved, no Driver is
+    created, no file is stored. It is a suggestion for a human to confirm,
+    and the existing create/update endpoints are what persist anything. That
+    also means a bad extraction costs nothing but a retry.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser]
+
+    def post(self, request):
+        files = request.FILES.getlist('files') or request.FILES.getlist('file')
+        if not files:
+            return Response({'detail': 'At least one file is required.'}, status=400)
+        if len(files) > MAX_FILES_PER_REQUEST:
+            return Response(
+                {'detail': f'At most {MAX_FILES_PER_REQUEST} files per request.'},
+                status=400,
+            )
+
+        # Optional per-file hints, positional against `files`. Fewer hints than
+        # files is fine — the model identifies the rest on its own.
+        hints = (
+            request.data.getlist('document_types')
+            if hasattr(request.data, 'getlist') else []
+        )
+        hints += [None] * (len(files) - len(hints))
+
+        # Documents are read concurrently: a batch of five otherwise costs five
+        # round trips end to end, which is the difference between a recruiter
+        # waiting and a recruiter walking away.
+        with ThreadPoolExecutor(max_workers=min(len(files), MAX_FILES_PER_REQUEST)) as pool:
+            results = list(pool.map(
+                lambda pair: parse_document(pair[0], pair[1] or None),
+                zip(files, hints[:len(files)]),
+            ))
+
+        prefill, conflicts, sensitive_fields = build_prefill(
+            [r for r in results if not r['error']]
+        )
+
+        return Response({
+            'results': results,
+            'prefill': prefill,
+            'conflicts': conflicts,
+            'sensitive_fields': sensitive_fields,
+        }, status=200)
 
 
 class CompanyHistoryViewSet(viewsets.ModelViewSet):

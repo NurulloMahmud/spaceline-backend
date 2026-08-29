@@ -14,8 +14,10 @@ from unittest.mock import patch
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.urls import reverse
+from rest_framework.test import APIClient
 from django.utils import timezone
 
+from hiring import document_ai
 from hiring.models import (
     Driver, DriverCompany, DriverFile, DriverInviteLink, DriverStatus, Vehicle,
 )
@@ -234,3 +236,305 @@ class DriverSignLinkTests(TestCase):
         self.assertEqual(response.status_code, 201, response.data)
         self.invite.refresh_from_db()
         self.assertFalse(self.invite.is_active)
+
+
+class DocumentNormalizationTests(TestCase):
+    """The model returns what is printed on the page; the form needs values it
+    can actually put in an input. Everything below is a shape a real document
+    prints and a real form would choke on."""
+
+    def _normalize(self, **fields):
+        fields.setdefault('document_type', 'cdl')
+        return document_ai.normalize(fields)
+
+    def test_dates_are_converted_to_iso_whatever_the_document_printed(self):
+        fields, _ = self._normalize(cdl_issue_date='03/14/2022', dob='July 2, 1988')
+        self.assertEqual(fields['cdl_issue_date'], '2022-03-14')
+        self.assertEqual(fields['dob'], '1988-07-02')
+
+    def test_unreadable_date_is_dropped_rather_than_passed_through(self):
+        fields, warnings = self._normalize(cdl_expiration='EXP 00/00/0000')
+        self.assertNotIn('cdl_expiration', fields)
+        self.assertTrue(any('as a date' in w for w in warnings))
+
+    def test_expired_document_is_flagged(self):
+        fields, warnings = self._normalize(cdl_expiration='2020-01-31')
+        self.assertEqual(fields['cdl_expiration'], '2020-01-31')
+        self.assertTrue(any('already passed' in w for w in warnings))
+
+    def test_dob_in_the_past_is_not_flagged_as_expired(self):
+        _, warnings = self._normalize(dob='1988-07-02')
+        self.assertEqual(warnings, [])
+
+    def test_state_names_are_abbreviated(self):
+        fields, _ = self._normalize(state='Illinois', company_state='oh', cdl_state='IL')
+        self.assertEqual(fields['state'], 'IL')
+        self.assertEqual(fields['company_state'], 'OH')
+        self.assertEqual(fields['cdl_state'], 'IL')
+
+    def test_ein_is_reformatted_and_routing_stripped_to_digits(self):
+        fields, _ = self._normalize(company_employer_id='876543210', routing_number='071-000-013')
+        self.assertEqual(fields['company_employer_id'], '87-6543210')
+        self.assertEqual(fields['routing_number'], '071000013')
+
+    def test_short_routing_number_is_flagged(self):
+        _, warnings = self._normalize(routing_number='07100')
+        self.assertTrue(any('expected 9' in w for w in warnings))
+
+    def test_blank_and_null_fields_are_omitted_entirely(self):
+        fields, _ = self._normalize(full_name='  Bob Driver ', vin=None, make='   ')
+        self.assertEqual(fields, {'full_name': 'Bob Driver'})
+
+
+class DocumentPrefillTests(TestCase):
+    def test_fields_are_grouped_into_the_form_sections_they_belong_to(self):
+        prefill, _, _ = document_ai.build_prefill([{
+            'file_name': 'license.jpg',
+            'fields': {
+                'full_name': 'Bob Driver', 'cdl_number': 'C123',
+                'company_name': 'Bob Hauling LLC', 'vin': '1FT', 'bank_name': 'Chase',
+            },
+        }])
+        self.assertEqual(prefill['driver'], {'full_name': 'Bob Driver', 'cdl_number': 'C123'})
+        self.assertEqual(prefill['company'], {'name': 'Bob Hauling LLC'})
+        self.assertEqual(prefill['vehicle'], {'vin': '1FT'})
+        self.assertEqual(prefill['deposit'], {'bank_name': 'Chase'})
+
+    def test_documents_disagreeing_is_reported_not_silently_resolved(self):
+        prefill, conflicts, _ = document_ai.build_prefill([
+            {'file_name': 'registration.pdf', 'fields': {'vin': '1FTBW2CM1JKA00001'}},
+            {'file_name': 'coi.pdf', 'fields': {'vin': '1FTBW2CM1JKA99999'}},
+        ])
+        self.assertEqual(prefill['vehicle']['vin'], '1FTBW2CM1JKA00001')
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]['from_file'], 'registration.pdf')
+        self.assertEqual(conflicts[0]['other_file'], 'coi.pdf')
+
+    def test_the_same_value_from_two_documents_is_not_a_conflict(self):
+        _, conflicts, _ = document_ai.build_prefill([
+            {'file_name': 'a.pdf', 'fields': {'company_state': 'IL'}},
+            {'file_name': 'b.pdf', 'fields': {'company_state': 'il'}},
+        ])
+        self.assertEqual(conflicts, [])
+
+    def test_sensitive_fields_are_called_out_for_confirmation(self):
+        _, _, sensitive = document_ai.build_prefill([{
+            'file_name': 'check.jpg',
+            'fields': {'account_number': '123456', 'bank_name': 'Chase'},
+        }])
+        self.assertEqual(sensitive, [{'section': 'deposit', 'field': 'account_number'}])
+
+
+class DocumentParseEndpointTests(TestCase):
+    def setUp(self):
+        self.company = Company.objects.create(name='Space Line LLC')
+        self.staff = CustomUser.objects.create_user(
+            username='recruiter', password='x', company=self.company,
+        )
+        # JWT is the only configured authentication class, so a session
+        # login is not enough to reach the view.
+        self.client = APIClient()
+        self.client.force_authenticate(self.staff)
+        self.url = reverse('driver-documents-parse')
+
+    def _file(self, name='license.jpg'):
+        return SimpleUploadedFile(name, b'\xff\xd8\xff fake jpeg', content_type='image/jpeg')
+
+    def _parsed(self, file_name, **fields):
+        return {
+            'file_name': file_name, 'document_type': 'cdl',
+            'document_type_label': "Driver's License / CDL",
+            'fields': fields, 'warnings': [], 'error': None,
+        }
+
+    def test_a_batch_comes_back_per_file_and_merged(self):
+        with patch('hiring.views.parse_document') as parse:
+            parse.side_effect = [
+                self._parsed('license.jpg', full_name='Bob Driver', cdl_number='C123'),
+                self._parsed('registration.pdf', vin='1FTBW2CM1JKA00001'),
+            ]
+            response = self.client.post(self.url, {
+                'files': [self._file(), self._file('registration.pdf')],
+            })
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(len(body['results']), 2)
+        self.assertEqual(body['prefill']['driver']['full_name'], 'Bob Driver')
+        self.assertEqual(body['prefill']['vehicle']['vin'], '1FTBW2CM1JKA00001')
+
+    def test_a_single_file_can_be_sent_as_file_instead_of_files(self):
+        with patch('hiring.views.parse_document', return_value=self._parsed('license.jpg', full_name='Bob')):
+            response = self.client.post(self.url, {'file': self._file()})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['prefill']['driver']['full_name'], 'Bob')
+
+    def test_one_unreadable_file_does_not_lose_the_rest_of_the_batch(self):
+        broken = {
+            'file_name': 'blurry.jpg', 'document_type': None, 'document_type_label': None,
+            'fields': {}, 'warnings': [], 'error': 'The document could not be read.',
+        }
+        with patch('hiring.views.parse_document') as parse:
+            parse.side_effect = [broken, self._parsed('license.jpg', full_name='Bob Driver')]
+            response = self.client.post(self.url, {
+                'files': [self._file('blurry.jpg'), self._file()],
+            })
+
+        body = response.json()
+        self.assertEqual(body['results'][0]['error'], 'The document could not be read.')
+        self.assertEqual(body['prefill']['driver']['full_name'], 'Bob Driver')
+
+    def test_document_type_hints_are_passed_through_positionally(self):
+        with patch('hiring.views.parse_document') as parse:
+            parse.side_effect = [
+                self._parsed('license.jpg'), self._parsed('registration.pdf'),
+            ]
+            self.client.post(self.url, {
+                'files': [self._file(), self._file('registration.pdf')],
+                'document_types': ['cdl', 'vehicle_registration'],
+            })
+        self.assertEqual(
+            [call.args[1] for call in parse.call_args_list],
+            ['cdl', 'vehicle_registration'],
+        )
+
+    def test_no_files_is_refused(self):
+        response = self.client.post(self.url, {})
+        self.assertEqual(response.status_code, 400)
+
+    def test_oversized_batch_is_refused_before_any_ai_call(self):
+        with patch('hiring.views.parse_document') as parse:
+            response = self.client.post(self.url, {
+                'files': [self._file(f'{i}.jpg') for i in range(11)],
+            })
+        self.assertEqual(response.status_code, 400)
+        parse.assert_not_called()
+
+    def test_endpoint_requires_login(self):
+        self.client.force_authenticate(None)
+        response = self.client.post(self.url, {'files': [self._file()]})
+        self.assertIn(response.status_code, (401, 403))
+
+
+class DocumentFileTypeTests(TestCase):
+    """Guards that run before any AI call, so a bad upload costs nothing."""
+
+    def test_unsupported_file_type_is_rejected_without_calling_the_model(self):
+        upload = SimpleUploadedFile('notes.docx', b'PK\x03\x04', content_type='application/msword')
+        with patch('hiring.document_ai._client') as client:
+            result = document_ai.parse_document(upload)
+        self.assertIn('Unsupported file type', result['error'])
+        client.assert_not_called()
+
+    def test_content_type_falls_back_to_the_file_extension(self):
+        # Phone uploads routinely arrive as application/octet-stream.
+        upload = SimpleUploadedFile('license.pdf', b'%PDF-1.4', content_type='application/octet-stream')
+        self.assertEqual(document_ai.detect_mime_type(upload), 'application/pdf')
+
+    def test_empty_file_is_rejected_without_calling_the_model(self):
+        upload = SimpleUploadedFile('license.jpg', b'', content_type='image/jpeg')
+        with patch('hiring.document_ai._client') as client:
+            result = document_ai.parse_document(upload)
+        self.assertEqual(result['error'], 'File is empty.')
+        client.assert_not_called()
+
+    def test_oversized_file_is_rejected_without_calling_the_model(self):
+        upload = SimpleUploadedFile(
+            'huge.jpg', b'x' * (document_ai.MAX_FILE_BYTES + 1), content_type='image/jpeg',
+        )
+        with patch('hiring.document_ai._client') as client:
+            result = document_ai.parse_document(upload)
+        self.assertIn('larger than', result['error'])
+        client.assert_not_called()
+
+
+class HeicConversionTests(TestCase):
+    """iPhones hand over HEIC, which the model will not take. It is converted
+    to JPEG on the way out rather than bounced back at the driver."""
+
+    def test_heic_is_accepted_by_the_file_type_check(self):
+        upload = SimpleUploadedFile('license.heic', b'\x00\x00\x00 ftypheic', content_type='image/heic')
+        self.assertEqual(document_ai.detect_mime_type(upload), 'image/heic')
+
+    def test_heic_is_converted_to_jpeg_before_it_is_sent(self):
+        with patch('hiring.document_ai._to_jpeg', return_value=b'jpeg bytes') as convert:
+            data, mime_type = document_ai._prepare_upload(b'heic bytes', 'image/heic')
+        convert.assert_called_once_with(b'heic bytes')
+        self.assertEqual((data, mime_type), (b'jpeg bytes', 'image/jpeg'))
+
+    def test_supported_types_are_passed_through_untouched(self):
+        with patch('hiring.document_ai._to_jpeg') as convert:
+            data, mime_type = document_ai._prepare_upload(b'%PDF', 'application/pdf')
+        convert.assert_not_called()
+        self.assertEqual((data, mime_type), (b'%PDF', 'application/pdf'))
+
+    def test_missing_pillow_heif_becomes_an_actionable_message(self):
+        upload = SimpleUploadedFile('license.heic', b'\x00\x00\x00 ftypheic', content_type='image/heic')
+        with patch('hiring.document_ai._to_jpeg', side_effect=ValueError(
+                'HEIC images are not supported on this server. Re-save the photo '
+                'as JPEG or PNG and upload it again.')), \
+             patch('hiring.document_ai._client') as client:
+            result = document_ai.parse_document(upload)
+        self.assertIn('Re-save the photo', result['error'])
+        client.assert_not_called()
+
+
+class DocumentRequestShapeTests(TestCase):
+    """What actually goes over the wire to OpenAI."""
+
+    def _parse(self, upload):
+        response = type('R', (), {'output_parsed': document_ai.ExtractedDocument(
+            document_type=document_ai.DocumentType.CDL, full_name='Bob Driver',
+        )})()
+        with patch('hiring.document_ai._client') as client:
+            client.return_value.responses.parse.return_value = response
+            result = document_ai.parse_document(upload)
+            return result, client.return_value.responses.parse.call_args.kwargs
+
+    def test_a_pdf_is_sent_as_an_input_file(self):
+        upload = SimpleUploadedFile('w9.pdf', b'%PDF-1.4', content_type='application/pdf')
+        result, kwargs = self._parse(upload)
+        part = kwargs['input'][0]['content'][1]
+        self.assertEqual(part['type'], 'input_file')
+        self.assertEqual(part['filename'], 'w9.pdf')
+        self.assertTrue(part['file_data'].startswith('data:application/pdf;base64,'))
+        self.assertEqual(result['fields'], {'full_name': 'Bob Driver'})
+
+    def test_an_image_is_sent_as_an_input_image(self):
+        upload = SimpleUploadedFile('license.jpg', b'\xff\xd8\xff', content_type='image/jpeg')
+        _, kwargs = self._parse(upload)
+        part = kwargs['input'][0]['content'][1]
+        self.assertEqual(part['type'], 'input_image')
+        self.assertTrue(part['image_url'].startswith('data:image/jpeg;base64,'))
+
+    def test_the_schema_is_sent_so_the_response_is_structured(self):
+        upload = SimpleUploadedFile('license.jpg', b'\xff\xd8\xff', content_type='image/jpeg')
+        _, kwargs = self._parse(upload)
+        self.assertIs(kwargs['text_format'], document_ai.ExtractedDocument)
+
+    def test_a_model_that_rejects_temperature_is_retried_without_it(self):
+        upload = SimpleUploadedFile('license.jpg', b'\xff\xd8\xff', content_type='image/jpeg')
+        response = type('R', (), {'output_parsed': document_ai.ExtractedDocument(
+            document_type=document_ai.DocumentType.CDL, full_name='Bob Driver',
+        )})()
+        with patch('hiring.document_ai._client') as client:
+            client.return_value.responses.parse.side_effect = [
+                Exception("Unsupported parameter: 'temperature' is not supported"),
+                response,
+            ]
+            result = document_ai.parse_document(upload)
+
+        calls = client.return_value.responses.parse.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn('temperature', calls[1].kwargs)
+        self.assertIsNone(result['error'])
+
+    def test_an_api_failure_does_not_leak_internals_to_the_caller(self):
+        upload = SimpleUploadedFile('license.jpg', b'\xff\xd8\xff', content_type='image/jpeg')
+        with patch('hiring.document_ai._client') as client:
+            client.return_value.responses.parse.side_effect = Exception(
+                'org-secret-123 quota exceeded'
+            )
+            result = document_ai.parse_document(upload)
+        self.assertEqual(result['error'], 'Could not analyze this file.')
+        self.assertNotIn('org-secret-123', result['error'])
