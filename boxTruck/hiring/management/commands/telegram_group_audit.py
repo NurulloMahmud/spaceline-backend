@@ -26,10 +26,13 @@ method to enumerate the chats a bot belongs to.
     ./venv/bin/python manage.py telegram_group_audit --identity
     ./venv/bin/python manage.py telegram_group_audit
     ./venv/bin/python manage.py telegram_group_audit --driver "Edgar Cortes"
+    ./venv/bin/python manage.py telegram_group_audit --scan-logs --title "Edgar Cortes"
     ./venv/bin/python manage.py telegram_group_audit --chat-id -1001234567890
     ./venv/bin/python manage.py telegram_group_audit --chat-id -1001234567890 --check-user 8623386887
     ./venv/bin/python manage.py telegram_group_audit --chat-id -1001234567890 --invite
 """
+import glob
+import re
 from pathlib import Path
 
 import requests
@@ -122,6 +125,27 @@ class Command(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--scan-logs",
+            action="store_true",
+            help=(
+                "Recover chat ids from agent_bot's own logs and audit each. The "
+                "Bot API cannot list a bot's groups, but agent_bot logs the chat "
+                "id of every message it sees, so a group the bot is in but that "
+                "was never linked in the TMS is discoverable this way. Combine "
+                "with --title to home in on one group by name."
+            ),
+        )
+        parser.add_argument(
+            "--log-file",
+            action="append",
+            default=[],
+            dest="log_files",
+            help=(
+                "A log file for --scan-logs to read, repeatable. Defaults to the "
+                "usual supervisor paths for agent_bot if none is given."
+            ),
+        )
+        parser.add_argument(
             "--driver",
             help=(
                 "Before auditing, print every Driver whose name matches this "
@@ -156,18 +180,28 @@ class Command(BaseCommand):
             self._driver_lookup(options["driver"])
 
         groups = self._group_ids()
-        if not groups and not options["chat_id"]:
-            raise CommandError("No driver has a telegram_group_id set.")
-
-        self.stdout.write(
-            f"\n{len(groups)} linked group(s) on file, "
-            f"{len(bots)} bot token(s) in play.\n"
-        )
 
         # A raw chat id lets us probe a group that no driver record points at
         # -- e.g. one the customer named by title but that was never linked.
         if options["chat_id"]:
             groups.setdefault(options["chat_id"].strip(), []).append("(from --chat-id)")
+
+        # Chat ids harvested from agent_bot's logs -- the practical way to find
+        # a group the bot is in that the TMS never linked.
+        if options["scan_logs"]:
+            for chat_id in self._scan_logs(options["log_files"]):
+                groups.setdefault(chat_id, []).append("(from logs)")
+
+        if not groups:
+            raise CommandError(
+                "Nothing to audit: no driver has a telegram_group_id, no "
+                "--chat-id was given, and --scan-logs found no chat ids."
+            )
+
+        self.stdout.write(
+            f"\n{len(groups)} group id(s) to audit, "
+            f"{len(bots)} bot token(s) in play.\n"
+        )
 
         reported = 0
         for chat_id, drivers in sorted(groups.items()):
@@ -335,6 +369,55 @@ class Command(BaseCommand):
                 )
             )
         return bots
+
+    # Telegram group/supergroup ids are negative; supergroups are -100 + digits.
+    # Match those as whole tokens so a phone number in a log line is not read
+    # as a chat id.
+    _CHAT_ID_RE = re.compile(r"(?<![\d-])(-\d{6,})(?![\d])")
+
+    DEFAULT_LOG_GLOBS = [
+        "/var/log/agent_bot.err.log*",
+        "/var/log/agent_bot.out.log*",
+        "/var/log/supervisor/agent_bot*.log*",
+    ]
+
+    def _scan_logs(self, log_files):
+        paths = []
+        if log_files:
+            for pattern in log_files:
+                paths.extend(sorted(glob.glob(pattern)) or [pattern])
+        else:
+            for pattern in self.DEFAULT_LOG_GLOBS:
+                paths.extend(sorted(glob.glob(pattern)))
+
+        self.stdout.write("\nScanning agent_bot logs for chat ids\n" + "-" * 72)
+        found = {}
+        for path in paths:
+            p = Path(path)
+            if not p.is_file():
+                self.stdout.write(self.style.WARNING(f"  {path} — not found"))
+                continue
+            try:
+                text = p.read_text(errors="replace")
+            except OSError as e:
+                self.stdout.write(self.style.ERROR(f"  {path} — unreadable: {e}"))
+                continue
+            hits = set(self._CHAT_ID_RE.findall(text))
+            for cid in hits:
+                found.setdefault(cid, set()).add(p.name)
+            self.stdout.write(f"  {path} — {len(hits)} distinct chat id(s)")
+
+        if not found:
+            self.stdout.write(
+                self.style.WARNING(
+                    "  No chat ids in the logs. Either the logs have rotated away "
+                    "or the bot has logged no group traffic. Pass --log-file with "
+                    "the right path, or fetch the id from Telegram directly."
+                )
+            )
+        else:
+            self.stdout.write(f"  -> {len(found)} distinct chat id(s) to resolve")
+        return sorted(found)
 
     def _driver_lookup(self, needle):
         rows = (
