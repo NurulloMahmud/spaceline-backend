@@ -4,6 +4,19 @@ venv
 __pycache__
 *.py[cod]
 .env
+# Only bare `.env` was ignored, so the copies a shell redirect leaves behind —
+# .env.save, .env.save.1, .env.bak.<date> — sat untracked in the deploy
+# directory holding live Nylas, OpenAI and database credentials. One `git add
+# -A` on the server would have committed them.
+.env.*
+!.env.example
+!.env.sample
+*.bak
+*.bak.*
+*.bak_*
+# atrek is its own repository (makhammatovb/atrek), checked out inside this one
+# because deploy.sh expects it at ./agent and calls its deploy script.
+/agent/
 *.log
 .idea
 .vscode
