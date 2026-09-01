@@ -45,22 +45,35 @@ API_ROOT = "https://api.telegram.org"
 TIMEOUT = 15
 
 
+class _Err(str):
+    """A Bot API error description that also carries the error `parameters`.
+    Subclasses str so existing call sites keep printing it unchanged."""
+    parameters = {}
+
+
 def _call(token, method, **params):
-    """One Bot API call. Returns (ok, result_or_description)."""
+    """One Bot API call. Returns (ok, result_or_description).
+
+    On failure the Telegram `parameters` object (which carries
+    migrate_to_chat_id when a basic group has become a supergroup) is stashed
+    on the returned string as `.parameters`, so callers that care can follow
+    the migration without every caller having to unpack a third value."""
     try:
         resp = requests.post(
             f"{API_ROOT}/bot{token}/{method}", data=params, timeout=TIMEOUT
         )
     except requests.RequestException as e:
-        return False, f"request failed: {e}"
+        return False, _Err(f"request failed: {e}")
 
     try:
         body = resp.json()
     except ValueError:
-        return False, f"HTTP {resp.status_code}, unparseable body"
+        return False, _Err(f"HTTP {resp.status_code}, unparseable body")
 
     if not body.get("ok"):
-        return False, body.get("description", f"HTTP {resp.status_code}")
+        err = _Err(body.get("description", f"HTTP {resp.status_code}"))
+        err.parameters = body.get("parameters") or {}
+        return False, err
     return True, body.get("result")
 
 
@@ -466,7 +479,17 @@ class Command(BaseCommand):
                 reasons[bot["username"]] = result
         return title, seen_by, reasons
 
-    def _report(self, chat_id, title, drivers, seen_by, reasons, bots, options):
+    @staticmethod
+    def _migrate_target(reasons):
+        """If any bot's getChat failed with 'upgraded to supergroup', the new
+        supergroup id is in that error's parameters. Return it, else None."""
+        for err in reasons.values():
+            new_id = getattr(err, "parameters", {}).get("migrate_to_chat_id")
+            if new_id is not None:
+                return str(new_id)
+        return None
+
+    def _report(self, chat_id, title, drivers, seen_by, reasons, bots, options, _depth=0):
         self.stdout.write("\n" + "=" * 72)
         self.stdout.write(
             self.style.MIGRATE_HEADING(title or "(no bot can see this chat)")
@@ -484,10 +507,36 @@ class Command(BaseCommand):
                     self.style.WARNING(f"  [@{bot['username']}] cannot see chat: {why}")
                 )
 
+        # A basic group that became a supergroup answers under a new id. This
+        # migration is itself a leading explanation for "X removed Y" service
+        # messages, so follow it and audit the live supergroup.
+        migrated = self._migrate_target(reasons)
+        if migrated and _depth < 3:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  -> this basic group was UPGRADED to a supergroup. "
+                    f"The live chat is id {migrated}; auditing it now.\n"
+                    "     (A basic->supergroup migration is a known source of "
+                    "confusing 'left/removed' service messages.)"
+                )
+            )
+            n_title, n_seen, n_reasons = self._resolve_title(bots, migrated)
+            self._report(
+                migrated,
+                n_title,
+                [f"(supergroup migrated from {chat_id})"],
+                n_seen,
+                n_reasons,
+                bots,
+                options,
+                _depth + 1,
+            )
+
         if not seen_by:
             self.stdout.write(
-                "  -> No configured bot is in this chat, so its admin list and "
-                "member states cannot be read from here."
+                "  -> No configured bot can read this chat id directly"
+                + (" (followed above)." if migrated else ", so its admin list and "
+                   "member states cannot be read from here.")
             )
             return
 
