@@ -23,6 +23,7 @@ load offers would go missing while this ran.
 Group ids come from `Driver.telegram_group_id`, since the Bot API has no
 method to enumerate the chats a bot belongs to.
 
+    ./venv/bin/python manage.py telegram_group_audit --identity
     ./venv/bin/python manage.py telegram_group_audit
     ./venv/bin/python manage.py telegram_group_audit --title "A-0002"
     ./venv/bin/python manage.py telegram_group_audit --title "A-0002" --check-user 8623386887
@@ -85,6 +86,15 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
+            "--identity",
+            action="store_true",
+            help=(
+                "Resolve every token this deployment configures to the bot it "
+                "actually belongs to, and stop. Answers whether Spaceline "
+                "really runs two Telegram bots or one."
+            ),
+        )
+        parser.add_argument(
             "--title",
             help=(
                 "Only groups whose Telegram title contains this text "
@@ -115,6 +125,10 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        if options["identity"]:
+            self._identity_report()
+            return
+
         tokens = self._resolve_tokens(options["tokens"])
         bots = self._identify(tokens)
         if not bots:
@@ -147,6 +161,96 @@ class Command(BaseCommand):
                     "its id is not on any driver record."
                 )
             )
+
+    # --- identity -------------------------------------------------------
+
+    def _identity_report(self):
+        """Which bot does each configured token actually belong to?
+
+        Three call sites -- billing/bot.py and billing/utils.py, all of them
+        driver-facing -- read `settings.TELEGRAM_WEB_APP_TOKEN`, which the
+        committed config/settings.py never assigns. Either this box runs an
+        uncommitted settings.py that does assign it, or those three functions
+        raise AttributeError and no message has ever left them. This says
+        which, and if the setting does exist, whether it is a second bot or
+        the same one under another name.
+        """
+        repo_root = Path(settings.BASE_DIR).parent
+        sources = [
+            ("BOT_TOKEN (django settings)", getattr(settings, "BOT_TOKEN", None)),
+            (
+                "TELEGRAM_WEB_APP_TOKEN (django settings)",
+                getattr(settings, "TELEGRAM_WEB_APP_TOKEN", None),
+            ),
+            ("agent_bot/.env TELEGRAM_BOT_TOKEN", _agent_bot_token(repo_root)),
+            (
+                "email-agent/.env TELEGRAM_BOT_TOKEN",
+                self._env_token(repo_root / "email-agent" / ".env"),
+            ),
+        ]
+
+        self.stdout.write("\nConfigured Telegram tokens\n" + "=" * 72)
+        identities = {}
+        for label, token in sources:
+            if not token:
+                # An absent setting is the finding, not an error to skip past.
+                self.stdout.write(
+                    self.style.WARNING(f"  {label}\n      NOT SET / attribute missing")
+                )
+                continue
+
+            ok, result = _call(token, "getMe")
+            if not ok:
+                self.stdout.write(
+                    self.style.ERROR(f"  {label}\n      {_redact(token)} — getMe failed: {result}")
+                )
+                continue
+
+            self.stdout.write(
+                f"  {label}\n"
+                f"      {_redact(token)} -> @{result.get('username')} (bot id {result['id']})"
+            )
+            identities.setdefault(result["id"], []).append(label)
+
+        self.stdout.write("\n" + "=" * 72)
+        if not identities:
+            self.stdout.write(
+                self.style.ERROR("No token resolved. Nothing is posting to Telegram.")
+            )
+        elif len(identities) == 1:
+            bot_id, labels = next(iter(identities.items()))
+            self.stdout.write(
+                self.style.WARNING(
+                    f"ONE bot (id {bot_id}) behind {len(labels)} setting name(s). "
+                    "The names differ; the bot does not."
+                )
+            )
+        else:
+            self.stdout.write(
+                self.style.SUCCESS(f"{len(identities)} genuinely distinct bots:")
+            )
+            for bot_id, labels in identities.items():
+                self.stdout.write(f"    bot id {bot_id}: {', '.join(labels)}")
+
+        if getattr(settings, "TELEGRAM_WEB_APP_TOKEN", None) is None:
+            self.stdout.write(
+                self.style.ERROR(
+                    "\nsettings.TELEGRAM_WEB_APP_TOKEN does not exist on this box.\n"
+                    "  billing/bot.py:94, billing/utils.py:235 and :264 read it, so all\n"
+                    "  three raise AttributeError and send nothing. Statement notices and\n"
+                    "  load notices to driver groups are silently dead."
+                )
+            )
+
+    @staticmethod
+    def _env_token(env_path):
+        if not env_path.is_file():
+            return None
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("TELEGRAM_BOT_TOKEN="):
+                return line.split("=", 1)[1].strip() or None
+        return None
 
     # --- setup ----------------------------------------------------------
 
