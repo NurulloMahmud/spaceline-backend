@@ -540,20 +540,46 @@ class Command(BaseCommand):
             )
             return
 
+        # getChat can succeed on a migrated basic group while
+        # getChatAdministrators returns the upgrade error carrying the new id.
+        # Catch that here too, not only from the getChat failures above.
+        admin_migrated = None
         for bot in seen_by:
-            self._report_admins(bot, chat_id)
+            admin_migrated = self._report_admins(bot, chat_id) or admin_migrated
             if options["check_user"]:
                 self._report_member(bot, chat_id, options["check_user"])
             if options["invite"]:
                 self._make_invite(bot, chat_id)
 
+        if admin_migrated and not migrated and _depth < 3:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  -> admin list is under the supergroup id {admin_migrated} "
+                    "(this group was upgraded); auditing it now."
+                )
+            )
+            n_title, n_seen, n_reasons = self._resolve_title(bots, admin_migrated)
+            self._report(
+                admin_migrated,
+                n_title,
+                [f"(supergroup migrated from {chat_id})"],
+                n_seen,
+                n_reasons,
+                bots,
+                options,
+                _depth + 1,
+            )
+
     def _report_admins(self, bot, chat_id):
+        """Print the admin list. Returns a migrate_to_chat_id if the call
+        failed because the group was upgraded to a supergroup, else None."""
         ok, admins = _call(bot["token"], "getChatAdministrators", chat_id=chat_id)
         if not ok:
             self.stdout.write(
                 self.style.ERROR(f"  [@{bot['username']}] admins: {admins}")
             )
-            return
+            new_id = getattr(admins, "parameters", {}).get("migrate_to_chat_id")
+            return str(new_id) if new_id is not None else None
 
         self.stdout.write(f"  [@{bot['username']}] administrators:")
         for admin in admins:
