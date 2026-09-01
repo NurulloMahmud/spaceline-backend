@@ -130,19 +130,28 @@ The server pulls from GitHub. Authentication comes from a git credential file
 outside the repo, so no token appears in the remote URL or in `git remote -v`:
 
 ```bash
-ssh root@95.169.204.245 'cd /home/api/email-agent && bash deploy.sh'
+ssh root@95.169.205.181 'cd /home/api/spaceline && ./deploy.sh email_agent'
 ```
+
+The pull happens once for the whole repo, so the deploy script lives at the
+repo root rather than in this directory, and it takes the components to
+restart as arguments (`./deploy.sh` alone does every service).
 
 That pulls `main`, installs dependencies, restarts the service and waits on the
 health check, failing loudly with the error log if it does not come up. `.env`
 is gitignored, so a pull never touches the server's configuration.
+
+The pull is `--ff-only`. It aborts rather than merging if the server's checkout
+has commits of its own — inspect them with
+`git log --oneline origin/main..HEAD` before deciding what to do with them,
+because a commit made directly on the box is running in production.
 
 To re-establish the credential on a fresh box (or after rotating the token):
 
 ```bash
 umask 077
 printf 'https://<github-user>:<token>@github.com\n' > /root/.git-credentials-email-agent
-cd /home/api/email-agent
+cd /home/api/spaceline
 git config --local credential.helper 'store --file=/root/.git-credentials-email-agent'
 ```
 
@@ -217,7 +226,7 @@ is one. Inbound messages are never touched: suggestions and ratecon checks
 point at them. It changes nothing without `--apply`:
 
 ```bash
-cd /home/api/email-agent
+cd /home/api/spaceline/email-agent
 ./venv/bin/python -m scripts.dedupe_email_messages                  # look
 ./venv/bin/python -m scripts.dedupe_email_messages --apply          # delete
 ./venv/bin/python -m scripts.dedupe_email_messages --company 1 --apply
@@ -231,7 +240,7 @@ version over the table. It changes nothing without `--apply`, is safe to re-run,
 and can be scoped:
 
 ```bash
-cd /home/api/email-agent
+cd /home/api/spaceline/email-agent
 ./venv/bin/python -m scripts.backfill_message_text                  # look
 ./venv/bin/python -m scripts.backfill_message_text --apply          # write
 ./venv/bin/python -m scripts.backfill_message_text --company 1 --apply
