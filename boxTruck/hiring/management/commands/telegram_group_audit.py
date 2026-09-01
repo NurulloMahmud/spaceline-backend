@@ -25,9 +25,10 @@ method to enumerate the chats a bot belongs to.
 
     ./venv/bin/python manage.py telegram_group_audit --identity
     ./venv/bin/python manage.py telegram_group_audit
-    ./venv/bin/python manage.py telegram_group_audit --title "A-0002"
-    ./venv/bin/python manage.py telegram_group_audit --title "A-0002" --check-user 8623386887
-    ./venv/bin/python manage.py telegram_group_audit --title "A-0002" --invite
+    ./venv/bin/python manage.py telegram_group_audit --driver "Edgar Cortes"
+    ./venv/bin/python manage.py telegram_group_audit --chat-id -1001234567890
+    ./venv/bin/python manage.py telegram_group_audit --chat-id -1001234567890 --check-user 8623386887
+    ./venv/bin/python manage.py telegram_group_audit --chat-id -1001234567890 --invite
 """
 from pathlib import Path
 
@@ -112,6 +113,23 @@ class Command(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--chat-id",
+            help=(
+                "Audit this Telegram chat id directly, even if no driver record "
+                "carries it. Use when the group was never linked in the TMS -- "
+                "open the group in Telegram Web and the id is the -100... number "
+                "in the URL, or forward one of its messages to @userinfobot."
+            ),
+        )
+        parser.add_argument(
+            "--driver",
+            help=(
+                "Before auditing, print every Driver whose name matches this "
+                "text and the telegram_group_id on record for them. Answers "
+                "'is this driver's group even linked?'."
+            ),
+        )
+        parser.add_argument(
             "--check-user",
             help="Telegram user id to look up in each matched group.",
         )
@@ -134,8 +152,11 @@ class Command(BaseCommand):
         if not bots:
             raise CommandError("No usable bot token — nothing to audit.")
 
+        if options["driver"]:
+            self._driver_lookup(options["driver"])
+
         groups = self._group_ids()
-        if not groups:
+        if not groups and not options["chat_id"]:
             raise CommandError("No driver has a telegram_group_id set.")
 
         self.stdout.write(
@@ -143,22 +164,43 @@ class Command(BaseCommand):
             f"{len(bots)} bot token(s) in play.\n"
         )
 
-        matched = 0
+        # A raw chat id lets us probe a group that no driver record points at
+        # -- e.g. one the customer named by title but that was never linked.
+        if options["chat_id"]:
+            groups.setdefault(options["chat_id"].strip(), []).append("(from --chat-id)")
+
+        reported = 0
         for chat_id, drivers in sorted(groups.items()):
-            title, seen_by = self._resolve_title(bots, chat_id)
-            if title is None:
-                continue
-            if options["title"] and options["title"].lower() not in title.lower():
+            title, seen_by, reasons = self._resolve_title(bots, chat_id)
+
+            # Filter on title only when a bot could actually read one. A group
+            # no bot can see is never silently dropped: not seeing it is itself
+            # the finding -- the bot may have been removed from that very chat.
+            if options["title"] and title and options["title"].lower() not in title.lower():
                 continue
 
-            matched += 1
-            self._report(chat_id, title, drivers, seen_by, bots, options)
+            reported += 1
+            self._report(chat_id, title, drivers, seen_by, reasons, bots, options)
 
-        if not matched:
+        if reported == 0:
+            self.stdout.write(
+                self.style.WARNING("\nNo group on file to report.")
+            )
+
+        # The Bot API cannot list the chats a bot belongs to, so a group the
+        # customer names but that no driver row carries is invisible here. Say
+        # so plainly rather than letting silence imply "clean".
+        if options["title"] and not any(
+            options["title"].lower() in " ".join(d).lower() for d in groups.values()
+        ):
             self.stdout.write(
                 self.style.WARNING(
-                    "\nNo group matched. Either no bot is a member of it, or "
-                    "its id is not on any driver record."
+                    f"\nNote: only {len(groups)} group id(s) are stored on driver "
+                    f"records. If the group titled '{options['title']}' is not among "
+                    "the titles above, it is simply not linked to any driver in the "
+                    "TMS -- the Bot API cannot look a group up by title, only by a "
+                    "chat id we already hold. Get its chat id (see --help) and pass "
+                    "--chat-id to audit it directly."
                 )
             )
 
@@ -294,6 +336,20 @@ class Command(BaseCommand):
             )
         return bots
 
+    def _driver_lookup(self, needle):
+        rows = (
+            Driver.objects
+            .filter(full_name__icontains=needle)
+            .values_list("id", "full_name", "telegram_group_id")
+        )
+        self.stdout.write(f"\nDrivers matching '{needle}':\n" + "-" * 72)
+        if not rows:
+            self.stdout.write(self.style.WARNING("  none"))
+            return
+        for pk, name, gid in rows:
+            state = gid if gid else self.style.WARNING("(no telegram_group_id set)")
+            self.stdout.write(f"  #{pk}  {name}  ->  {state}")
+
     def _group_ids(self):
         """Distinct group ids, each with the drivers pointing at it. A group
         carrying more than one driver is itself worth knowing about."""
@@ -311,28 +367,46 @@ class Command(BaseCommand):
     # --- per-group ------------------------------------------------------
 
     def _resolve_title(self, bots, chat_id):
-        """The chat's title, via whichever bots can actually see the chat."""
+        """The chat's title, via whichever bots can see the chat, plus the
+        per-bot reason for any that can't. 'bot is not a member of the chat'
+        vs 'chat not found' distinguishes a removed bot from a stale id, and
+        both matter to the removal question."""
         title = None
         seen_by = []
+        reasons = {}
         for bot in bots:
             ok, result = _call(bot["token"], "getChat", chat_id=chat_id)
             if ok:
                 seen_by.append(bot)
                 title = title or result.get("title") or "(no title)"
-        return title, seen_by
+            else:
+                reasons[bot["username"]] = result
+        return title, seen_by, reasons
 
-    def _report(self, chat_id, title, drivers, seen_by, bots, options):
+    def _report(self, chat_id, title, drivers, seen_by, reasons, bots, options):
         self.stdout.write("\n" + "=" * 72)
-        self.stdout.write(self.style.MIGRATE_HEADING(f"{title}"))
+        self.stdout.write(
+            self.style.MIGRATE_HEADING(title or "(no bot can see this chat)")
+        )
         self.stdout.write(f"  chat_id : {chat_id}")
         self.stdout.write(f"  drivers : {', '.join(drivers)}")
 
-        blind = [b for b in bots if b not in seen_by]
-        if blind:
+        # Why a bot can't see the chat is a finding in itself. If the driver
+        # bot reports it is no longer a member of a group it used to serve,
+        # that is a bot that was removed -- not a bot that removed anyone.
+        for bot in bots:
+            if bot not in seen_by:
+                why = reasons.get(bot["username"], "unknown")
+                self.stdout.write(
+                    self.style.WARNING(f"  [@{bot['username']}] cannot see chat: {why}")
+                )
+
+        if not seen_by:
             self.stdout.write(
-                "  not a member: "
-                + ", ".join(f"@{b['username']}" for b in blind)
+                "  -> No configured bot is in this chat, so its admin list and "
+                "member states cannot be read from here."
             )
+            return
 
         for bot in seen_by:
             self._report_admins(bot, chat_id)
