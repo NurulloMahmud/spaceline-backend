@@ -314,6 +314,14 @@ Messages gain **`sent_outside_app`** (boolean):
 Worth a small badge — "sent from mail client" — so a dispatcher can see a
 colleague already replied.
 
+**Fixed 2026-09-01: those replies were arriving in `messages[]` twice.** One
+email leaves two copies in the mailbox when the mail client saves its own to
+Sent and the provider saves another, and each reached the webhook under its own
+Nylas id. They are now recognised as one email by their RFC `Message-Id` and
+stored once. No contract change — if you added a client-side de-duplication for
+this, it is no longer needed. Copies already stored are removed by a
+`scripts/dedupe_email_messages.py` run on the server.
+
 **Caution worth building for:** a pending AI draft is *not* auto-dismissed when
 someone replies out of band. If a colleague answered from Gmail and you then
 click Send on the pending suggestion, the broker gets two replies. The

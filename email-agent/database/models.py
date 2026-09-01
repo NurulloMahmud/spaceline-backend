@@ -143,6 +143,12 @@ class EmailMessage(Base):
         nullable=False, index=True,
     )
     nylas_message_id = Column(String, nullable=True, unique=True, index=True)
+    # The RFC 5322 Message-Id the sending client wrote. Unlike the Nylas id it
+    # identifies the *email*, not one mailbox copy of it, which is what keeps a
+    # reply sent from a mail client from landing on the thread twice — see
+    # inbound.duplicate_of(). Not unique: two companies can be sent the same
+    # email, and each has its own negotiation to record it on.
+    rfc_message_id = Column(String, nullable=True, index=True)
     direction = Column(String, nullable=False)  # inbound | outbound
     from_email = Column(String, nullable=True)
     to_email = Column(String, nullable=True)

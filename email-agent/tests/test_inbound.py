@@ -636,6 +636,200 @@ async def test_own_send_on_an_unknown_thread_is_ignored(session, account, negoti
     assert session.query(models.EmailMessage).count() == 0
 
 
+# --- one email, more than one copy in the mailbox ---------------------------
+#
+# A reply written in Gmail or Outlook arrives as `message.created` twice when
+# the client saves its own copy to Sent and the provider saves another. The
+# Nylas ids differ, so the id alone never told them apart and the thread showed
+# the reply twice.
+
+
+MESSAGE_ID = "<CAF7y8mQ2vQ@mail.gmail.com>"
+
+
+def with_headers(message, message_id=MESSAGE_ID):
+    return dict(message, headers=[{"name": "Message-Id", "value": message_id}])
+
+
+def test_rfc_message_id_reads_the_header_without_its_brackets():
+    assert inbound.rfc_message_id(with_headers({})) == "CAF7y8mQ2vQ@mail.gmail.com"
+
+
+def test_rfc_message_id_is_case_insensitive_about_the_header_name():
+    message = {"headers": [{"name": "MESSAGE-ID", "value": " <abc@x> "}]}
+    assert inbound.rfc_message_id(message) == "abc@x"
+
+
+def test_rfc_message_id_is_empty_when_the_provider_returned_no_headers():
+    assert inbound.rfc_message_id({"id": "msg-1"}) == ""
+    assert inbound.rfc_message_id({"headers": []}) == ""
+    assert inbound.rfc_message_id({"headers": [{"name": "Subject", "value": "Hi"}]}) == ""
+
+
+async def test_two_mailbox_copies_of_one_reply_are_stored_once(
+    session, account, negotiation, captured
+):
+    """The reported bug: one reply written in a mail client, shown twice."""
+    await inbound.handle_own_send(
+        session, account, with_headers(make_own_send(id="msg-client-copy"))
+    )
+    session.commit()
+    await inbound.handle_own_send(
+        session, account, with_headers(make_own_send(id="msg-provider-copy"))
+    )
+    session.commit()
+
+    stored = session.query(models.EmailMessage).one()
+    assert stored.nylas_message_id == "msg-client-copy"
+    assert stored.rfc_message_id == "CAF7y8mQ2vQ@mail.gmail.com"
+
+
+async def test_two_copies_are_stored_once_when_no_headers_come_back(
+    session, account, negotiation, captured
+):
+    """
+    Not every provider returns headers. The same text, sent to the same
+    negotiation seconds apart, is the second copy of one email.
+    """
+    await inbound.handle_own_send(session, account, make_own_send(id="copy-a"))
+    session.commit()
+    await inbound.handle_own_send(session, account, make_own_send(id="copy-b"))
+    session.commit()
+
+    assert session.query(models.EmailMessage).count() == 1
+
+
+async def test_a_second_reply_saying_something_else_is_still_recorded(
+    session, account, negotiation, captured
+):
+    await inbound.handle_own_send(session, account, make_own_send(id="reply-1"))
+    session.commit()
+    await inbound.handle_own_send(
+        session, account,
+        make_own_send(id="reply-2", body="<div>Actually, $3,050 and we are set.</div>"),
+    )
+    session.commit()
+
+    assert session.query(models.EmailMessage).count() == 2
+
+
+async def test_the_same_words_sent_again_much_later_are_recorded(
+    session, account, negotiation, captured
+):
+    """
+    The body check is how a duplicate is caught with no headers to go on, so
+    it is held to a window. A dispatcher chasing a broker the next morning
+    with the same sentence is writing a second email, not sending one twice.
+    """
+    await inbound.handle_own_send(session, account, make_own_send(id="chase-1"))
+    session.commit()
+
+    first = session.query(models.EmailMessage).one()
+    first.created_at = datetime.now(timezone.utc) - timedelta(
+        minutes=inbound.DUPLICATE_WINDOW_MINUTES + 1
+    )
+    session.commit()
+
+    await inbound.handle_own_send(session, account, make_own_send(id="chase-2"))
+    session.commit()
+
+    assert session.query(models.EmailMessage).count() == 2
+
+
+async def test_the_message_id_of_an_app_send_is_learned_from_its_echo(
+    session, account, negotiation, captured
+):
+    """
+    A send this app made is recorded from the send response, which carries no
+    headers. Its webhook echo is where the Message-Id first appears, and
+    keeping it is what recognises a second mailbox copy of that same email.
+    """
+    session.add(
+        models.EmailMessage(
+            negotiation_id=negotiation.id,
+            nylas_message_id="msg-app-send",
+            direction="outbound",
+            from_email="dispatch@shipluxellc.com",
+            subject="Re: Bid",
+            body_text="Sent through the app.",
+            sent_by_user_id=7,
+        )
+    )
+    session.commit()
+
+    await inbound.handle_own_send(
+        session, account, with_headers(make_own_send(id="msg-app-send"))
+    )
+    session.commit()
+
+    stored = session.query(models.EmailMessage).one()
+    assert stored.sent_by_user_id == 7, "the app's own record is kept"
+    assert stored.rfc_message_id == "CAF7y8mQ2vQ@mail.gmail.com"
+
+    # The provider's second copy of that same send: a new Nylas id, the same
+    # Message-Id, and text that no longer matches what the app stored.
+    await inbound.handle_own_send(
+        session, account, with_headers(make_own_send(id="msg-app-send-copy"))
+    )
+    session.commit()
+
+    assert session.query(models.EmailMessage).count() == 1
+
+
+async def test_two_copies_of_a_broker_reply_are_stored_once(
+    session, account, negotiation, captured, monkeypatch
+):
+    monkeypatch.setattr(
+        ai, "classify_inbound",
+        lambda **k: {"intent": "question", "contains_ratecon": False,
+                     "ratecon_attachment_name": None, "quoted_amount": None, "reasoning": ""},
+    )
+    monkeypatch.setattr(
+        ai, "draft_reply",
+        lambda **k: {"intent": "question", "draft_subject": "Re: Bid",
+                     "draft_body": "Reply.", "reasoning": ""},
+    )
+
+    await inbound.handle_inbound_message(
+        session, account, with_headers(make_message(id="broker-copy-a"))
+    )
+    session.commit()
+    await inbound.handle_inbound_message(
+        session, account, with_headers(make_message(id="broker-copy-b"))
+    )
+    session.commit()
+
+    assert session.query(models.EmailMessage).count() == 1
+    assert session.query(models.Suggestion).count() == 1
+
+
+async def test_two_identical_broker_messages_without_headers_are_both_kept(
+    session, account, negotiation, captured, monkeypatch
+):
+    """
+    The body check is deliberately outbound-only. Dropping a broker message
+    costs a reply draft and the agreed rate read out of the thread, and a
+    broker who writes "?" twice is talking to us twice.
+    """
+    monkeypatch.setattr(
+        ai, "classify_inbound",
+        lambda **k: {"intent": "question", "contains_ratecon": False,
+                     "ratecon_attachment_name": None, "quoted_amount": None, "reasoning": ""},
+    )
+    monkeypatch.setattr(
+        ai, "draft_reply",
+        lambda **k: {"intent": "question", "draft_subject": "Re: Bid",
+                     "draft_body": "Reply.", "reasoning": ""},
+    )
+
+    await inbound.handle_inbound_message(session, account, make_message(id="nudge-1"))
+    session.commit()
+    await inbound.handle_inbound_message(session, account, make_message(id="nudge-2"))
+    session.commit()
+
+    assert session.query(models.EmailMessage).count() == 2
+
+
 # --- replies stay on the broker's original email chain ----------------------
 
 

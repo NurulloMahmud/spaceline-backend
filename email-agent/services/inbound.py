@@ -283,6 +283,124 @@ def match_negotiation(
     return negotiation
 
 
+# How far back an outbound message with the same text is taken for a second
+# copy of the same email rather than a dispatcher saying the same thing twice.
+# Only used when the Message-Id is missing; the two copies of one send land
+# within seconds of each other.
+DUPLICATE_WINDOW_MINUTES = 15
+
+
+def rfc_message_id(message: dict) -> str:
+    """
+    The RFC 5322 Message-Id the sending client wrote, without its angle
+    brackets. Empty when the provider did not return headers.
+
+    This is the only id that identifies the *email*. The Nylas id identifies
+    one copy of it in one mailbox, and a single send routinely produces two:
+    a mail client that saves to Sent over IMAP writes its own copy, and the
+    provider saves another for the same message on submission. Both arrive as
+    `message.created`, with different Nylas ids and identical Message-Ids.
+    """
+    headers = message.get("headers")
+    if isinstance(headers, dict):
+        pairs = list(headers.items())
+    elif isinstance(headers, list):
+        pairs = [
+            (h.get("name"), h.get("value")) for h in headers if isinstance(h, dict)
+        ]
+    else:
+        return ""
+
+    for name, value in pairs:
+        if (name or "").strip().lower() == "message-id" and value:
+            return value.strip().strip("<>").strip()
+    return ""
+
+
+def body_fingerprint(text: Optional[str]) -> str:
+    """Body text with its whitespace flattened, for comparing two copies."""
+    return " ".join((text or "").split())
+
+
+def duplicate_of(
+    session: Session,
+    negotiation: models.Negotiation,
+    *,
+    nylas_message_id: Optional[str],
+    rfc_id: str,
+    direction: str,
+    body_text: str,
+) -> Optional[models.EmailMessage]:
+    """
+    The row this message is already stored as, if there is one.
+
+    Three keys, weakest last:
+
+      - the Nylas id, which catches a redelivered webhook and the echo of a
+        send this app made itself;
+      - the Message-Id on this negotiation, which catches the second mailbox
+        copy of one email — the case that was putting every reply written in
+        Gmail or Outlook on the thread twice;
+      - for outbound only, the same body on this negotiation within
+        DUPLICATE_WINDOW_MINUTES, for providers that return no headers at all.
+        Inbound is left out of that last one deliberately: dropping a broker
+        message costs a reply draft and an agreed rate, and two brokers'
+        "yes" minutes apart are a real conversation, not a duplicate.
+    """
+    if nylas_message_id:
+        row = (
+            session.query(models.EmailMessage)
+            .filter(models.EmailMessage.nylas_message_id == nylas_message_id)
+            .first()
+        )
+        if row:
+            return row
+
+    if rfc_id:
+        row = (
+            session.query(models.EmailMessage)
+            .filter(
+                models.EmailMessage.negotiation_id == negotiation.id,
+                models.EmailMessage.rfc_message_id == rfc_id,
+            )
+            .first()
+        )
+        if row:
+            return row
+
+    fingerprint = body_fingerprint(body_text)
+    if direction != "outbound" or not fingerprint:
+        return None
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=DUPLICATE_WINDOW_MINUTES)
+    recent = (
+        session.query(models.EmailMessage)
+        .filter(
+            models.EmailMessage.negotiation_id == negotiation.id,
+            models.EmailMessage.direction == "outbound",
+            models.EmailMessage.created_at >= since,
+        )
+        .all()
+    )
+    for row in recent:
+        if body_fingerprint(row.body_text) == fingerprint:
+            return row
+    return None
+
+
+def remember_rfc_id(row: models.EmailMessage, rfc_id: str) -> None:
+    """
+    Stamp the Message-Id on a row stored without one.
+
+    A message this app sent is recorded from the send response, which carries
+    no headers; the webhook echo of that same send is where the Message-Id
+    first becomes known. Keeping it means a second mailbox copy of that email
+    is recognised as a duplicate too, instead of only the echo being caught.
+    """
+    if rfc_id and not row.rfc_message_id:
+        row.rfc_message_id = rfc_id
+
+
 def pdf_attachments(message: dict) -> list[dict]:
     out = []
     for att in message.get("attachments") or []:
@@ -314,15 +432,6 @@ async def handle_inbound_message(
     if negotiation.status in (models.BOOKED, models.CLOSED):
         logger.info(f"negotiation {negotiation.id} is {negotiation.status}; storing message only")
 
-    already = (
-        session.query(models.EmailMessage)
-        .filter(models.EmailMessage.nylas_message_id == nylas_message_id)
-        .first()
-    )
-    if already:
-        logger.info(f"inbound message {nylas_message_id} already stored, skipping")
-        return
-
     from_email = ""
     from_entries = message.get("from") or []
     if from_entries and isinstance(from_entries[0], dict):
@@ -331,9 +440,26 @@ async def handle_inbound_message(
     body_text = strip_quoted(message.get("body") or message.get("snippet") or "")
     attachments = pdf_attachments(message)
 
+    rfc_id = rfc_message_id(message)
+    already = duplicate_of(
+        session, negotiation,
+        nylas_message_id=nylas_message_id,
+        rfc_id=rfc_id,
+        direction="inbound",
+        body_text=body_text,
+    )
+    if already:
+        remember_rfc_id(already, rfc_id)
+        logger.info(
+            f"inbound message {nylas_message_id} is already on negotiation "
+            f"{negotiation.id} as message {already.id}, skipping"
+        )
+        return
+
     stored = models.EmailMessage(
         negotiation_id=negotiation.id,
         nylas_message_id=nylas_message_id,
+        rfc_message_id=rfc_id or None,
         direction="inbound",
         from_email=from_email,
         to_email=account.email_address,
@@ -415,30 +541,43 @@ async def handle_own_send(
         )
         return
 
-    already = (
-        session.query(models.EmailMessage)
-        .filter(models.EmailMessage.nylas_message_id == nylas_message_id)
-        .first()
-    )
-    if already:
-        # Sent through the app; it was recorded at send time.
-        logger.info(f"own send {nylas_message_id} already stored, skipping")
-        return
-
     to_entries = message.get("to") or []
     to_email = ""
     if to_entries and isinstance(to_entries[0], dict):
         to_email = to_entries[0].get("email", "")
 
     attachments = pdf_attachments(message)
+    body_text = strip_quoted(message.get("body") or message.get("snippet") or "")
+
+    # One send reaches us more than once: as the echo of a send this app made,
+    # and — when the mail client saves its own copy to Sent while the provider
+    # saves another — as two `message.created` deliveries carrying different
+    # Nylas ids for the same email. Either way the thread must show it once.
+    rfc_id = rfc_message_id(message)
+    already = duplicate_of(
+        session, negotiation,
+        nylas_message_id=nylas_message_id,
+        rfc_id=rfc_id,
+        direction="outbound",
+        body_text=body_text,
+    )
+    if already:
+        remember_rfc_id(already, rfc_id)
+        logger.info(
+            f"own send {nylas_message_id} is already on negotiation "
+            f"{negotiation.id} as message {already.id}, skipping"
+        )
+        return
+
     stored = models.EmailMessage(
         negotiation_id=negotiation.id,
         nylas_message_id=nylas_message_id,
+        rfc_message_id=rfc_id or None,
         direction="outbound",
         from_email=account.email_address,
         to_email=to_email or negotiation.broker_email,
         subject=message.get("subject"),
-        body_text=strip_quoted(message.get("body") or message.get("snippet") or ""),
+        body_text=body_text,
         has_attachments=bool(attachments),
         attachments=[
             {"id": a.get("id"), "filename": a.get("filename"), "size": a.get("size")}

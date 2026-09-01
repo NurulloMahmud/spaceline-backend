@@ -185,6 +185,17 @@ scripts/                 one-off maintenance run by hand
   pub/sub behind `services/events.py` (the publish/subscribe surface stays the same).
 - **Webhooks are idempotent** via the `processed_webhooks` table, and booking is
   guarded by `negotiations.tms_load_id` plus a `load_number` check in the TMS.
+- **One email is stored once, however many copies of it the mailbox holds.**
+  A reply written in Gmail or Outlook rather than in this app arrives as
+  `message.created` twice whenever the mail client saves its own copy to Sent
+  and the provider saves another: two Nylas ids, one email, and the thread
+  showed it twice. Messages are fetched with `fields=include_basic_headers`
+  and matched on the RFC `Message-Id`, which identifies the email rather than
+  one mailbox copy of it (`inbound.duplicate_of`). Where a provider returns no
+  headers, an outbound message repeating the text of one sent to the same
+  negotiation in the last `DUPLICATE_WINDOW_MINUTES` is taken for the same
+  email. Inbound is deliberately left out of that last check: dropping a
+  broker message costs a reply draft and the agreed rate read from the thread.
 - **Failures are never silent.** Every parse, verify, and booking failure writes a
   row and emits an SSE event a dispatcher can see.
 - **A message is matched to its negotiation by thread id, then by broker address
@@ -195,6 +206,22 @@ scripts/                 one-off maintenance run by hand
   negotiation missing a thread id adopts the one it matched on, so the fallback
   runs once per thread. A message from a broker we are negotiating with that
   still matches nothing is logged at WARNING.
+
+### Removing duplicate sent copies already stored
+
+Rows written before the Message-Id check do not remove themselves.
+`scripts/dedupe_email_messages.py` deletes every copy after the first of the
+same outbound email — same `Message-Id`, or same text within
+`DUPLICATE_WINDOW_MINUTES` — keeping the copy the app sent itself where there
+is one. Inbound messages are never touched: suggestions and ratecon checks
+point at them. It changes nothing without `--apply`:
+
+```bash
+cd /home/api/email-agent
+./venv/bin/python -m scripts.dedupe_email_messages                  # look
+./venv/bin/python -m scripts.dedupe_email_messages --apply          # delete
+./venv/bin/python -m scripts.dedupe_email_messages --company 1 --apply
+```
 
 ### Backfilling stored message text
 

@@ -60,6 +60,9 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 ADDITIVE_COLUMNS = (
     "ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS resolved_reason TEXT",
     "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS expected_email_address VARCHAR",
+    "ALTER TABLE email_messages ADD COLUMN IF NOT EXISTS rfc_message_id VARCHAR",
+    "CREATE INDEX IF NOT EXISTS ix_email_messages_rfc_message_id "
+    "ON email_messages (rfc_message_id)",
 )
 
 

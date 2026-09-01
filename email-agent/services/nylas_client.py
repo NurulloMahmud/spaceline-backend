@@ -114,11 +114,32 @@ class NylasService:
         return resp.json().get("data", {})
 
     async def get_message(self, grant_id: str, message_id: str) -> dict:
+        """
+        Fetch one message, with the three RFC threading headers attached.
+
+        `include_basic_headers` is asked for rather than `include_headers`
+        because it is the one that carries Message-Id on every provider — the
+        full set is Google/Microsoft/EAS only, and IMAP and EWS return just
+        the headers Nylas generated. That header is what tells two mailbox
+        copies of a single sent email apart from two different emails, which
+        is the whole of inbound's duplicate handling.
+
+        A provider that rejects the parameter must not take the pipeline down
+        with it, so the plain fetch is tried again and the message is
+        processed without headers.
+        """
+        url = f"{self.base_url}/v3/grants/{grant_id}/messages/{message_id}"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
-                f"{self.base_url}/v3/grants/{grant_id}/messages/{message_id}",
-                headers=self.headers,
+                url, params={"fields": "include_basic_headers"}, headers=self.headers,
             )
+            if resp.status_code == 400:
+                logger.warning(
+                    "grant %s refused include_basic_headers (%s); refetching "
+                    "without headers, so this message can only be deduplicated "
+                    "on its body", grant_id, resp.text[:200],
+                )
+                resp = await client.get(url, headers=self.headers)
         if resp.status_code != 200:
             raise NylasError(f"get message failed ({resp.status_code}): {resp.text[:400]}")
         return resp.json().get("data", {})

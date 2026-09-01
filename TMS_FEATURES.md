@@ -289,7 +289,9 @@ A Nylas webhook (`message.created`) fires on every broker reply.
 
 1. Match `grant_id` → company, `thread_id` → negotiation. Mail on unrelated threads
    is ignored — the mailbox is a real shared inbox. Duplicate webhook deliveries are
-   dropped by `nylas_message_id` uniqueness and a `processed_webhooks` table.
+   dropped by `nylas_message_id` uniqueness and a `processed_webhooks` table, and a
+   second mailbox copy of one email — what a mail client saving to Sent alongside
+   the provider produces — by its RFC `Message-Id`.
 2. Store the message, stripping quoted history (`-----Original Message-----`,
    `From:`, `>` lines, HTML tags) so the model reads only what is new.
 3. **Classify** (`ai.classify_inbound`): `intent` ∈ `counter_offer`, `accept`,
