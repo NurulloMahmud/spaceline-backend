@@ -9,6 +9,7 @@ deactivating the link one step early went unnoticed — registration returned
 surfaced when the driver came back to hand the signed copies in.
 """
 import io
+import json
 from unittest.mock import patch
 
 from django.conf import settings
@@ -23,7 +24,8 @@ from django.utils import timezone
 
 from hiring import document_ai
 from hiring.models import (
-    Driver, DriverCompany, DriverFile, DriverInviteLink, DriverStatus, Vehicle,
+    CompanyFile, Driver, DriverCompany, DriverFile, DriverInviteLink,
+    DriverStatus, Vehicle, VehicleEquipment, VehicleFile,
 )
 from hiring.views import SIGN_FILE_NAMES, mutable_request_data
 from users.models import Company, CustomUser
@@ -193,6 +195,160 @@ class DriverInviteFlowTests(TestCase):
             sorted(DriverFile.objects.filter(driver_id=driver_id).values_list('name', flat=True)),
             ['Contractor Agreement (Generated)', 'W-9 (Generated)'],
         )
+
+
+class RegistrationUploadTests(TestCase):
+    """Files sent with the registration itself.
+
+    The JSON submit endpoint used to take form values only, so vehicle and
+    company paperwork had nowhere to go and ended up on the driver. Multipart
+    registration keeps each file on the record it describes.
+    """
+
+    def setUp(self):
+        self.company = Company.objects.create(
+            name='Space Line LLC',
+            contract_template_text='Agreement between {{contractor_name}} and us.',
+        )
+        self.staff = CustomUser.objects.create_user(
+            username='recruiter2', password='x', company=self.company,
+        )
+        DriverStatus.objects.create(name='pending')
+        self.invite = DriverInviteLink.objects.create(
+            created_by=self.staff, company=self.company,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        self.submit_url = reverse('driver-invite-submit')
+
+    def _register_multipart(self, **extra):
+        payload = {
+            'company_name': 'Bob Hauling LLC',
+            'driver': json.dumps({
+                'driver_full_name': 'Bob Driver', 'phone': '+15550002222',
+            }),
+            'vehicle': json.dumps({
+                'make': 'Ford', 'model': 'Transit', 'equipment': ['Lift-gate'],
+            }),
+        }
+        payload.update(extra)
+        with patch('hiring.views.fill_w9', return_value=_pdf()), \
+             patch('hiring.views.generate_contract', return_value=_pdf()):
+            return self.client.post(
+                f'{self.submit_url}?token={self.invite.token}', payload,
+            )
+
+    def test_each_file_lands_on_the_record_it_describes(self):
+        response = self._register_multipart(
+            driver_files=SimpleUploadedFile('license.pdf', b'%PDF license'),
+            driver_file_names="Driver's License",
+            company_files=SimpleUploadedFile('mc.pdf', b'%PDF mc'),
+            company_file_names='MC Authority',
+            vehicle_files=SimpleUploadedFile('reg.pdf', b'%PDF registration'),
+            vehicle_file_names='Registration',
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        driver = Driver.objects.get(id=response.data['driver_id'])
+        self.assertEqual(
+            [f.name for f in DriverFile.objects.filter(
+                driver=driver).exclude(name__endswith='(Generated)')],
+            ["Driver's License"],
+        )
+        self.assertEqual(
+            [f.name for f in CompanyFile.objects.filter(
+                company=DriverCompany.objects.get(driver=driver))],
+            ['MC Authority'],
+        )
+        self.assertEqual(
+            [f.name for f in VehicleFile.objects.filter(
+                vehicle=Vehicle.objects.get(driver=driver))],
+            ['Registration'],
+        )
+
+    def test_several_files_of_one_kind_keep_their_own_names(self):
+        response = self._register_multipart(
+            vehicle_files=[
+                SimpleUploadedFile('reg.pdf', b'%PDF registration'),
+                SimpleUploadedFile('ins.pdf', b'%PDF insurance'),
+            ],
+            vehicle_file_names=['Registration', 'Insurance'],
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        vehicle = Vehicle.objects.get(driver_id=response.data['driver_id'])
+        self.assertEqual(
+            sorted(VehicleFile.objects.filter(vehicle=vehicle).values_list('name', flat=True)),
+            ['Insurance', 'Registration'],
+        )
+
+    def test_the_response_reports_what_was_stored_where(self):
+        response = self._register_multipart(
+            vehicle_files=SimpleUploadedFile('reg.pdf', b'%PDF registration'),
+            vehicle_file_names='Registration',
+        )
+
+        files = response.data['files']
+        self.assertEqual([f['name'] for f in files['vehicle']], ['Registration'])
+        self.assertEqual(files['driver'], [])
+        self.assertEqual(files['company'], [])
+        self.assertTrue(files['vehicle'][0]['url'])
+
+    def test_a_miscounted_upload_creates_no_driver_at_all(self):
+        response = self._register_multipart(
+            vehicle_files=[
+                SimpleUploadedFile('reg.pdf', b'%PDF registration'),
+                SimpleUploadedFile('ins.pdf', b'%PDF insurance'),
+            ],
+            vehicle_file_names='Registration',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('vehicle_files', response.data['detail'])
+        self.assertFalse(Driver.objects.exists())
+        self.invite.refresh_from_db()
+        self.assertIsNone(self.invite.driver_id)
+
+    def test_registration_without_any_files_still_works(self):
+        response = self._register_multipart()
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['files']['driver'], [])
+
+    def test_nested_objects_survive_the_trip_through_multipart(self):
+        response = self._register_multipart()
+
+        driver = Driver.objects.get(id=response.data['driver_id'])
+        self.assertEqual(driver.full_name, 'Bob Driver')
+        self.assertEqual(driver.phone_number, '+15550002222')
+        vehicle = Vehicle.objects.get(driver=driver)
+        self.assertEqual(vehicle.make, 'Ford')
+        self.assertEqual(
+            list(VehicleEquipment.objects.filter(
+                vehicle=vehicle).values_list('name', flat=True)),
+            ['Lift-gate'],
+        )
+
+    def test_tax_exempt_false_does_not_arrive_as_true(self):
+        """Multipart has no booleans: 'false' is a non-empty, truthy string."""
+        response = self._register_multipart(tax_exempt='false')
+
+        driver = Driver.objects.get(id=response.data['driver_id'])
+        self.assertFalse(driver.tax_exempt)
+
+    def test_a_json_registration_is_unaffected(self):
+        with patch('hiring.views.fill_w9', return_value=_pdf()), \
+             patch('hiring.views.generate_contract', return_value=_pdf()):
+            response = self.client.post(
+                f'{self.submit_url}?token={self.invite.token}', {
+                    'company_name': 'Bob Hauling LLC',
+                    'driver': {'driver_full_name': 'Bob Driver'},
+                    'vehicle': {'make': 'Ford', 'dock': ['Ground level']},
+                }, content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        vehicle = Vehicle.objects.get(driver_id=response.data['driver_id'])
+        self.assertEqual(vehicle.dock_height, 'Ground level')
 
 
 class DriverSignLinkTests(TestCase):

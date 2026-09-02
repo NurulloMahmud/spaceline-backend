@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+import json
 from django.utils import timezone
 import copy
 from django.db import transaction
@@ -496,6 +497,66 @@ def mutable_request_data(data):
     return copied
 
 
+# Uploads on the invite endpoints: a repeated file key paired with a repeated
+# name key, one pair per record the files hang off. Same names the multipart
+# DriverBulkCreateSerializer already uses, so a frontend that moves between
+# the two flows keeps the same field names.
+INVITE_FILE_GROUPS = (
+    ('driver', 'driver_files', 'driver_file_names'),
+    ('company', 'company_files', 'company_file_names'),
+    ('vehicle', 'vehicle_files', 'vehicle_file_names'),
+)
+
+
+def form_list(data, key):
+    """Repeated keys: a list under multipart, already a list under JSON."""
+    if hasattr(data, 'getlist'):
+        return data.getlist(key)
+    value = data.get(key)
+    if value in (None, ''):
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def form_bool(value):
+    """Multipart has no booleans — 'false' is a non-empty string, i.e. True."""
+    if isinstance(value, str):
+        return value.strip().lower() in ('true', '1', 'yes', 'on')
+    return bool(value)
+
+
+def nested_object(data, key):
+    """`driver`/`vehicle` arrive as objects in JSON, JSON strings in multipart."""
+    value = data.get(key)
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def collect_invite_uploads(request):
+    """Pair each file group with its names, or return the first count mismatch.
+
+    Returns (uploads, error) — `uploads` maps the group name to a list of
+    (file, name) pairs, so the caller can build rows once the records the
+    files attach to exist.
+    """
+    uploads = {}
+    for group, files_key, names_key in INVITE_FILE_GROUPS:
+        files = request.FILES.getlist(files_key)
+        names = [str(name) for name in form_list(request.data, names_key)]
+        if len(files) != len(names):
+            return None, f'{files_key} and {names_key} must have the same count.'
+        uploads[group] = list(zip(files, names))
+    return uploads, None
+
+
 class DriverBulkCreateHRView(views.APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
@@ -580,8 +641,16 @@ class DriverInviteSubmitView(views.APIView):
     fight DRF's nested-serializer validation for that shape, fields are pulled
     defensively with `_pick`. On success this also generates a W-9 and the
     inviting company's contract PDF and returns their URLs.
+
+    Files are optional here. Sent as multipart, the three
+    `<record>_files` / `<record>_file_names` pairs land on the driver, the
+    driver's company and the vehicle respectively, so a registration card
+    stays on the vehicle instead of being flattened onto the driver. Under
+    multipart the `driver` and `vehicle` objects come across as JSON strings;
+    a plain JSON body (no files) keeps working exactly as before.
     """
     permission_classes = []
+    parser_classes = [parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request):
         token = request.query_params.get('token')
@@ -612,8 +681,14 @@ class DriverInviteSubmitView(views.APIView):
             )
 
         data = request.data
-        driver_data = data.get('driver') or {}
-        vehicle_data = data.get('vehicle') or {}
+        driver_data = nested_object(data, 'driver')
+        vehicle_data = nested_object(data, 'vehicle')
+
+        # Paired up before anything is created, so a miscounted upload is a
+        # plain 400 rather than a driver saved with half its documents.
+        uploads, upload_error = collect_invite_uploads(request)
+        if upload_error:
+            return Response({'detail': upload_error}, status=400)
 
         def pick(*sources_and_keys, default=''):
             for source, key in sources_and_keys:
@@ -638,11 +713,11 @@ class DriverInviteSubmitView(views.APIView):
 
         pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
 
-        dock = vehicle_data.get('dock')
+        dock = vehicle_data.get('dock') or form_list(data, 'dock')
         if isinstance(dock, list):
             dock = ', '.join(str(d) for d in dock if d)
 
-        equipment = vehicle_data.get('equipment') or []
+        equipment = vehicle_data.get('equipment') or form_list(data, 'equipment')
         if not isinstance(equipment, list):
             equipment = [equipment]
 
@@ -655,7 +730,7 @@ class DriverInviteSubmitView(views.APIView):
                 status=pending_status,
                 referral_by=invite.created_by,
                 manager=invite.manager,
-                tax_exempt=bool(data.get('tax_exempt', False)),
+                tax_exempt=form_bool(data.get('tax_exempt')),
                 payee_code=data.get('payee_code') or '',
                 fatca_reporting_code=data.get('fatca_reporting_code') or '',
             )
@@ -691,6 +766,19 @@ class DriverInviteSubmitView(views.APIView):
             VehicleEquipment.objects.bulk_create([
                 VehicleEquipment(vehicle=vehicle, name=str(name))
                 for name in equipment if name
+            ])
+
+            uploaded_driver_files = DriverFile.objects.bulk_create([
+                DriverFile(driver=driver, name=name, document=file)
+                for file, name in uploads['driver']
+            ])
+            uploaded_company_files = CompanyFile.objects.bulk_create([
+                CompanyFile(company=driver_company, name=name, document=file)
+                for file, name in uploads['company']
+            ])
+            uploaded_vehicle_files = VehicleFile.objects.bulk_create([
+                VehicleFile(vehicle=vehicle, name=name, document=file)
+                for file, name in uploads['vehicle']
             ])
 
             w9_bytes = fill_w9({
@@ -738,11 +826,21 @@ class DriverInviteSubmitView(views.APIView):
             invite.driver = driver
             invite.save(update_fields=['driver'])
 
+        def described(files):
+            return [
+                {'id': f.id, 'name': f.name, 'url': f.document.url} for f in files
+            ]
+
         return Response({
             'detail': 'Driver created.',
             'driver_id': driver.id,
             'w9_url': w9_file.document.url,
             'contract_url': contract_file.document.url,
+            'files': {
+                'driver': described(uploaded_driver_files),
+                'company': described(uploaded_company_files),
+                'vehicle': described(uploaded_vehicle_files),
+            },
         }, status=201)
 
 
