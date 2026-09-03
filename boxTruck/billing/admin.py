@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import (Broker, LoadStatus, Load, LoadHistory, LoadFile, LoadStop,
+from .models import (Broker, BrokerBlacklist, LoadStatus, Load, LoadHistory, LoadFile, LoadStop,
                      Batch, BatchLoad
                      )
 
@@ -19,3 +19,10 @@ class LoadStopAdmin(admin.ModelAdmin):
     list_filter = ['order']
 admin.site.register(Batch)
 admin.site.register(BatchLoad)
+
+
+@admin.register(BrokerBlacklist)
+class BrokerBlacklistAdmin(admin.ModelAdmin):
+    list_display = ['company', 'name', 'mc', 'created_by', 'created_at']
+    list_filter = ['company__name']
+    search_fields = ['name', 'mc', 'company__name', 'created_by__username']

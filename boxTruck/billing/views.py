@@ -19,10 +19,10 @@ from rest_framework.permissions import IsAuthenticated
 from users.serializers import UserListSerializer
 from django.db.models import Q
 from users.models import CustomUser
-from .models import (Broker, LoadStatus, Load, LoadHistory, LoadFile, LoadStop,
+from .models import (Broker, BrokerBlacklist, LoadStatus, Load, LoadHistory, LoadFile, LoadStop,
                      Batch, BatchLoad, PaymentType, Tag, LoadTag
                      )
-from .serializers import (BrokersSerializer, BatchUseSerializer,
+from .serializers import (BrokersSerializer, BrokerBlacklistSerializer, BatchUseSerializer,
                           LoadStopViewSerializer, LoadStatusesSerializer,
                           LoadsViewSerializer, LoadByDriverSerializer,
                           LoadUseSerializer, LoadStopWriteSerializer, BatchMultipleLoadSerializer,
@@ -1218,3 +1218,29 @@ class LoadTagViewSet(viewsets.ModelViewSet):
         if self.request.method in ['POST', 'PUT', 'PATCH']:
             return LoadTagWriteSerializer
         return LoadTagViewSerializer
+
+
+class BrokerBlacklistViewSet(viewsets.ModelViewSet):
+    serializer_class = BrokerBlacklistSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            BrokerBlacklist.objects
+            .filter(company=self.request.user.company)
+            .select_related('created_by')
+            .order_by('-created_at')
+        )
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        code = status.HTTP_200_OK if serializer.existed else status.HTTP_201_CREATED
+        return Response(serializer.data, status=code)
+
+    def perform_create(self, serializer):
+        serializer.save(
+            company=self.request.user.company,
+            created_by=self.request.user,
+        )

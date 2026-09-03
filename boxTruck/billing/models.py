@@ -1,4 +1,6 @@
 from django.db import models
+from django.db.models import Q
+from django.db.models.functions import Lower
 from hiring.models import Driver
 from users.models import Company, CustomUser
 
@@ -225,3 +227,65 @@ class LoadTag(models.Model):
         db_table = 'load_tags'
         verbose_name = 'Load Tag'
         verbose_name_plural = 'Load Tags'
+
+
+def normalize_mc(value):
+    """
+    Reduce a load board's free-text MC to bare digits, or '' when it holds none.
+
+    The board's MC field is not validated at the source: 'MC 312916', '312916 '
+    and '312916' are the same brokerage and must collapse to '312916', while
+    dozens of unrelated brokerages post the literal 'BROKER M.C. NOT ON FILE'.
+    Kept verbatim, blacklisting one of those would hide every one of them, so
+    anything with no digits in it becomes '' and matches on name instead.
+    Leading zeros are stripped too, so '0312916' is the same MC as '312916'.
+    """
+    digits = ''.join(ch for ch in str(value or '') if ch.isdigit())
+    return digits.lstrip('0')
+
+
+class BrokerBlacklist(models.Model):
+    company = models.ForeignKey(
+        Company, on_delete=models.CASCADE, related_name='broker_blacklist'
+    )
+    name = models.CharField(max_length=200)
+    mc = models.CharField(max_length=20, blank=True)
+    reason = models.TextField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        self.mc = normalize_mc(self.mc)[:20]
+        self.name = (self.name or '').strip()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.name} ({self.mc})" if self.mc else self.name
+
+    class Meta:
+        db_table = 'broker_blacklist'
+        verbose_name = 'Broker Blacklist Entry'
+        verbose_name_plural = 'Broker Blacklist'
+        indexes = [
+            models.Index(fields=['company', 'mc'], name='broker_blacklist_co_mc_idx'),
+            models.Index(fields=['company'], name='broker_blacklist_co_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['company', 'mc'],
+                condition=~Q(mc=''),
+                name='broker_blacklist_unique_company_mc',
+            ),
+            models.UniqueConstraint(
+                'company',
+                Lower('name'),
+                condition=Q(mc=''),
+                name='broker_blacklist_unique_company_name',
+            ),
+            models.CheckConstraint(
+                condition=~(Q(mc='') & Q(name='')),
+                name='broker_blacklist_needs_mc_or_name',
+            ),
+        ]

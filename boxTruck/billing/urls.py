@@ -4,13 +4,15 @@ from .views import (BrokersViewSet, LoadStopsViewSet,
                     LoadsViewSet, LoadStatusesViewSet, BatchListView, PaymentTypeViewSet, BestProfitLoadsAPIView,
                     LoadFilesAPIView, LoadHistoryByIdAPIView, BrokerListView, LoadsCountByProcessView, RateConfirmationUploadView,
                     BatchViewSet, BatchLoadViewSet, BatchLoadDropDown, MultipleBatchLoadCreateView, LoadByDriverForStatementView, BatchLoadByIDListAPIView,
-                    GenerateCSVView, DailyReportByDispatchersAPIView, LoadsPaySummaryAPIView, BrokerImportAPIView, TagViewSet, LoadTagViewSet
+                    GenerateCSVView, DailyReportByDispatchersAPIView, LoadsPaySummaryAPIView, BrokerImportAPIView, TagViewSet, LoadTagViewSet,
+                    BrokerBlacklistViewSet
                     )
-from .internal_views import (InternalBookLoadView, InternalBrokerResolveView, InternalBrokersBulkView, InternalBusyDriversView,
+from .internal_views import (InternalBookLoadView, InternalBrokerBlacklistBulkView, InternalBrokerResolveView, InternalBrokersBulkView, InternalBusyDriversView,
                              InternalCompanyProfileView, InternalDispatcherView, InternalRateConParseView)
 
 router = SimpleRouter()
 router.register(r'brokers', BrokersViewSet, basename="brokers") #checked
+router.register(r'broker-blacklist', BrokerBlacklistViewSet, basename="broker-blacklist")
 router.register(r'loads', LoadsViewSet, basename="loads") #checked
 router.register(r'load-statuses', LoadStatusesViewSet, basename="load-statuses") #checked
 router.register(r'load-stops', LoadStopsViewSet, basename="load-stops") #checked
@@ -43,6 +45,7 @@ urlpattern = ([
     path('internal/dispatcher/<int:user_id>/', InternalDispatcherView.as_view(), name='internal-dispatcher'),
     path('internal/brokers/resolve/', InternalBrokerResolveView.as_view(), name='internal-broker-resolve'),
     path('internal/brokers-bulk/', InternalBrokersBulkView.as_view(), name='internal-brokers-bulk'),
+    path('internal/broker-blacklist-bulk/', InternalBrokerBlacklistBulkView.as_view(), name='internal-broker-blacklist-bulk'),
     path('internal/parse-ratecon/', InternalRateConParseView.as_view(), name='internal-parse-ratecon'),
     path('internal/book-load/', InternalBookLoadView.as_view(), name='internal-book-load'),
     path('internal/busy-drivers/', InternalBusyDriversView.as_view(), name='internal-busy-drivers'),

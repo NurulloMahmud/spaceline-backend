@@ -16,7 +16,7 @@ from rest_framework.response import Response
 from users.models import Company, CustomUser
 from users.permissions import IsInternalService
 
-from .models import Broker, Load, LoadFile, LoadHistory, LoadStatus, LoadStop
+from .models import Broker, BrokerBlacklist, Load, LoadFile, LoadHistory, LoadStatus, LoadStop
 
 logger = logging.getLogger(__name__)
 
@@ -313,3 +313,11 @@ class InternalBusyDriversView(views.APIView):
             "driver_ids": list(driver_ids),
             "active_statuses": self.ACTIVE_STATUSES,
         })
+
+
+class InternalBrokerBlacklistBulkView(views.APIView):
+    permission_classes = [IsInternalService]
+
+    def get(self, request):
+        entries = BrokerBlacklist.objects.values('company_id', 'mc', 'name')
+        return Response(list(entries))

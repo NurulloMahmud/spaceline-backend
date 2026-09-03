@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.db import transaction
 
 from payroll.models import StatementLoad
-from .models import (Broker,
+from .models import (Broker, BrokerBlacklist, normalize_mc,
                      LoadStatus, Load, LoadHistory, LoadFile, LoadStop,
                      Batch, BatchLoad, PaymentType, Tag, LoadTag
                      )
@@ -636,3 +636,41 @@ class LoadsViewSerializer(serializers.ModelSerializer):
         profit = (obj.carrier_pay or 0) - (obj.driver_pay or 0)
         return profit
 
+
+
+class BrokerBlacklistSerializer(serializers.ModelSerializer):
+    existed = False
+    name = serializers.CharField(required=False, allow_blank=True, max_length=200)
+    mc = serializers.CharField(required=False, allow_blank=True, max_length=200)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+
+    class Meta:
+        model = BrokerBlacklist
+        fields = ['id', 'name', 'mc', 'reason', 'created_by', 'created_by_name', 'created_at']
+        read_only_fields = ['id', 'created_by', 'created_by_name', 'created_at']
+
+    def validate(self, attrs):
+        attrs['mc'] = normalize_mc(attrs.get('mc'))
+        attrs['name'] = (attrs.get('name') or '').strip()
+        if not attrs['mc'] and not attrs['name']:
+            raise serializers.ValidationError(
+                'Provide a broker name or an MC number with at least one digit in it.'
+            )
+        if len(attrs['mc']) > 20:
+            raise serializers.ValidationError(
+                {'mc': 'That is not an MC number — it has more than 20 digits in it.'}
+            )
+        return attrs
+
+    def create(self, validated_data):
+        company = validated_data['company']
+        mc = validated_data['mc']
+        if mc:
+            existing = BrokerBlacklist.objects.filter(company=company, mc=mc).first()
+        else:
+            existing = BrokerBlacklist.objects.filter(
+                company=company, mc='', name__iexact=validated_data['name']
+            ).first()
+
+        self.existed = existing is not None
+        return existing or super().create(validated_data)
