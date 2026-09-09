@@ -690,6 +690,12 @@ class VehicleDropdownSerializer(serializers.ModelSerializer):
         model = Vehicle
         fields = ['id', 'driver', 'second_driver', 'vin']
 
+    def _address_updated(self, driver):
+        requested_date = self.context.get('requested_date')
+        if not requested_date:
+            return None
+        return driver.updated_at.date() >= requested_date
+
     def get_driver(self, obj):
         if obj.driver:
             return {
@@ -701,10 +707,11 @@ class VehicleDropdownSerializer(serializers.ModelSerializer):
                 "current_zip": obj.driver.current_zip if obj.driver.current_zip else None,
                 "current_longitude": obj.driver.current_longitude if obj.driver.current_longitude else None,
                 "current_latitude": obj.driver.current_latitude if obj.driver.current_latitude else None,
-                "company": obj.driver.company.name if obj.driver.company.name else None
+                "company": obj.driver.company.name if obj.driver.company.name else None,
+                "address_updated": self._address_updated(obj.driver)
             }
         return None
-    
+
     def get_second_driver(self, obj):
         if obj.second_driver:
             return {
@@ -716,7 +723,8 @@ class VehicleDropdownSerializer(serializers.ModelSerializer):
                 "current_zip": obj.second_driver.current_zip if obj.second_driver.current_zip else None,
                 "current_longitude": obj.second_driver.current_longitude if obj.second_driver.current_longitude else None,
                 "current_latitude": obj.second_driver.current_latitude if obj.second_driver.current_latitude else None,
-                "company": obj.second_driver.company.name if obj.second_driver.company.name else None
+                "company": obj.second_driver.company.name if obj.second_driver.company.name else None,
+                "address_updated": self._address_updated(obj.second_driver)
             }
         return None
 

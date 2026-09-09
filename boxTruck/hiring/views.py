@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 import json
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 import copy
 from django.db import transaction
 from django.core.files.base import ContentFile
@@ -1107,6 +1108,16 @@ class VehicleDropdownView(generics.ListAPIView):
         if self.request.user.department.name.lower() in ['management', 'billing', 'payroll']:
             return Vehicle.objects.all()
         return Vehicle.objects.filter(driver__company=self.request.user.company)
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        requested_date = self.request.query_params.get('requested_date')
+        if requested_date:
+            requested_date_parsed = parse_date(requested_date)
+            if not requested_date_parsed:
+                raise ValidationError({"error": "Invalid requested_date format. Use YYYY-MM-DD."})
+            context['requested_date'] = requested_date_parsed
+        return context
 
 
 class DriverAssignmentView(views.APIView):
