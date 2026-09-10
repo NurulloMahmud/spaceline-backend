@@ -13,18 +13,19 @@ logger = logging.getLogger(__name__)
 API_ROOT = "https://api.telegram.org"
 
 
-async def send_message(chat_id: str, text: str) -> bool:
-    if not config.TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN is not set — cannot notify driver group")
+async def send_message(chat_id: str, text: str, bot_token: str | None = None) -> bool:
+    bot_token = bot_token if bot_token is not None else config.TELEGRAM_BOT_TOKEN
+    if not bot_token:
+        logger.error("no telegram bot token set — cannot send message")
         return False
     if not chat_id:
-        logger.error("no telegram group id — cannot notify driver")
+        logger.error("no telegram chat id — cannot send message")
         return False
 
     async with httpx.AsyncClient(timeout=15) as client:
         try:
             resp = await client.post(
-                f"{API_ROOT}/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
+                f"{API_ROOT}/bot{bot_token}/sendMessage",
                 json={
                     "chat_id": chat_id,
                     "text": text,

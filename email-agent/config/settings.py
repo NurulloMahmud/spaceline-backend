@@ -101,6 +101,11 @@ class Config:
     # telegram — same bot as agent_bot, used to notify driver groups
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
+    # separate bot, used only to alert an admin of the client IP opening each
+    # SSE connection to /api/v1/events/stream
+    IP_ALERT_BOT_TOKEN: str = os.getenv("IP_ALERT_BOT_TOKEN", "")
+    IP_ALERT_CHAT_ID: str = os.getenv("IP_ALERT_CHAT_ID", "")
+
     # behaviour
     CORS_ORIGINS: list[str] = [
         o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
