@@ -38,6 +38,7 @@ urlpatterns = [
     path('api/ai/', include('ai.urls')),
     path('api/hiring/', include('hiring.urls')),
     path('api/billing/', include('billing.urls')),
+    path('api/charge/', include('charge.urls')),
     path('api/payroll/', include('payroll.urls')),
     path('api/mobile/', include('mobile.urls')),
     path('api/dispatchers/', include('dispatchers.urls')),

@@ -51,7 +51,8 @@ MY_APPS = [
     'analytics',
     'ai',
     'mobile',
-    'dispatchers'
+    'dispatchers',
+    'charge',
 ]
 
 INSTALLED_APPS = DJANGO_DEFAULT_APPS + THIRD_APPS + MY_APPS
@@ -315,3 +316,13 @@ INTERNAL_SERVICE_SECRET = config('INTERNAL_SERVICE_SECRET')
 # after a broker is created/updated here, instead of it finding out on its
 # own next 30s poll.
 ATREK_BASE_URL = config('ATREK_BASE_URL', default='https://spaceline.boxtruckmanage.com/api/v1')
+
+# billing service (FastAPI + Stripe) — the `charge` app proxies the frontend's
+# card / transaction / recurring calls to it, authenticated with our project API key.
+BILLING_BASE_URL = config('BILLING_BASE_URL', default='http://127.0.0.1:8003')
+BILLING_API_KEY = config('BILLING_API_KEY', default='')
+# where Stripe returns the user after adding a card, when the frontend doesn't pass its own.
+BILLING_CARD_RETURN_URL = config(
+    'BILLING_CARD_RETURN_URL',
+    default=config('FRONTEND_URL', default='http://localhost:5173/').rstrip('/') + '/billing/cards',
+)
