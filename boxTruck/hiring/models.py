@@ -58,6 +58,12 @@ class Driver(models.Model):
         CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='assigned_drivers',
     )
+    # SET_NULL, not CASCADE: several drivers can share one DriverCompany, so
+    # deleting one driver must not delete a company the others still use.
+    driver_company = models.ForeignKey(
+        'DriverCompany', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='drivers',
+    )
     current_state = models.CharField(max_length=255, null=True, blank=True)
     current_city = models.CharField(max_length=255, null=True, blank=True)
     current_zip = models.CharField(max_length=255, null=True, blank=True)
@@ -93,7 +99,6 @@ class DriverFile(models.Model):
 
 
 class DriverCompany(models.Model):
-    driver = models.ForeignKey(Driver, on_delete=models.CASCADE)
     mc = models.CharField(max_length=255)
     employer_id = models.CharField(max_length=255)
     name = models.CharField(max_length=255)

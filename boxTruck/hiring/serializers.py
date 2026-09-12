@@ -145,23 +145,24 @@ class VehicleEquipmentSerializer(serializers.ModelSerializer):
 
 
 class DriverCompanyViewSerializer(serializers.ModelSerializer):
-    driver = serializers.SerializerMethodField()
+    drivers = serializers.SerializerMethodField()
     documents = CompanyFileSerializer(many=True, source='companyfile_set')
 
     class Meta:
         model = DriverCompany
         fields = '__all__'
-    
-    def get_driver(self, obj):
-        if obj.driver:
-            return {
-                "id": obj.driver.id,
-                "full_name": obj.driver.full_name,
-                "phone_number": obj.driver.phone_number,
-                "email": obj.driver.email if obj.driver.email else None,
-                "emergency_phone_number": obj.driver.emergency_phone_number if obj.driver.emergency_phone_number else None,
+
+    def get_drivers(self, obj):
+        return [
+            {
+                "id": driver.id,
+                "full_name": driver.full_name,
+                "phone_number": driver.phone_number,
+                "email": driver.email if driver.email else None,
+                "emergency_phone_number": driver.emergency_phone_number if driver.emergency_phone_number else None,
             }
-        return None
+            for driver in obj.drivers.all()
+        ]
 
 
 class DriverCompanyWriteSerializer(serializers.ModelSerializer):
@@ -376,22 +377,24 @@ class DriverListSerializer(serializers.ModelSerializer):
         return None
     
     def get_docs_count(self, obj):
-        company = DriverCompany.objects.filter(driver=obj).first()
+        company = obj.driver_company
         docs_count = company.companyfile_set.count() if company else 0
         return docs_count
 
 
 class DriverCompanyModalSerializer(serializers.ModelSerializer):
-    driver = serializers.SerializerMethodField()
+    # A company can now be shared by several drivers, so this is a list, not
+    # a single object.
+    drivers = serializers.SerializerMethodField()
     documents = CompanyFileSerializer(many=True, source='companyfile_set')
 
     class Meta:
         model = DriverCompany
         fields = [
             'id',
-            'name',     
+            'name',
             'employer_id',
-            'driver',
+            'drivers',
             'phone_number',
             'address',
             'city',
@@ -400,19 +403,20 @@ class DriverCompanyModalSerializer(serializers.ModelSerializer):
             'documents'
         ]
 
-    def get_driver(self, obj):
-        if obj.driver:
-            return {
-                    "id": obj.driver.id,
-                    "full_name": obj.driver.full_name,
-                    "phone_number": obj.driver.phone_number,
-                    "email": obj.driver.email if obj.driver.email else None,
-                    "emergency_phone_number": obj.driver.emergency_phone_number if obj.driver.emergency_phone_number else None,
-                    "status": obj.driver.status.name,
-                    'vehicle': self._get_vehicle(obj.driver),
-                    "manager": obj.driver.manager.username + " - " + obj.driver.manager.first_name + " " + obj.driver.manager.last_name if obj.driver.manager else None
-                }
-        return None
+    def get_drivers(self, obj):
+        return [self._get_driver(driver) for driver in obj.drivers.all()]
+
+    def _get_driver(self, driver):
+        return {
+            "id": driver.id,
+            "full_name": driver.full_name,
+            "phone_number": driver.phone_number,
+            "email": driver.email if driver.email else None,
+            "emergency_phone_number": driver.emergency_phone_number if driver.emergency_phone_number else None,
+            "status": driver.status.name,
+            'vehicle': self._get_vehicle(driver),
+            "manager": driver.manager.username + " - " + driver.manager.first_name + " " + driver.manager.last_name if driver.manager else None
+        }
     
     def _get_vehicle(self, driver):
         vehicle = driver.vehicles.first()
@@ -471,10 +475,14 @@ class DriverBulkCreateSerializer(serializers.Serializer):
     fatca_reporting_code = serializers.CharField(required=False, allow_blank=True)
     referral_by = serializers.PrimaryKeyRelatedField(queryset=CustomUser.objects.all(), required=False, allow_null=True)
     manager = serializers.PrimaryKeyRelatedField(queryset=CustomUser.objects.all(), required=False, allow_null=True)
-    company__name = serializers.CharField()
-    company__mc = serializers.CharField()
-    company__employer_id = serializers.CharField()
-    company__phone_number = serializers.CharField()
+    # Staff-only: attach this driver to an existing DriverCompany instead of
+    # creating a new one. Set from the request in the HR view; explicitly
+    # stripped out before validation in the public invite view.
+    driver_company = serializers.PrimaryKeyRelatedField(queryset=DriverCompany.objects.all(), required=False, allow_null=True)
+    company__name = serializers.CharField(required=False, allow_blank=True)
+    company__mc = serializers.CharField(required=False, allow_blank=True)
+    company__employer_id = serializers.CharField(required=False, allow_blank=True)
+    company__phone_number = serializers.CharField(required=False, allow_blank=True)
     company__business_as = serializers.CharField(required=False, allow_blank=True)
     company__business_type = serializers.CharField(required=False, allow_blank=True)
     company__zipcode = serializers.CharField(required=False, allow_blank=True)
@@ -537,6 +545,22 @@ class DriverBulkCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {'company': f"Company '{company.name}' has no contract_template_text configured."}
             )
+
+        # Either attach to an existing DriverCompany, or provide enough to
+        # create a new one — not neither, and not partially one or the other.
+        new_company_required = ['company__name', 'company__mc', 'company__employer_id', 'company__phone_number']
+        if attrs.get('driver_company'):
+            provided = [f for f in new_company_required if attrs.get(f)]
+            if provided:
+                raise serializers.ValidationError(
+                    'Provide either driver_company or new company details, not both.'
+                )
+        else:
+            missing = [f for f in new_company_required if not attrs.get(f)]
+            if missing:
+                raise serializers.ValidationError(
+                    {f: 'This field is required when driver_company is not provided.' for f in missing}
+                )
         return attrs
 
     def create(self, validated_data):
@@ -547,6 +571,7 @@ class DriverBulkCreateSerializer(serializers.Serializer):
         company_file_names = validated_data.pop('company_file_names', [])
         vehicle_files = validated_data.pop('vehicle_files', [])
         vehicle_file_names = validated_data.pop('vehicle_file_names', [])
+        existing_company = validated_data.pop('driver_company', None)
         company_data = {
             k.replace('company__', ''): validated_data.pop(k)
             for k in list(validated_data.keys()) if k.startswith('company__')
@@ -562,24 +587,43 @@ class DriverBulkCreateSerializer(serializers.Serializer):
 
         with transaction.atomic():
             driver = Driver.objects.create(**validated_data)
-            driver_company = DriverCompany.objects.create(driver=driver, **company_data)
+            if existing_company:
+                driver_company = existing_company
+                # The company already has its own name/address/EIN on file —
+                # use that for the generated paperwork below instead of the
+                # (empty) company__* fields.
+                company_fields = {
+                    'name': driver_company.name,
+                    'business_as': driver_company.business_as,
+                    'address': driver_company.address,
+                    'city': driver_company.city,
+                    'state': driver_company.state,
+                    'zipcode': driver_company.zipcode,
+                    'employer_id': driver_company.employer_id,
+                    'business_type': driver_company.business_type,
+                }
+            else:
+                driver_company = DriverCompany.objects.create(**company_data)
+                company_fields = company_data
+            driver.driver_company = driver_company
+            driver.save(update_fields=['driver_company'])
             vehicle = Vehicle.objects.create(driver=driver, **vehicle_data)
             Deposit.objects.create(driver=driver, **deposit_data)
             contractor_address = ', '.join(
                 part for part in [
-                    company_data.get('address'), company_data.get('city'),
-                    company_data.get('state'), company_data.get('zipcode'),
+                    company_fields.get('address'), company_fields.get('city'),
+                    company_fields.get('state'), company_fields.get('zipcode'),
                 ] if part
             )
             w9_bytes = fill_w9({
-                'company_name': company_data.get('name') or '',
-                'company_doing_business': company_data.get('business_as') or '',
-                'company_address': company_data.get('address') or '',
-                'company_city': company_data.get('city') or '',
-                'company_state': company_data.get('state') or '',
-                'company_zip': company_data.get('zipcode') or '',
-                'company_employer_id': company_data.get('employer_id') or '',
-                'company_type': company_data.get('business_type') or '',
+                'company_name': company_fields.get('name') or '',
+                'company_doing_business': company_fields.get('business_as') or '',
+                'company_address': company_fields.get('address') or '',
+                'company_city': company_fields.get('city') or '',
+                'company_state': company_fields.get('state') or '',
+                'company_zip': company_fields.get('zipcode') or '',
+                'company_employer_id': company_fields.get('employer_id') or '',
+                'company_type': company_fields.get('business_type') or '',
                 'payee_code': driver.payee_code,
                 'fatca_reporting_code': driver.fatca_reporting_code,
             }).getvalue()
@@ -588,7 +632,7 @@ class DriverBulkCreateSerializer(serializers.Serializer):
                 'effective_day': today.strftime('%d'),
                 'effective_month': today.strftime('%B'),
                 'effective_year': today.strftime('%y'),
-                'contractor_name': company_data.get('name') or '',
+                'contractor_name': company_fields.get('name') or '',
                 'contractor_address': contractor_address,
                 'contractor_email': driver.email or '',
             }).getvalue()

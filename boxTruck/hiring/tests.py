@@ -28,7 +28,7 @@ from hiring.models import (
     DriverStatus, Vehicle, VehicleEquipment, VehicleFile,
 )
 from hiring.views import SIGN_FILE_NAMES, mutable_request_data
-from users.models import Company, CustomUser
+from users.models import Company, CustomUser, Department
 
 
 def _pdf():
@@ -182,7 +182,7 @@ class DriverInviteFlowTests(TestCase):
         self.assertEqual(driver.company, self.company)
         self.assertEqual(driver.referral_by, self.staff)
         self.assertEqual(driver.status.name, 'pending')
-        self.assertEqual(DriverCompany.objects.get(driver=driver).name, 'Bob Hauling LLC')
+        self.assertEqual(driver.driver_company.name, 'Bob Hauling LLC')
         self.assertEqual(Vehicle.objects.get(driver=driver).make, 'Ford')
 
     def test_registration_returns_both_generated_pdfs(self):
@@ -256,7 +256,7 @@ class RegistrationUploadTests(TestCase):
         )
         self.assertEqual(
             [f.name for f in CompanyFile.objects.filter(
-                company=DriverCompany.objects.get(driver=driver))],
+                company=driver.driver_company)],
             ['MC Authority'],
         )
         self.assertEqual(
@@ -785,6 +785,108 @@ class LargeUploadTests(TestCase):
                    .exclude(name__in=SIGN_FILE_NAMES).values_list('name', flat=True)),
             ["Driver's License", 'Medical Card'],
         )
+
+
+class DriverCompanySharingTests(TestCase):
+    """One DriverCompany can now be shared by several drivers, attached by
+    staff passing an existing id instead of new company__* fields."""
+
+    def setUp(self):
+        self.company = Company.objects.create(
+            name='Space Line LLC',
+            contract_template_text='Agreement with {contractor_name}.',
+        )
+        self.staff = CustomUser.objects.create_user(
+            username='recruiter', password='x', company=self.company,
+            department=Department.objects.create(name='hiring'),
+        )
+        DriverStatus.objects.create(name='pending')
+        self.client = APIClient()
+        self.client.force_authenticate(self.staff)
+        self.existing_company = DriverCompany.objects.create(
+            name='Bob Hauling LLC', mc='846834', employer_id='12-3456789',
+            phone_number='+15550001111', address='1 Main St', city='Dallas',
+            state='TX', zipcode='75201',
+        )
+
+    def _payload(self, **overrides):
+        payload = {
+            'full_name': 'Second Driver',
+            'vehicle__vehicle_type': 'Box Truck',
+            'vehicle__make': 'Ford',
+            'vehicle__model': 'Transit',
+            'vehicle__year': 2018,
+            'vehicle__payload': 3800,
+            'vehicle__gvw': 9500,
+        }
+        payload.update(overrides)
+        return payload
+
+    def _post(self, url, payload):
+        with patch('hiring.serializers.fill_w9', return_value=_pdf()), \
+             patch('hiring.serializers.generate_contract', return_value=_pdf()):
+            return self.client.post(url, payload, format='multipart')
+
+    def test_hr_endpoint_attaches_driver_to_an_existing_company(self):
+        response = self._post(reverse('driver-create-hr'), self._payload(
+            driver_company=self.existing_company.id,
+        ))
+
+        self.assertEqual(response.status_code, 201, response.data)
+        driver = Driver.objects.get(id=response.data['driver_id'])
+        self.assertEqual(driver.driver_company_id, self.existing_company.id)
+        self.assertEqual(DriverCompany.objects.count(), 1)
+
+    def test_hr_endpoint_rejects_both_existing_and_new_company(self):
+        response = self._post(reverse('driver-create-hr'), self._payload(
+            driver_company=self.existing_company.id,
+            **{
+                'company__name': 'Someone Else LLC',
+                'company__mc': '111111',
+                'company__employer_id': '99-9999999',
+                'company__phone_number': '+15551234567',
+            },
+        ))
+
+        self.assertEqual(response.status_code, 400, response.data)
+
+    def test_hr_endpoint_still_requires_company_details_without_an_id(self):
+        response = self._post(reverse('driver-create-hr'), self._payload())
+
+        self.assertEqual(response.status_code, 400, response.data)
+
+    def test_invite_endpoint_ignores_a_submitted_driver_company_id(self):
+        invite = DriverInviteLink.objects.create(
+            created_by=self.staff, company=self.company,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        url = f"{reverse('driver-create-invite')}?token={invite.token}"
+        response = self._post(url, self._payload(
+            driver_company=self.existing_company.id,
+            **{
+                'company__name': 'Applicant Own LLC',
+                'company__mc': '222222',
+                'company__employer_id': '88-8888888',
+                'company__phone_number': '+15559876543',
+            },
+        ))
+
+        self.assertEqual(response.status_code, 201, response.data)
+        driver = Driver.objects.get(id=response.data['driver_id'])
+        self.assertNotEqual(driver.driver_company_id, self.existing_company.id)
+        self.assertEqual(driver.driver_company.name, 'Applicant Own LLC')
+
+    def test_deleting_a_company_with_attached_drivers_is_rejected(self):
+        self._post(reverse('driver-create-hr'), self._payload(
+            driver_company=self.existing_company.id,
+        ))
+
+        response = self.client.delete(
+            reverse('driver-companies-detail', args=[self.existing_company.id])
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertTrue(DriverCompany.objects.filter(id=self.existing_company.id).exists())
 
 
 class MutableRequestDataTests(TestCase):

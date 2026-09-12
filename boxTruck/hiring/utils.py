@@ -3,6 +3,7 @@ DRIVER_FK_DISPLAY = {
     'company': lambda obj: obj.company.name if obj.company else None,
     'manager': lambda obj: obj.manager.username if obj.manager else None,
     'referral_by': lambda obj: obj.referral_by.username if obj.referral_by else None,
+    'driver_company': lambda obj: obj.driver_company.name if obj.driver_company else None,
 }
 
 VEHICLE_FK_DISPLAY = {
@@ -10,9 +11,9 @@ VEHICLE_FK_DISPLAY = {
     'second_driver': lambda obj: obj.second_driver.full_name if obj.second_driver else None,
 }
 
-DRIVER_COMPANY_FK_DISPLAY = {
-    'driver': lambda obj: obj.driver.full_name if obj.driver else None,
-}
+# DriverCompany no longer has a single owning driver (it can be shared by
+# several), so there is no FK on it left to display here.
+DRIVER_COMPANY_FK_DISPLAY = {}
 
 DEPOSIT_FK_DISPLAY = {
     'driver': lambda obj: obj.driver.full_name if obj.driver else None,

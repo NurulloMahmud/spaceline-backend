@@ -3,7 +3,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
-from hiring.models import Driver, DriverCompany, DriverFile
+from hiring.models import Driver, DriverFile
 from hiring.pdf_generation import fill_w9, generate_contract
 
 W9_NAME = 'W-9 (Generated)'
@@ -26,7 +26,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         dry_run = options['dry_run']
-        drivers = Driver.objects.select_related('company').all().order_by('id')
+        drivers = Driver.objects.select_related('company', 'driver_company').all().order_by('id')
 
         generated = 0
         skipped_no_company_profile = 0
@@ -42,7 +42,7 @@ class Command(BaseCommand):
             if not needs_w9 and not needs_contract:
                 continue
 
-            driver_company = DriverCompany.objects.filter(driver=driver).first()
+            driver_company = driver.driver_company
             if not driver_company:
                 skipped_no_company_profile += 1
                 self.stdout.write(self.style.WARNING(

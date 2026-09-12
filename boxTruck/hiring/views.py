@@ -83,6 +83,7 @@ class DriverViewSet(viewsets.ModelViewSet):
         old_instance.company = driver.company
         old_instance.manager = driver.manager
         old_instance.referral_by = driver.referral_by
+        old_instance.driver_company = driver.driver_company
         serializer = self.get_serializer(driver, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         updated_driver = serializer.save()
@@ -91,6 +92,7 @@ class DriverViewSet(viewsets.ModelViewSet):
         updated_driver.company
         updated_driver.manager
         updated_driver.referral_by
+        updated_driver.driver_company
         if 'current_zip' in request.data and request.data['current_zip']:
             geo = geocode_zip(request.data['current_zip'])
             if geo:
@@ -233,7 +235,7 @@ class DriverCompanyViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['driver']
+    filterset_fields = ['drivers']
     search_fields = ['name', 'mc', 'business_type']
 
     def get_serializer_class(self):
@@ -241,21 +243,19 @@ class DriverCompanyViewSet(viewsets.ModelViewSet):
             return DriverCompanyWriteSerializer
         else:
             return DriverCompanyViewSerializer
-        
+
     def get_queryset(self):
         if self.request.user.department.name.lower() in ['management', 'billing', 'payroll', 'hiring']:
             return DriverCompany.objects.all()
-        return DriverCompany.objects.filter(driver__company=self.request.user.company)
-    
+        return DriverCompany.objects.filter(drivers__company=self.request.user.company).distinct()
+
     def partial_update(self, request, *args, **kwargs):
         driver_company = self.get_object()
         old_instance = copy.deepcopy(driver_company)
-        old_instance.driver = driver_company.driver
         serializer = self.get_serializer(driver_company, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         updated_company = serializer.save()
         updated_company.refresh_from_db()
-        updated_company.driver
         description = build_change_description(
             old_instance,
             updated_company,
@@ -269,6 +269,16 @@ class DriverCompanyViewSet(viewsets.ModelViewSet):
                 description=description,
             )
         return Response(DriverCompanyViewSerializer(updated_company).data)
+
+    def perform_destroy(self, instance):
+        # A shared company's files/history would otherwise cascade-delete
+        # for every attached driver, not just one — require detaching them
+        # first so that's never an accident.
+        if instance.drivers.exists():
+            raise ValidationError(
+                'This company still has drivers attached. Detach them before deleting it.'
+            )
+        instance.delete()
 
 
 class DepositViewSet(viewsets.ModelViewSet):
@@ -365,22 +375,22 @@ class DriverCompanyModalView(views.APIView):
         department = user.department.name.lower()
         if department in ['management', 'billing', 'payroll', 'hiring']:
             return DriverCompany.objects.all()
-        return DriverCompany.objects.filter(driver__company=user.company)
+        return DriverCompany.objects.filter(drivers__company=user.company).distinct()
 
     def get(self, request):
         driver_id = request.query_params.get('driver')
         if not driver_id:
             return Response({'detail': 'driver query param is required.'}, status=400)
 
+        driver = get_object_or_404(Driver, pk=driver_id)
         qs = self.get_queryset(request.user)
         company = get_object_or_404(
-            qs.select_related(
-                'driver__status',
-            ).prefetch_related(
-                'driver__vehicles',
+            qs.prefetch_related(
+                'drivers__status',
+                'drivers__vehicles',
                 'companyfile_set',
             ),
-            driver_id=driver_id
+            pk=driver.driver_company_id
         )
         serializer = DriverCompanyModalSerializer(company)
         return Response(serializer.data)
@@ -454,7 +464,7 @@ class DriverSignInfoView(views.APIView):
             return Response({'detail': 'This link is not a document-signing link.'}, status=400)
 
         vehicle = driver.vehicles.first()
-        driver_company = DriverCompany.objects.filter(driver=driver).first()
+        driver_company = driver.driver_company
         sign_files = DriverFile.objects.filter(driver=driver, name__in=SIGN_FILE_NAMES)
 
         return Response({
@@ -597,6 +607,11 @@ class DriverBulkCreateInviteView(views.APIView):
         if not invite.is_valid():
             return Response({'detail': 'Link has expired or is inactive.'}, status=400)
         data = mutable_request_data(request.data)
+        # driver_company links to an existing business by internal id — a
+        # public applicant has no business knowing those ids, so this is a
+        # staff-only capability (see DriverBulkCreateHRView) and is always
+        # stripped here regardless of what's submitted.
+        data.pop('driver_company', None)
         pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
         data['status'] = pending_status.id
         data['company'] = invite.company.id
@@ -736,7 +751,6 @@ class DriverInviteSubmitView(views.APIView):
                 fatca_reporting_code=data.get('fatca_reporting_code') or '',
             )
             driver_company = DriverCompany.objects.create(
-                driver=driver,
                 name=company_name,
                 mc=data.get('company_mc') or '',
                 employer_id=data.get('company_employer_id') or '',
@@ -751,6 +765,8 @@ class DriverInviteSubmitView(views.APIView):
                 applicant_first_name=data.get('company_applicant_first_name') or '',
                 applicant_last_name=data.get('company_applicant_last_name') or '',
             )
+            driver.driver_company = driver_company
+            driver.save(update_fields=['driver_company'])
             vehicle = Vehicle.objects.create(
                 driver=driver,
                 make=vehicle_data.get('make') or '',
