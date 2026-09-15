@@ -414,6 +414,9 @@ class DriverCompanyModalSerializer(serializers.ModelSerializer):
             "email": driver.email if driver.email else None,
             "emergency_phone_number": driver.emergency_phone_number if driver.emergency_phone_number else None,
             "status": driver.status.name,
+            "city": driver.city if driver.city else None,
+            "state": driver.state if driver.state else None,
+            "zipcode": driver.zipcode if driver.zipcode else None,
             'vehicle': self._get_vehicle(driver),
             "manager": driver.manager.username + " - " + driver.manager.first_name + " " + driver.manager.last_name if driver.manager else None
         }
