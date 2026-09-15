@@ -353,7 +353,11 @@ class DriverListView(generics.ListAPIView):
         if status_id:
             qs = qs.filter(status_id=status_id)
         if search:
-            qs = qs.filter(full_name__icontains=search)
+            qs = qs.filter(
+                Q(full_name__icontains=search) |
+                Q(phone_number__icontains=search) |
+                Q(email__icontains=search)
+            )
 
         sort = self.request.query_params.get('sort', '-created_at')
         sort_field = sort.lstrip('-')
