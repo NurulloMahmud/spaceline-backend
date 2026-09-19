@@ -55,9 +55,8 @@ the platform owner, not the tenant.
                     "exp_year": 2030, "funding": "credit", "is_default": true,
                     "status": "active", "created_at": "..." },
   "active_recurring_count": 1,
-  "next_charge": { "recurring_id": "uuid", "period": "2026-10", "scheduled_date": "2026-10-08",
-                   "amount": 4200, "currency": "usd", "status": "scheduled",
-                   "date_overridden": false, "description": "Monthly plan" },
+  "next_charge": { "recurring_id": "uuid", "scheduled_date": "2026-10-08",
+                   "amount": 4200, "currency": "usd", "description": "Monthly plan" },
   "lifetime_paid": [ { "currency": "usd", "amount": 12345 } ]
 }
 ```
@@ -73,12 +72,11 @@ the platform owner, not the tenant.
 `GET /api/charge/upcoming/`
 
 ```json
-[ { "recurring_id": "uuid", "period": "2026-10", "scheduled_date": "2026-10-08",
-    "amount": 4200, "currency": "usd", "status": "scheduled",
-    "date_overridden": false, "description": "Monthly plan" } ]
+[ { "recurring_id": "uuid", "scheduled_date": "2026-10-08",
+    "amount": 4200, "currency": "usd", "description": "Monthly plan" } ]
 ```
 
-Sorted by date ascending. `[]` if none.
+One entry per active plan (its next Stripe-scheduled charge), sorted by date ascending. `[]` if none.
 
 ## 4. Transactions (the paid ledger)
 
@@ -137,10 +135,14 @@ covers the user closing the tab without returning — the card can still land as
 `GET /api/charge/recurring/?status=active|paused|canceled`
 
 ```json
-[ { "id": "uuid", "amount": 4200, "currency": "usd", "day_of_month": 8,
+[ { "id": "uuid", "user_id": "42", "amount": 4200, "currency": "usd",
     "description": "Monthly plan", "status": "active", "start_date": "2026-01-01",
-    "end_date": null, "card_id": null, "created_at": "..." } ]
+    "stripe_subscription_id": "sub_...", "stripe_status": "active",
+    "current_period_end": "2026-10-08", "created_at": "..." } ]
 ```
+
+`stripe_status` mirrors Stripe's own subscription status as-is (`active`, `past_due`,
+`incomplete`, `canceled`, …). `current_period_end` is the date of the next charge for this plan.
 
 ---
 
