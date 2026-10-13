@@ -188,7 +188,7 @@ class LoadsViewSet(viewsets.ModelViewSet):
         from django.utils import timezone
         load = self.get_object()
         old_load_number = load.load_number
-        original_status = load.status.name
+        original_status = load.status.name if load.status else None
         new_status = serializer.validated_data.get('status')
         new_load_number = serializer.validated_data.get('load_number')
         if new_load_number and new_load_number != old_load_number:
