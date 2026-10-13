@@ -190,25 +190,27 @@ class LoadAgent:
             if existing and existing.load_id == offer_load_id:
                 continue
 
-            try:
-                sent = await bot.send_message(
-                    chat_id=telegram_group_id,
-                    text=format_load_offer(load, driver, dead_head),
-                    parse_mode="Markdown",
-                )
-
-                self.offer_repo.create(
-                    driver_id=driver_id,
-                    load_id=offer_load_id,
-                    load_snapshot=load,
-                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
-                    telegram_message_id=getattr(sent, "message_id", None),
-                )
-
-                sent_count += 1
-                logger.info(f"Sent load {load.get('id')} to driver {driver_id} ({dead_head:.1f}mi)")
-            except Exception as e:
-                logger.error(f"Failed to send to driver {driver_id}: {e}")
+            # TEMPORARILY DISABLED: sharing loads to drivers' Telegram groups.
+            # Matching above still runs and logs; nothing is sent or recorded.
+            # try:
+            #     sent = await bot.send_message(
+            #         chat_id=telegram_group_id,
+            #         text=format_load_offer(load, driver, dead_head),
+            #         parse_mode="Markdown",
+            #     )
+            #
+            #     self.offer_repo.create(
+            #         driver_id=driver_id,
+            #         load_id=offer_load_id,
+            #         load_snapshot=load,
+            #         expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+            #         telegram_message_id=getattr(sent, "message_id", None),
+            #     )
+            #
+            #     sent_count += 1
+            #     logger.info(f"Sent load {load.get('id')} to driver {driver_id} ({dead_head:.1f}mi)")
+            # except Exception as e:
+            #     logger.error(f"Failed to send to driver {driver_id}: {e}")
         logger.info(f"Load {load.get('id')} sent to {sent_count} drivers")
 
     async def handle_offer_reply(
