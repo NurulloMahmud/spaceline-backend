@@ -1060,6 +1060,49 @@ class DriverBulkView(views.APIView):
         return Response(list(drivers))
 
 
+class DriverLocationsView(views.APIView):
+    """Every active driver that has a position, for one company.
+
+    Internal-only. atrek's load list calls this once per request and measures
+    each load's pickup against the result itself, so it can show the trucks
+    near every row without a geocoding round-trip per load (which is what
+    drivers-nearby would cost).
+    """
+    permission_classes = [IsInternalService]
+
+    def get(self, request):
+        qs = Driver.objects.filter(
+            status__name__iexact='active',
+            current_latitude__isnull=False,
+            current_longitude__isnull=False,
+        ).prefetch_related('vehicles')
+
+        company_id = request.query_params.get('company_id', '')
+        if company_id:
+            if not company_id.isdigit():
+                return Response({'detail': 'company_id must be a number.'}, status=400)
+            qs = qs.filter(company_id=int(company_id))
+
+        drivers = []
+        for driver in qs:
+            vehicle = driver.vehicles.first()
+            drivers.append({
+                'id': driver.id,
+                'full_name': driver.full_name,
+                'unit_number': driver.unit_number,
+                'phone_number': driver.phone_number,
+                'company_id': driver.company_id,
+                'current_latitude': driver.current_latitude,
+                'current_longitude': driver.current_longitude,
+                'current_city': driver.current_city,
+                'current_state': driver.current_state,
+                'current_zip': driver.current_zip,
+                'current_location_updated_at': driver.current_location_updated_at,
+                'vehicle_type': vehicle.vehicle_type if vehicle else None,
+            })
+        return Response(drivers)
+
+
 class DriverLocationByIDAPIView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = DriverLocationViewSerializer

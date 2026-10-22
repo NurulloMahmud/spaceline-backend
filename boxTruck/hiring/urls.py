@@ -7,7 +7,7 @@ from .views import (DriverBulkCreateHRView, DriverBulkCreateInviteView, DriverEx
                     GenerateDriverSignLinkView, DriverSignInfoView,
                     DriverStatusViewSet, DriverViewSet, DriverDropdownAPIView,
                     DriverFileViewSet, CompanyFileViewSet, GenerateInviteLinkView, VehicleFileViewSet,
-                    VehicleViewSet, DriverCompanyViewSet, DepositViewSet, DriverListView, DriverCompanyModalView, DriverBulkView,
+                    VehicleViewSet, DriverCompanyViewSet, DepositViewSet, DriverListView, DriverCompanyModalView, DriverBulkView, DriverLocationsView,
                     VehicleEquipmentViewSet, CompanyHistoryViewSet, VehicleHistoryViewSet, DriverHistoryViewSet, DepositHistoryViewSet,
                     DriverLocationByIDAPIView, DriverNearbyView, VehicleDropdownView,
                     DriverAssignmentView, UnassignedDriversAPIView
@@ -43,6 +43,7 @@ urlpattern = [
     path('driver/sign-link/', GenerateDriverSignLinkView.as_view(), name='generate-driver-sign-link'),
     path('driver/sign-info/', DriverSignInfoView.as_view(), name='driver-sign-info'),
     path('drivers-bulk/', DriverBulkView.as_view(), name='driver-bulk'),
+    path('drivers-locations/', DriverLocationsView.as_view(), name='drivers-locations'),
     path('driver-location/<int:pk>/', DriverLocationByIDAPIView.as_view(), name='driver-location'),
     path('drivers-nearby/', DriverNearbyView.as_view(), name='driver-nearby'),
     path('vehicle-dropdown/', VehicleDropdownView.as_view(), name='vehicle-dropdown'),
