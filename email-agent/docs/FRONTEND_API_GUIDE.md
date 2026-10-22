@@ -169,7 +169,7 @@ driver's pay when the load is eventually booked.
 |---|---|---|
 | 422 | `broker_email_required` | The load has no contact email. Re-open the dialog with an email field and resubmit with `broker_email`. |
 | 409 | `mailbox_not_connected` | This company has no dispatch mailbox. Link to the mailbox settings page (§5). |
-| 409 | `already_open` | A negotiation is already running on this load. Navigate to it instead. |
+| 409 | `already_bid` | Your company has already bid on this load (any status, including closed). No email is sent. `detail.negotiation_id` is the existing negotiation — navigate to it. |
 | 502 | `load_unavailable` / `send_failed` | Transient — show the message and let them retry. |
 
 ```json

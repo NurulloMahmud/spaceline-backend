@@ -21,11 +21,14 @@ logger = logging.getLogger(__name__)
 
 
 class NegotiationError(Exception):
-    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+    def __init__(
+        self, message: str, status_code: int = 400, code: str = "", extra: Optional[dict] = None
+    ):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
         self.code = code
+        self.extra = extra or {}
 
 
 BROKER_EMAIL_FIELDS = (
@@ -110,20 +113,24 @@ async def create_negotiation(
             code="mailbox_not_connected",
         )
 
+    # One bid per load per company, ever. Any negotiation on this load counts,
+    # whatever its status: a closed or expired one still means the broker has
+    # already been emailed, and a second bid would land as a fresh thread.
     existing = (
         session.query(models.Negotiation)
         .filter(
             models.Negotiation.company_id == company_id,
             models.Negotiation.load_uuid == load_uuid,
-            models.Negotiation.status.notin_([models.CLOSED, models.FAILED]),
         )
+        .order_by(models.Negotiation.created_at.desc())
         .first()
     )
     if existing:
         raise NegotiationError(
-            "A negotiation is already open on this load.",
+            "Your company has already bid on this load.",
             status_code=409,
-            code="already_open",
+            code="already_bid",
+            extra={"negotiation_id": str(existing.id)},
         )
 
     load_detail = await atrek.get_load(load_uuid)

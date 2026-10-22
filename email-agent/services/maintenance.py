@@ -1,9 +1,10 @@
 """
 Background upkeep.
 
-A bid the broker never answered would otherwise sit open forever: the load
-stays unavailable to bid again (`already_open`), and the driver stays held off
-new offers. It is closed automatically once the wait is clearly over.
+A bid the broker never answered would otherwise sit open forever, and the
+driver stays held off new offers. It is closed automatically once the wait is
+clearly over. Closing does not free the load: the company still has one bid
+per load (`already_bid`).
 """
 import asyncio
 import logging

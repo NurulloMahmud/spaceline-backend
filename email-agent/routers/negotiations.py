@@ -82,7 +82,7 @@ async def create_negotiation(
     except service.NegotiationError as e:
         raise HTTPException(
             status_code=e.status_code,
-            detail={"error": e.message, "code": e.code},
+            detail={"error": e.message, "code": e.code, **e.extra},
         )
 
     return schemas.negotiation_to_out(negotiation)

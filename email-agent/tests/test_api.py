@@ -123,12 +123,12 @@ def test_a_load_without_a_broker_email_asks_for_one(
     assert resp.json()["broker_email"] == "dispatch@acme-logistics.com"
 
 
-def test_one_open_negotiation_per_load(client, auth_headers, account, stub_peers):
+def test_one_bid_per_load(client, auth_headers, account, stub_peers):
     payload = {"load_uuid": "load-uuid-1", "bid_amount": 3200}
     assert client.post("/api/v1/negotiations", headers=auth_headers, json=payload).status_code == 201
     second = client.post("/api/v1/negotiations", headers=auth_headers, json=payload)
     assert second.status_code == 409
-    assert second.json()["detail"]["code"] == "already_open"
+    assert second.json()["detail"]["code"] == "already_bid"
 
 
 def test_negotiations_are_company_scoped(client, auth_headers, session, negotiation):

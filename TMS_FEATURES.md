@@ -225,7 +225,7 @@ driver_id, driver_amount, broker_email?}`.
 What it does, in order:
 
 1. Confirms the company has a connected dispatch mailbox — else `409 mailbox_not_connected`.
-2. Refuses a duplicate — `409 already_open` if a live negotiation exists on this load.
+2. Refuses a duplicate — `409 already_bid` if the company has ever bid on this load.
 3. Fetches the live load detail from atrek and snapshots it onto the negotiation
    (so later verification compares against the load *as it was at bid time*).
 4. Resolves the broker's email from the load's `contact_email` (several field
