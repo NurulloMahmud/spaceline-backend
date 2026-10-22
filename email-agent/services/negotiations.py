@@ -87,6 +87,31 @@ def load_summary_text(load: dict) -> str:
     ])
 
 
+async def find_posting_email(
+    account: models.EmailAccount, load_detail: dict
+) -> tuple[Optional[str], Optional[str]]:
+    """
+    The load's own Posted-loads email in the dispatch mailbox, if there is one.
+
+    Returns (nylas_message_id, subject) so the bid can be a reply to it and
+    land in the same conversation. (None, None) means start a new email: the
+    load did not come from an email, the feed did not say which one, or the
+    mailbox no longer has it.
+    """
+    rfc_id = (load_detail.get("email_message_id") or "").strip()
+    if not rfc_id:
+        return None, None
+    message = await nylas.find_message_by_rfc_id(account.nylas_grant_id, rfc_id)
+    if not message or not message.get("id"):
+        logger.warning(
+            f"load {load_detail.get('id')}: posting email {rfc_id} not found in the "
+            f"mailbox; the bid goes out as a new email"
+        )
+        return None, None
+    subject = message.get("subject") or load_detail.get("email_subject")
+    return message["id"], subject
+
+
 async def create_negotiation(
     session: Session,
     *,
@@ -171,7 +196,14 @@ async def create_negotiation(
             f"equipment. Check that the driver endpoint accepts the internal secret."
         )
 
-    subject = bid_email.build_subject(load_detail)
+    # Reply to the broker's posting email when we can, so the bid sits in the
+    # conversation they started instead of opening a second one.
+    reply_to_message_id, posting_subject = await find_posting_email(account, load_detail)
+    if reply_to_message_id and posting_subject:
+        subject = f"Re: {RE_PREFIX.sub('', posting_subject.strip())}"
+    else:
+        reply_to_message_id = None
+        subject = bid_email.build_subject(load_detail)
     body = bid_email.build_html_body(
         bid_amount=bid_amount,
         load=load_detail,
@@ -211,6 +243,7 @@ async def create_negotiation(
             to_email=resolved_email,
             subject=subject,
             body=body,
+            reply_to_message_id=reply_to_message_id,
         )
     except NylasError as e:
         logger.error(f"bid email failed for load {load_uuid}: {e}")

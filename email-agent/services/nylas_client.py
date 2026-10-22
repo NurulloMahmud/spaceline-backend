@@ -121,6 +121,37 @@ class NylasService:
             raise NylasError(f"send failed ({resp.status_code}): {resp.text[:400]}")
         return resp.json().get("data", {})
 
+    async def find_message_by_rfc_id(self, grant_id: str, rfc_message_id: str) -> Optional[dict]:
+        """
+        Look a message up by its RFC Message-ID, the only id the load feed
+        keeps for the posting email (Nylas has its own id for the same mail).
+
+        Uses the provider's native search (Gmail's `rfc822msgid:`), which
+        Nylas only allows alongside `limit`. Returns None when nothing
+        matches or the lookup fails — the caller then sends a fresh email
+        rather than losing the bid.
+        """
+        bare = rfc_message_id.strip().strip("<>").strip()
+        if not bare:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    f"{self.base_url}/v3/grants/{grant_id}/messages",
+                    params={"search_query_native": f"rfc822msgid:{bare}", "limit": 1},
+                    headers=self.headers,
+                )
+        except httpx.HTTPError as e:
+            logger.error(f"posting email lookup failed for {bare}: {e}")
+            return None
+        if resp.status_code != 200:
+            logger.error(
+                f"posting email lookup for {bare} -> {resp.status_code}: {resp.text[:300]}"
+            )
+            return None
+        data = resp.json().get("data") or []
+        return data[0] if data else None
+
     async def get_message(self, grant_id: str, message_id: str) -> dict:
         """
         Fetch one message, with the three RFC threading headers attached.

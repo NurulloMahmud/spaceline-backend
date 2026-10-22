@@ -128,3 +128,78 @@ async def test_an_unreachable_load_board_blocks_the_bid(session, account, stubs,
             bid_amount=3200,
         )
     assert e.value.code == "load_unavailable"
+
+
+POSTING = {
+    "email_message_id": "<posting-1@mail.gmail.com>",
+    "email_subject": "LARGE STRAIGHT from Lakeland, FL to Brookfield, CT - Posted by SWICK",
+}
+
+
+async def _bid(session):
+    return await create_negotiation(
+        session=session,
+        company_id=1,
+        dispatcher_user_id=7,
+        load_uuid="load-uuid-1",
+        bid_amount=3200,
+    )
+
+
+async def test_bid_replies_to_the_posting_email(
+    session, account, stubs, monkeypatch, load_snapshot
+):
+    load_snapshot.update(POSTING)
+    sent = []
+
+    async def fake_find(grant_id, rfc_id):
+        assert rfc_id == "<posting-1@mail.gmail.com>"
+        return {"id": "nylas-posting-1", "subject": POSTING["email_subject"]}
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+        return {"id": "msg-out-1", "thread_id": "thread-posting"}
+
+    monkeypatch.setattr(nylas, "find_message_by_rfc_id", fake_find)
+    monkeypatch.setattr(nylas, "send_message", fake_send)
+
+    negotiation = await _bid(session)
+
+    assert sent[0]["reply_to_message_id"] == "nylas-posting-1"
+    assert sent[0]["subject"] == "Re: " + POSTING["email_subject"]
+    assert negotiation.subject == sent[0]["subject"]
+    assert negotiation.nylas_thread_id == "thread-posting"
+
+
+async def test_bid_starts_a_new_email_when_the_posting_is_not_in_the_mailbox(
+    session, account, stubs, monkeypatch, load_snapshot
+):
+    load_snapshot.update(POSTING)
+    sent = []
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+        return {"id": "msg-out-1", "thread_id": "thread-new"}
+
+    monkeypatch.setattr(nylas, "find_message_by_rfc_id", lambda g, r: _async(None))
+    monkeypatch.setattr(nylas, "send_message", fake_send)
+
+    await _bid(session)
+
+    assert sent[0]["reply_to_message_id"] is None
+    assert sent[0]["subject"].startswith("Bid — ")
+
+
+async def test_a_load_without_a_posting_email_never_searches_the_mailbox(
+    session, account, stubs, monkeypatch
+):
+    async def boom(grant_id, rfc_id):
+        raise AssertionError("should not search")
+
+    async def fake_send(**kwargs):
+        return {"id": "msg-out-1", "thread_id": "t"}
+
+    monkeypatch.setattr(nylas, "find_message_by_rfc_id", boom)
+    monkeypatch.setattr(nylas, "send_message", fake_send)
+
+    await _bid(session)
