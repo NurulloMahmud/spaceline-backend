@@ -38,11 +38,11 @@ DEPARTMENT_PAGE_KEYS = {
     'payroll': ALL_KEYS - PAYROLL_BILLING_EXCLUDED,
     'billing': ALL_KEYS - PAYROLL_BILLING_EXCLUDED,
     'dispatch manager': {
-        'users', 'drivers', 'tags', 'billing-invoices', 'loads',
+        'dashboard', 'users', 'drivers', 'tags', 'billing-invoices', 'loads',
         'analytics', 'dispatcher-salaries', 'payroll', 'settings',
     },
-    'dispatch': {'drivers', 'billing-invoices', 'loads', 'analytics'},
-    'updater': {'drivers', 'billing-invoices', 'loads', 'analytics'},
+    'dispatch': {'dashboard', 'drivers', 'billing-invoices', 'loads', 'analytics'},
+    'updater': {'dashboard', 'drivers', 'billing-invoices', 'loads', 'analytics'},
 }
 
 
