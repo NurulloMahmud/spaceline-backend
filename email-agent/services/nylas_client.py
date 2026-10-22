@@ -95,6 +95,14 @@ class NylasService:
         reply_to_message_id: Optional[str] = None,
         thread_id: Optional[str] = None,
     ) -> dict:
+        if config.EMAIL_REDIRECT_TO:
+            logger.warning(
+                f"EMAIL_REDIRECT_TO is set: '{subject}' meant for {to_email} "
+                f"goes to {config.EMAIL_REDIRECT_TO} instead"
+            )
+            body = f"<p><b>[TEST — intended recipient: {to_email}]</b></p>{body}"
+            to_email = config.EMAIL_REDIRECT_TO
+
         payload: dict[str, Any] = {
             "to": [{"email": to_email}],
             "subject": subject,

@@ -81,6 +81,10 @@ class Config:
     NYLAS_CALLBACK_URI: str = os.getenv("NYLAS_CALLBACK_URI", "")
     NYLAS_WEBHOOK_SECRET: str = os.getenv("NYLAS_WEBHOOK_SECRET", "")
 
+    # Test servers only: when set, every outgoing email goes to this address
+    # instead of the real recipient, so a test bid can never reach a broker.
+    EMAIL_REDIRECT_TO: str = os.getenv("EMAIL_REDIRECT_TO", "").strip()
+
     # Where a browser lands after Nylas hosted auth finishes. The mailbox
     # connect card lives on this page; the callback redirects here rather
     # than dumping raw JSON in the tab Nylas left the user on.
