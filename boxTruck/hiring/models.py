@@ -70,6 +70,10 @@ class Driver(models.Model):
     current_longitude = models.FloatField(null=True, blank=True)
     current_latitude = models.FloatField(null=True, blank=True)
     current_address = models.CharField(max_length=255, null=True, blank=True)
+    # When current_* was last set. updated_at moves on any edit, so it cannot
+    # say how fresh the location is. Null until the first update after this
+    # field was added.
+    current_location_updated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

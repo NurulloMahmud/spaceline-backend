@@ -104,6 +104,11 @@ class DriverViewSet(viewsets.ModelViewSet):
                     current_latitude=geo['lat'],
                 )
                 updated_driver.refresh_from_db()
+        if any(k in request.data for k in ('current_zip', 'current_latitude', 'current_longitude')):
+            Driver.objects.filter(pk=updated_driver.pk).update(
+                current_location_updated_at=timezone.now(),
+            )
+            updated_driver.refresh_from_db()
         if not is_internal:
             description = build_change_description(
                 old_instance,

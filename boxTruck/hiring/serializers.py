@@ -44,6 +44,7 @@ class DriverWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Driver
         fields = '__all__'
+        read_only_fields = ['current_location_updated_at']
 
     def validate_phone_number(self, value):
         if not value:
@@ -683,6 +684,7 @@ class NearbyDriverSerializer(serializers.ModelSerializer):
             'current_state',
             'current_zip',
             'current_address',
+            'current_location_updated_at',
             'status',
             'vehicle',
             'miles_out',
