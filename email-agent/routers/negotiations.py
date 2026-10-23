@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,6 +12,7 @@ from routers import schemas
 from services import negotiations as service
 from config.settings import config
 from services import maintenance
+from services import stats as stats_service
 from services import suggestions as suggestion_service
 from services.auth import Principal, current_user, require_internal, scoped_company
 from services.boxtruck import boxtruck
@@ -152,6 +154,54 @@ async def list_negotiations(
         "limit": limit,
         "total": total,
     }
+
+
+def _parse_bound(value: str, name: str, *, end_of_day: bool) -> datetime:
+    """An ISO date or datetime. A bare end date covers that whole day."""
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(
+            422, detail={"error": f"{name} must be an ISO date or datetime", "code": "invalid_period"}
+        )
+    if len(value.strip()) <= 10 and end_of_day:
+        parsed = datetime.combine(parsed.date(), time.max)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+# Declared before "/{negotiation_id}" so "stats" is not read as an id.
+@router.get("/stats")
+async def negotiation_stats(
+    start: Optional[str] = Query(default=None, description="ISO date or datetime; default 30 days ago"),
+    end: Optional[str] = Query(default=None, description="ISO date or datetime; default now"),
+    company_id: int = Depends(scoped_company),
+    session: Session = Depends(session_dependency),
+):
+    """
+    Bids sent in the period and how many drew at least one email reply from the
+    broker, overall and per dispatcher. Bids are counted by creation time.
+    """
+    end_dt = _parse_bound(end, "end", end_of_day=True) if end else datetime.now(timezone.utc)
+    start_dt = (
+        _parse_bound(start, "start", end_of_day=False) if start else end_dt - timedelta(days=30)
+    )
+    if end_dt < start_dt:
+        raise HTTPException(
+            422, detail={"error": "end is before start", "code": "invalid_period"}
+        )
+
+    data = stats_service.broker_response_stats(session, company_id, start_dt, end_dt)
+
+    ids = [d["id"] for d in data["dispatchers"] if d["id"] is not None]
+    people = await boxtruck.get_dispatchers_bulk(ids)
+    for d in data["dispatchers"]:
+        person = people.get(d["id"]) or {}
+        full = f"{person.get('first_name') or ''} {person.get('last_name') or ''}".strip()
+        d["name"] = full or person.get("username")
+
+    return {"period": {"start": start_dt.isoformat(), "end": end_dt.isoformat()}, **data}
 
 
 @router.get("/{negotiation_id}")

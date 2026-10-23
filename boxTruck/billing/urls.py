@@ -4,7 +4,7 @@ from .views import (BrokersViewSet, LoadStopsViewSet,
                     LoadsViewSet, LoadStatusesViewSet, BatchListView, PaymentTypeViewSet, BestProfitLoadsAPIView,
                     LoadFilesAPIView, LoadHistoryByIdAPIView, BrokerListView, LoadsCountByProcessView, RateConfirmationUploadView,
                     BatchViewSet, BatchLoadViewSet, BatchLoadDropDown, MultipleBatchLoadCreateView, LoadByDriverForStatementView, BatchLoadByIDListAPIView,
-                    GenerateCSVView, DailyReportByDispatchersAPIView, LoadsPaySummaryAPIView, BrokerImportAPIView, TagViewSet, LoadTagViewSet,
+                    GenerateCSVView, DailyReportByDispatchersAPIView, DriversReportAPIView, LoadsPaySummaryAPIView, BrokerImportAPIView, TagViewSet, LoadTagViewSet,
                     BrokerBlacklistViewSet
                     )
 from .internal_views import (InternalBookLoadView, InternalBrokerBlacklistBulkView, InternalBrokerResolveView, InternalBrokersBulkView, InternalBusyDriversView,
@@ -36,6 +36,7 @@ urlpattern = ([
     path('batch-list/', BatchListView.as_view(), name='batch-list'), #checked
     path('factoring-csv/', GenerateCSVView.as_view(), name='factoring-csv'), #need test credentials
     path('daily-dispatcher-report/', DailyReportByDispatchersAPIView.as_view(), name='daily-dispatcher-report'), #checked
+    path('drivers-report/', DriversReportAPIView.as_view(), name='drivers-report'),
     path('loads-pay-summary/', LoadsPaySummaryAPIView.as_view(), name='loads-pay-summary'), #checked
     path('brokers-import/', BrokerImportAPIView.as_view(), name='brokers-import'), #checked
     path('best-profitable-load/', BestProfitLoadsAPIView.as_view(), name='best-profitable-load'),

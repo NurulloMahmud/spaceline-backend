@@ -509,3 +509,54 @@ def test_a_superseded_draft_still_says_why(client, session, auth_headers, negoti
     item = body["items"][0]
     assert item["status"] == "superseded"
     assert "mail client" in item["resolved_reason"]
+
+
+def _msg(session, negotiation, direction, from_email):
+    session.add(models.EmailMessage(
+        negotiation_id=negotiation.id, direction=direction, from_email=from_email,
+        to_email="x@y.com", subject="s", body_text="b",
+    ))
+
+
+def test_stats_count_only_real_broker_replies(client, auth_headers, session, account, negotiation):
+    # `negotiation` has no reply yet; add three more bids around it.
+    def bid(load, dispatcher):
+        n = models.Negotiation(
+            company_id=1, load_uuid=load, load_snapshot={}, dispatcher_user_id=dispatcher,
+            bid_amount=1000.0, broker_email="b@acme.com", status=models.BID_SENT,
+        )
+        session.add(n)
+        session.flush()
+        return n
+
+    replied = bid("load-r", 7)
+    posting_only = bid("load-p", 7)
+    ours_only = bid("load-o", 8)
+    _msg(session, replied, "inbound", "Broker <b@acme.com>")
+    _msg(session, posting_only, "inbound", "postedloads@sylectus.com")
+    _msg(session, ours_only, "inbound", account.email_address)
+    session.commit()
+
+    data = client.get("/api/v1/negotiations/stats", headers=auth_headers).json()
+
+    assert data["bids_sent"] == 4          # the fixture's plus three
+    assert data["broker_replied"] == 1     # not the posting, not our own mailbox
+    assert data["reply_rate"] == 25.0
+    by_id = {d["id"]: d for d in data["dispatchers"]}
+    assert by_id[7]["bids_sent"] == 3 and by_id[7]["broker_replied"] == 1
+    assert by_id[8]["bids_sent"] == 1 and by_id[8]["broker_replied"] == 0
+
+
+def test_stats_respect_the_period_and_company(client, auth_headers, session, negotiation):
+    other = {"Authorization": f"Bearer {make_token(company='Smart Fleet LLC', company_id=2)}"}
+
+    assert client.get("/api/v1/negotiations/stats", headers=other).json()["bids_sent"] == 0
+
+    old = client.get(
+        "/api/v1/negotiations/stats?start=2020-01-01&end=2020-01-31", headers=auth_headers
+    ).json()
+    assert old["bids_sent"] == 0 and old["reply_rate"] is None
+
+    bad = client.get("/api/v1/negotiations/stats?start=nope", headers=auth_headers)
+    assert bad.status_code == 422
+    assert bad.json()["detail"]["code"] == "invalid_period"

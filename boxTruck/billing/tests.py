@@ -2,9 +2,14 @@ from unittest import mock
 
 from django.db.utils import IntegrityError
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
-from billing.models import BrokerBlacklist, normalize_mc
+from datetime import datetime
+from decimal import Decimal
+
+from billing.models import BrokerBlacklist, Load, LoadStatus, normalize_mc
+from hiring.models import Driver, DriverStatus
 from users.models import Company, CustomUser, Department
 
 
@@ -134,3 +139,68 @@ class ApiTests(TestCase):
             {"company_id": self.co_a.id, "mc": "312916", "name": "Priority 1 Inc"},
             {"company_id": self.co_b.id, "mc": "", "name": "No File Broker"},
         ])
+
+
+class DriversReportTests(TestCase):
+    URL = "/api/billing/drivers-report/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.mgmt = Department.objects.create(name="Management")
+        cls.disp = Department.objects.create(name="Dispatch")
+        # Load.save() numbers each load from its company's shipment_number.
+        cls.co_a = Company.objects.create(name="A", shipment_number="1000")
+        cls.co_b = Company.objects.create(name="B", shipment_number="1000")
+        cls.mgr = CustomUser.objects.create_user(
+            username="mgr", password="x", first_name="M", last_name="G",
+            company=cls.co_a, department=cls.mgmt, is_active=True)
+        cls.disp_a = CustomUser.objects.create_user(
+            username="disp", password="x", first_name="D", last_name="A",
+            company=cls.co_a, department=cls.disp, is_active=True)
+        status = DriverStatus.objects.create(name="Active")
+        cls.d1 = Driver.objects.create(company=cls.co_a, full_name="Ann", unit_number="U1", status=status)
+        cls.d2 = Driver.objects.create(company=cls.co_b, full_name="Bob", unit_number="U2", status=status)
+        ok = LoadStatus.objects.create(name="Delivered")
+        cancelled = LoadStatus.objects.create(name="Cancelled")
+
+        def load(company, driver, carrier, pay, day, status=ok):
+            return Load.objects.create(
+                company=company, driver=driver, carrier_pay=carrier, driver_pay=pay,
+                pickup_date=timezone.make_aware(datetime(2026, 10, day, 9, 0)), status=status)
+
+        load(cls.co_a, cls.d1, 1000, 700, 10)
+        load(cls.co_a, cls.d1, 500, 300, 11)
+        load(cls.co_a, cls.d1, 9999, 1, 12, status=cancelled)   # excluded
+        load(cls.co_a, cls.d1, 800, 500, 25)                     # outside the period
+        load(cls.co_b, cls.d2, 2000, 1500, 10)
+
+    def get(self, user, **params):
+        c = APIClient()
+        c.force_authenticate(user=user)
+        return c.get(self.URL, {"start_date": "2026-10-01", "end_date": "2026-10-20", **params})
+
+    def test_totals_per_driver(self):
+        r = self.get(self.disp_a)
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(len(r.data), 1)                         # company A only
+        row = r.data[0]
+        self.assertEqual(row["driver__full_name"], "Ann")
+        self.assertEqual(row["driver__unit_number"], "U1")
+        self.assertEqual(row["total_loads"], 2)
+        self.assertEqual(row["total_carrier_pay"], Decimal("1500"))
+        self.assertEqual(row["total_driver_pay"], Decimal("1000"))
+        self.assertEqual(row["total_profit"], Decimal("500"))
+
+    def test_management_sees_every_company_and_can_filter(self):
+        self.assertEqual({r["driver__full_name"] for r in self.get(self.mgr).data}, {"Ann", "Bob"})
+        only_b = self.get(self.mgr, company=self.co_b.id)
+        self.assertEqual([r["driver__full_name"] for r in only_b.data], ["Bob"])
+
+    def test_company_param_is_ignored_for_dispatchers(self):
+        r = self.get(self.disp_a, company=self.co_b.id)
+        self.assertEqual([x["driver__full_name"] for x in r.data], ["Ann"])
+
+    def test_bad_input_is_a_400(self):
+        self.assertEqual(self.get(self.mgr, start_date="nope").status_code, 400)
+        self.assertEqual(self.get(self.mgr, start_date="2026-10-30").status_code, 400)
+        self.assertEqual(self.get(self.mgr, date_type="created_at").status_code, 400)

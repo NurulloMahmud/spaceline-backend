@@ -3,6 +3,7 @@ import requests
 from django.conf import settings
 from rest_framework import generics, viewsets, status, views
 from rest_framework.response import Response
+from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.db.models import F, Value, DecimalField, ExpressionWrapper, Q, Count, Avg
 from django.db.models.functions import Coalesce
@@ -912,6 +913,81 @@ class DailyReportByDispatchersAPIView(views.APIView):
         ).order_by('-total_profit')
         return Response(report, status=status.HTTP_200_OK)
     
+
+class DriversReportAPIView(views.APIView):
+    """
+    Per-driver totals for a period: loads, carrier pay, driver pay and profit.
+    Same shape and rules as the dispatcher report, grouped by driver.
+
+    Query: start_date, end_date (YYYY-MM-DD, default today), date_type
+    (pickup_date | drop_date | delivered_at, default pickup_date), and company,
+    which only management, billing and payroll may use.
+    """
+    permission_classes = [IsAuthenticated]
+    DATE_FIELDS = ('pickup_date', 'drop_date', 'delivered_at')
+
+    def get(self, request, *args, **kwargs):
+        today = date.today()
+        try:
+            start_date = parse_date(request.query_params['start_date']) if request.query_params.get('start_date') else today
+            end_date = parse_date(request.query_params['end_date']) if request.query_params.get('end_date') else today
+            if not start_date or not end_date:
+                raise ValueError
+        except ValueError:
+            return Response(
+                {'message': 'Invalid date format. Use YYYY-MM-DD.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if end_date < start_date:
+            return Response(
+                {'message': 'end_date cannot be before start_date.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        date_type = request.query_params.get('date_type', 'pickup_date')
+        if date_type not in self.DATE_FIELDS:
+            return Response(
+                {'message': f"date_type must be one of {', '.join(self.DATE_FIELDS)}."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user_department = request.user.department
+        privileged_departments = ['management', 'payroll', 'billing']
+        is_privileged = user_department and user_department.name.lower() in privileged_departments
+
+        loads = Load.objects.filter(
+            driver__isnull=False,
+            **{f'{date_type}__range': (
+                timezone.make_aware(datetime.combine(start_date, time.min)),
+                timezone.make_aware(datetime.combine(end_date, time.max)),
+            )},
+        ).exclude(
+            status__name__in=['Cancelled', 'Rejected']
+        )
+        if is_privileged:
+            company = request.query_params.get('company')
+            if company:
+                loads = loads.filter(company_id=company)
+        else:
+            loads = loads.filter(company=request.user.company)
+
+        zero = Value(0, output_field=DecimalField(max_digits=20, decimal_places=2))
+        profit_expression = ExpressionWrapper(
+            Coalesce(F('carrier_pay'), zero) - Coalesce(F('driver_pay'), zero),
+            output_field=DecimalField(max_digits=20, decimal_places=2)
+        )
+        report = loads.values(
+            'driver__id',
+            'driver__full_name',
+            'driver__unit_number',
+        ).annotate(
+            total_loads=Count('id'),
+            total_carrier_pay=Coalesce(Sum('carrier_pay'), zero),
+            total_driver_pay=Coalesce(Sum('driver_pay'), zero),
+            total_profit=Sum(profit_expression),
+        ).order_by('-total_profit')
+        return Response(report, status=status.HTTP_200_OK)
+
 
 class LoadsPaySummaryAPIView(views.APIView):
     permission_classes = [IsAuthenticated]
