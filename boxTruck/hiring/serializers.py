@@ -814,3 +814,58 @@ class DriverAssignSerializer(serializers.Serializer):
                 "Provide team, dispatcher, or both. Send null to clear one."
             )
         return attrs
+
+
+class TrackingDriverSerializer(serializers.ModelSerializer):
+    """One row of the Tracking page.
+
+    DriverViewSerializer answers the same list with every document, the deposit
+    and the equipment of each driver, which is ten queries a row; this is the
+    handful of fields the page shows, read off select_related/prefetch_related
+    so a page of rows costs a fixed number of queries.
+    """
+    status = DriverStatusSerializer()
+    company = serializers.SerializerMethodField()
+    dispatcher = serializers.SerializerMethodField()
+    vehicle = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Driver
+        fields = [
+            'id', 'full_name', 'unit_number', 'phone_number', 'email', 'note',
+            'hired_date', 'terminated_date', 'city', 'state', 'zip_code',
+            'status', 'company', 'dispatcher', 'vehicle',
+            'current_zip', 'current_city', 'current_state', 'current_address',
+            'current_latitude', 'current_longitude', 'current_location_updated_at',
+            'updated_at',
+        ]
+
+    def get_company(self, obj):
+        return {'id': obj.company_id, 'name': obj.company.name}
+
+    def get_dispatcher(self, obj):
+        if obj.dispatcher:
+            return {
+                'id': obj.dispatcher.id,
+                'first_name': obj.dispatcher.first_name,
+                'last_name': obj.dispatcher.last_name,
+                'username': obj.dispatcher.username,
+            }
+        return None
+
+    def get_vehicle(self, obj):
+        # `vehicles` is prefetched, so .all() is a list and [0] costs no query.
+        vehicles = obj.vehicles.all()
+        if not vehicles:
+            return None
+        vehicle = vehicles[0]
+        return {
+            'id': vehicle.id,
+            'vehicle_type': vehicle.vehicle_type,
+            'make': vehicle.make,
+            'model': vehicle.model,
+            'year': vehicle.year,
+            'length': vehicle.length,
+            'width': vehicle.width,
+            'height': vehicle.height,
+        }

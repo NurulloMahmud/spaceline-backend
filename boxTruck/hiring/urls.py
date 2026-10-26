@@ -10,7 +10,8 @@ from .views import (DriverBulkCreateHRView, DriverBulkCreateInviteView, DriverEx
                     VehicleViewSet, DriverCompanyViewSet, DepositViewSet, DriverListView, DriverCompanyModalView, DriverBulkView, DriverLocationsView,
                     VehicleEquipmentViewSet, CompanyHistoryViewSet, VehicleHistoryViewSet, DriverHistoryViewSet, DepositHistoryViewSet,
                     DriverLocationByIDAPIView, DriverNearbyView, VehicleDropdownView,
-                    DriverAssignmentView, UnassignedDriversAPIView
+                    DriverAssignmentView, UnassignedDriversAPIView,
+                    TrackingDriverListView, TrackingSummaryView
                     )
 
 router = SimpleRouter()
@@ -49,6 +50,8 @@ urlpattern = [
     path('vehicle-dropdown/', VehicleDropdownView.as_view(), name='vehicle-dropdown'),
     path('drivers-assign/', DriverAssignmentView.as_view(), name='drivers-assign'),
     path('drivers-unassigned/', UnassignedDriversAPIView.as_view(), name='drivers-unassigned'),
+    path('tracking/drivers/', TrackingDriverListView.as_view(), name='tracking-drivers'),
+    path('tracking/summary/', TrackingSummaryView.as_view(), name='tracking-summary'),
 ]
 
 urlpatterns = router.urls + urlpattern

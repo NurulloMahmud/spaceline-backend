@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 import json
 from django.utils import timezone
-from django.utils.dateparse import parse_date
+from django.utils.dateparse import parse_date, parse_datetime
 import copy
 from django.db import transaction
 from django.core.files.base import ContentFile
@@ -13,7 +13,7 @@ from rest_framework.exceptions import ValidationError
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework import status, viewsets, views, generics, parsers
-from django.db.models import Q
+from django.db.models import Count, F, Q
 from django.http import QueryDict
 from hiring.google_maps import geocode_zip
 from hiring.haversine import haversine
@@ -32,7 +32,7 @@ from .models import (CompanyFile, Deposit, DepositHistory, Driver, DriverCompany
 from .serializers import (DriverAssignSerializer, UnassignedDriverSerializer, CompanyFileSerializer, DepositHistoryViewSerializer, DepositHistoryWriteSerializer, DepositViewSerializer, DepositWriteSerializer,
                           DriverBulkCreateSerializer, DriverCompanyModalSerializer, DriverFileSerializer, DriverHistoryViewSerializer, DriverHistoryWriteSerializer, DriverListSerializer, DriverViewSerializer,
                           DriverWriteSerializer, DriverStatusSerializer, NearbyDriverSerializer, VehicleDropdownSerializer, VehicleFileSerializer, VehicleHistoryViewSerializer, VehicleHistoryWriteSerializer,
-                          VehicleViewSerializer, VehicleWriteSerializer,
+                          VehicleViewSerializer, VehicleWriteSerializer, TrackingDriverSerializer,
                           DriverCompanyViewSerializer, DriverCompanyWriteSerializer,
                           VehicleEquipmentSerializer, CompanyHistoryWriteSerializer, CompanyHistoryViewSerializer)
 
@@ -1280,3 +1280,120 @@ class UnassignedDriversAPIView(generics.ListAPIView):
                 Q(team__isnull=True) | Q(dispatcher__isnull=True)
             )
         return queryset.select_related('company', 'status', 'team', 'dispatcher').order_by('full_name')
+
+
+# --- Tracking page --------------------------------------------------------
+
+def _tracking_queryset(request, with_located_before=True):
+    """The drivers this user may track, under the page's filters.
+
+    Same scoping as DriverViewSet: management, billing and payroll see every
+    company, everyone else their own. `located_before` keeps the drivers whose
+    location is older than that moment or was never set, which is what the
+    page's "Needs update" tab means (the frontend sends the start of today in
+    the dispatcher's time zone).
+    """
+    user = request.user
+    department = (user.department.name.lower() if user.department else '')
+    if department in ['management', 'billing', 'payroll']:
+        qs = Driver.objects.all()
+    else:
+        qs = Driver.objects.filter(company=user.company)
+
+    params = request.query_params
+    for name in ('status', 'company', 'dispatcher'):
+        value = params.get(name, '')
+        if value:
+            if not value.isdigit():
+                raise ValidationError({name: 'Must be a number.'})
+            qs = qs.filter(**{f'{name}_id': int(value)})
+
+    search = params.get('search', '').strip()
+    if search:
+        qs = qs.filter(
+            Q(full_name__icontains=search)
+            | Q(unit_number__icontains=search)
+            | Q(phone_number__icontains=search)
+            | Q(email__icontains=search)
+        )
+
+    located_before = params.get('located_before', '') if with_located_before else ''
+    if located_before:
+        moment = parse_datetime(located_before)
+        if moment is None:
+            raise ValidationError({'located_before': 'Must be an ISO 8601 date-time.'})
+        if timezone.is_naive(moment):
+            moment = timezone.make_aware(moment)
+        qs = qs.filter(
+            Q(current_location_updated_at__lt=moment)
+            | Q(current_location_updated_at__isnull=True)
+        )
+    return qs
+
+
+class TrackingPagination(CustomPagination):
+    page_size = 40
+    max_page_size = 200
+
+
+class TrackingDriverListView(generics.ListAPIView):
+    """GET /hiring/tracking/drivers/: the rows of the Tracking page, a page at a time.
+
+    Filters: status, company, dispatcher (ids), search, located_before.
+    Ordering: `full_name` (default) or `current_location_updated_at`, which
+    puts the drivers who were never located first, then the oldest location.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = TrackingDriverSerializer
+    pagination_class = TrackingPagination
+
+    def get_queryset(self):
+        qs = _tracking_queryset(self.request).select_related(
+            'status', 'company', 'dispatcher'
+        ).prefetch_related('vehicles')
+        ordering = self.request.query_params.get('ordering', 'full_name')
+        if ordering == 'current_location_updated_at':
+            return qs.order_by(F('current_location_updated_at').asc(nulls_first=True), 'full_name', 'id')
+        if ordering == '-current_location_updated_at':
+            return qs.order_by(F('current_location_updated_at').desc(nulls_last=True), 'full_name', 'id')
+        return qs.order_by('full_name', 'id')
+
+
+class TrackingSummaryView(views.APIView):
+    """GET /hiring/tracking/summary/: the numbers on the Tracking page's tabs and band.
+
+    One request instead of a count per status plus the whole "Needs update"
+    list. Takes the list's company, dispatcher and search filters, plus
+    `needs_status` (the Active status id) and `located_before` for the needs
+    count. Answers {by_status: {id: n}, total, needs_update}.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if request.query_params.get('status'):
+            raise ValidationError({'status': 'Every status is counted; use needs_status for the needs-update count.'})
+        qs = _tracking_queryset(request, with_located_before=False)
+        by_status = {
+            str(row['status_id']): row['n']
+            for row in qs.values('status_id').annotate(n=Count('id')).order_by()
+        }
+        needs_update = None
+        needs_status = request.query_params.get('needs_status', '')
+        located_before = request.query_params.get('located_before', '')
+        if needs_status and located_before:
+            if not needs_status.isdigit():
+                raise ValidationError({'needs_status': 'Must be a number.'})
+            moment = parse_datetime(located_before)
+            if moment is None:
+                raise ValidationError({'located_before': 'Must be an ISO 8601 date-time.'})
+            if timezone.is_naive(moment):
+                moment = timezone.make_aware(moment)
+            needs_update = qs.filter(status_id=int(needs_status)).filter(
+                Q(current_location_updated_at__lt=moment)
+                | Q(current_location_updated_at__isnull=True)
+            ).count()
+        return Response({
+            'by_status': by_status,
+            'total': sum(by_status.values()),
+            'needs_update': needs_update,
+        })

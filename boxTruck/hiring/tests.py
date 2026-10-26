@@ -918,3 +918,112 @@ class MutableRequestDataTests(TestCase):
         with self.assertRaises(TypeError):
             source.copy()
         self.assertIs(mutable_request_data(source)['driver_files'], upload)
+
+
+class TrackingEndpointTests(TestCase):
+    """The Tracking page's own list and summary endpoints.
+
+    The page used to read every driver through DriverViewSerializer, which
+    costs a query per document, vehicle, equipment and deposit of every row.
+    These endpoints answer with the handful of fields the page shows, filter
+    and count on the server, and cost a fixed number of queries per page.
+    """
+
+    def setUp(self):
+        self.company = Company.objects.create(name='Space Line LLC')
+        self.other = Company.objects.create(name='Other LLC')
+        management = Department.objects.create(name='Management')
+        dispatch = Department.objects.create(name='Dispatch')
+        self.manager = CustomUser.objects.create_user(
+            username='boss', password='x', company=self.company, department=management,
+            first_name='Big', last_name='Boss',
+        )
+        self.dispatcher = CustomUser.objects.create_user(
+            username='disp', password='x', company=self.company, department=dispatch,
+            first_name='Dana', last_name='Ortiz',
+        )
+        self.active = DriverStatus.objects.create(name='Active')
+        self.pending = DriverStatus.objects.create(name='Pending')
+        now = timezone.now()
+        self.today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        def driver(name, unit, status, company, located_at, dispatcher=None):
+            return Driver.objects.create(
+                full_name=name, unit_number=unit, status=status, company=company,
+                current_location_updated_at=located_at, dispatcher=dispatcher,
+                current_zip='43215' if located_at else None,
+            )
+
+        self.fresh = driver('Jin Park', '101', self.active, self.company, now, self.dispatcher)
+        self.stale = driver('Kwame Osei', '102', self.active, self.company, now - timezone.timedelta(days=2))
+        self.never = driver('Owen Hughes', '103', self.active, self.company, None, self.dispatcher)
+        self.pend = driver('Sam Turner', '104', self.pending, self.company, None)
+        self.elsewhere = driver('Grant Wells', '105', self.active, self.other, None)
+        Vehicle.objects.create(driver=self.stale, make='Ford', model='Transit', vehicle_type='cargo van', length=144, width=68, height=72, payload=3200, gvw=9900)
+        for i in range(3):
+            DriverFile.objects.create(driver=self.stale, name=f'Doc {i}')
+        self.list_url = reverse('tracking-drivers')
+        self.summary_url = reverse('tracking-summary')
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def test_dispatcher_sees_own_company_in_a_fixed_number_of_queries(self):
+        client = self._client(self.dispatcher)
+        with self.assertNumQueries(3):
+            # count, the page with status/company/dispatcher joined, the vehicles prefetched
+            response = client.get(self.list_url)
+        self.assertEqual(response.status_code, 200)
+        names = [row['full_name'] for row in response.data['results']]
+        self.assertEqual(names, ['Jin Park', 'Kwame Osei', 'Owen Hughes', 'Sam Turner'])
+        self.assertEqual(response.data['count'], 4)
+        row = next(r for r in response.data['results'] if r['id'] == self.stale.id)
+        self.assertEqual(row['vehicle']['vehicle_type'], 'cargo van')
+        self.assertEqual(row['status'], {'id': self.active.id, 'name': 'Active'})
+        self.assertEqual(row['company'], {'id': self.company.id, 'name': 'Space Line LLC'})
+        self.assertNotIn('documents', row)
+        self.assertNotIn('ssn', row)
+
+    def test_management_sees_every_company_and_filters_by_it(self):
+        client = self._client(self.manager)
+        self.assertEqual(client.get(self.list_url).data['count'], 5)
+        self.assertEqual(client.get(self.list_url, {'company': self.other.id}).data['count'], 1)
+        self.assertEqual(client.get(self.list_url, {'dispatcher': self.dispatcher.id}).data['count'], 2)
+        self.assertEqual(client.get(self.list_url, {'search': '10 3'}).data['count'], 0)
+        self.assertEqual(client.get(self.list_url, {'search': '103'}).data['results'][0]['full_name'], 'Owen Hughes')
+        self.assertEqual(client.get(self.list_url, {'status': 'x'}).status_code, 400)
+
+    def test_needs_update_is_never_located_first_then_oldest(self):
+        client = self._client(self.dispatcher)
+        response = client.get(self.list_url, {
+            'status': self.active.id,
+            'located_before': self.today_start.isoformat(),
+            'ordering': 'current_location_updated_at',
+        })
+        self.assertEqual([r['full_name'] for r in response.data['results']], ['Owen Hughes', 'Kwame Osei'])
+        self.assertEqual(client.get(self.list_url, {'located_before': 'yesterday'}).status_code, 400)
+
+    def test_page_size_is_capped(self):
+        client = self._client(self.manager)
+        response = client.get(self.list_url, {'page_size': 2})
+        self.assertEqual(len(response.data['results']), 2)
+        self.assertIsNotNone(response.data['next'])
+
+    def test_summary_counts_statuses_and_needs_update(self):
+        client = self._client(self.dispatcher)
+        with self.assertNumQueries(2):
+            response = client.get(self.summary_url, {
+                'needs_status': self.active.id,
+                'located_before': self.today_start.isoformat(),
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['by_status'], {str(self.active.id): 3, str(self.pending.id): 1})
+        self.assertEqual(response.data['total'], 4)
+        self.assertEqual(response.data['needs_update'], 2)
+        filtered = client.get(self.summary_url, {'dispatcher': self.dispatcher.id, 'needs_status': self.active.id, 'located_before': self.today_start.isoformat()})
+        self.assertEqual(filtered.data['by_status'], {str(self.active.id): 2})
+        self.assertEqual(filtered.data['needs_update'], 1)
+        self.assertIsNone(client.get(self.summary_url).data['needs_update'])
+        self.assertEqual(client.get(self.summary_url, {'status': self.active.id}).status_code, 400)
