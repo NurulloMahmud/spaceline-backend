@@ -9,6 +9,7 @@ import logging
 
 from django.db import transaction
 from django.utils.dateparse import parse_datetime
+from .ratecon_time import parse_ratecon_datetime
 from rest_framework import status, views
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
@@ -23,11 +24,7 @@ logger = logging.getLogger(__name__)
 
 def _parse_stop_datetime(value):
     """Ratecon dates arrive as a string or a list of strings per stop."""
-    if isinstance(value, list):
-        value = value[0] if value else None
-    if not value:
-        return None
-    return parse_datetime(value.replace('/', '-')) or parse_datetime(value)
+    return parse_ratecon_datetime(value)
 
 
 class InternalCompanyProfileView(views.APIView):

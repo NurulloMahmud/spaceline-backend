@@ -172,9 +172,13 @@ class LoadsViewSet(viewsets.ModelViewSet):
             f"Shipment: {shipment} | "
             f"Company: {carrier_name} | "
             f"Carrier Pay: {carrier_pay} | "
-            f"Driver Pay: {driver_pay} | "
-            f"Stops Count: {stops_count}"
+            f"Driver Pay: {driver_pay}"
         )
+        # Stops usually arrive in separate requests after the load, so a count
+        # taken here would read 0 and be wrong. Only say it when the stops came
+        # in with the load; otherwise each stop writes its own history entry.
+        if stops_count:
+            description += f" | Stops Count: {stops_count}"
         LoadHistory.objects.create(
             load=load,
             changed_by=user,
@@ -464,6 +468,11 @@ class LoadStopsViewSet(viewsets.ModelViewSet):
             response = super().create(request, *args, **kwargs)
             new_stop = LoadStop.objects.get(id=response.data['id'])
             self.update_load_name(new_stop.load)
+            LoadHistory.objects.create(
+                load=new_stop.load,
+                changed_by=request.user,
+                description=self.describe_added_stop(new_stop),
+            )
 
         empty_triggers = ['last_location', 'trailer_pickup', 'load_pickup', 'load_drop', 'trailer_drop', '']
         loaded_triggers = ['load_pickup', 'load_drop']
@@ -517,6 +526,19 @@ class LoadStopsViewSet(viewsets.ModelViewSet):
         if should_recalc_loaded:
             calculate_loaded_miles_background(load_id)
         return response
+
+    @staticmethod
+    def describe_added_stop(stop):
+        roles = [label for flag, label in (
+            ('load_pickup', 'pickup'), ('load_drop', 'drop'),
+            ('trailer_pickup', 'trailer pickup'), ('trailer_drop', 'trailer drop'),
+            ('last_location', 'last location'),
+        ) if getattr(stop, flag)]
+        place = ', '.join(p for p in (stop.city, f"{stop.state or ''} {stop.zipcode or ''}".strip()) if p)
+        return (
+            f"Stop Added: Order {stop.order} | {place or stop.address or 'no address'}"
+            + (f" | {', '.join(roles)}" if roles else "")
+        )
 
     @staticmethod
     def update_load_name(load):

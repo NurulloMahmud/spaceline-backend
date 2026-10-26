@@ -11,6 +11,7 @@ from django.utils import timezone
 import json
 from datetime import date
 from config import settings
+from .ratecon_time import DATE_TIME_ZONE_RULE
 
 client = OpenAI(api_key=settings.AI_ACCESS_TOKEN)
 
@@ -109,8 +110,7 @@ def parse_rate_confirmation(file):
                     "- 'address': the full address\n"
                     "- 'date_time': if there's one date/time, return as a string; if two or more, return as an array of strings; if date is available but doesnt have specific time, return time according to stop, if its pickup address then 00:00 if delivery address then 23:59\n"
                     "- 'driver_instructions': include ONLY driver instructions relevant to that specific stop, if it's longer thatn 500 characters, summarize it clear and concisely, if no instructions provided return an empty string.\n"
-                    "If the date/time includes a timezone offset (e.g., '2025-02-02T20:00-07:00'), remove the timezone so it becomes '2025-02-02T20:00'.\n"
-                    "Do not include seconds or timezone information. Do not reformat the date/time otherwise."
+                    + DATE_TIME_ZONE_RULE +
                     "Do not combine any fields. Do not include pickup_time or delivery_time separately — all times should be per stop using 'date_time'.\n"
                     "Include all pickup and delivery stops in the same order as the document. "
                     "If any field is missing, return null or an empty string."

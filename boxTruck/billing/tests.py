@@ -5,7 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 
 from billing.models import BrokerBlacklist, Load, LoadStatus, normalize_mc
@@ -204,3 +204,113 @@ class DriversReportTests(TestCase):
         self.assertEqual(self.get(self.mgr, start_date="nope").status_code, 400)
         self.assertEqual(self.get(self.mgr, start_date="2026-10-30").status_code, 400)
         self.assertEqual(self.get(self.mgr, date_type="created_at").status_code, 400)
+
+
+class LoadHistoryStopsTests(TestCase):
+    """The creation entry must not claim "Stops Count: 0" for stops that arrive
+    in later requests; each such stop records itself instead."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.dept = Department.objects.create(name="Dispatch")
+        cls.co = Company.objects.create(name="A", shipment_number="1000")
+        cls.user = CustomUser.objects.create_user(
+            username="d", password="x", first_name="D", last_name="A",
+            company=cls.co, department=cls.dept, is_active=True)
+        LoadStatus.objects.create(name="Booked")
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        patches = [
+            mock.patch("billing.mile.calculate_empty_miles_for_load"),
+            mock.patch("billing.mile.calculate_loaded_miles"),
+            mock.patch("billing.views.debounce_recalculate_miles"),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _create_load(self, **extra):
+        body = {"company": self.co.id, "load_number": "L-1", "carrier_pay": "1000", "driver_pay": "700"}
+        body.update(extra)
+        r = self.client.post("/api/billing/loads/", body, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        return Load.objects.get(pk=r.data["id"])
+
+    def test_creation_entry_has_no_false_stop_count(self):
+        load = self._create_load()
+        entry = load.loadhistory_set.get(description__startswith="Load Created")
+        self.assertNotIn("Stops Count", entry.description)
+
+    def test_stops_sent_with_the_load_are_counted(self):
+        load = self._create_load(stops=[
+            {"order": 1, "city": "Dallas", "state": "TX", "load_pickup": True},
+            {"order": 2, "city": "Austin", "state": "TX", "load_drop": True},
+        ])
+        entry = load.loadhistory_set.get(description__startswith="Load Created")
+        self.assertTrue(entry.description.endswith("Stops Count: 2"))
+
+    def test_each_added_stop_writes_a_history_entry(self):
+        load = self._create_load()
+        r = self.client.post("/api/billing/load-stops/", {
+            "load": load.id, "order": 1, "city": "Dallas", "state": "TX",
+            "zipcode": "75201", "load_pickup": True,
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        entry = load.loadhistory_set.get(description__startswith="Stop Added")
+        self.assertIn("Order 1", entry.description)
+        self.assertIn("Dallas", entry.description)
+        self.assertIn("pickup", entry.description)
+
+
+class RateConTimeTests(TestCase):
+    """A rate-con time that names its zone must keep it all the way into the
+    booked load, instead of being dropped by the reader or by the parser."""
+
+    def parse(self, value):
+        from billing.ratecon_time import parse_ratecon_datetime
+        return parse_ratecon_datetime(value)
+
+    def test_zone_name_becomes_that_moment(self):
+        # October 24 is daylight time: Eastern wall 08:00 is 12:00 UTC.
+        got = self.parse("2026-10-24T08:00 EST")
+        self.assertEqual(got.utcoffset().total_seconds(), -4 * 3600)
+        self.assertEqual(got.astimezone(dt_timezone.utc).hour, 12)
+        # The same wall time in winter is five hours behind UTC.
+        self.assertEqual(self.parse("2026-12-24T08:00 EST").utcoffset().total_seconds(), -5 * 3600)
+
+    def test_every_us_zone_name(self):
+        for name, offset in (("CST", -5), ("CDT", -5), ("MT", -6), ("PDT", -7), ("PST", -7)):
+            self.assertEqual(
+                self.parse(f"2026-10-24T08:00 {name}").utcoffset().total_seconds(), offset * 3600, name)
+
+    def test_offset_is_kept(self):
+        got = self.parse("2026-10-24T08:00-05:00")
+        self.assertEqual(got.utcoffset().total_seconds(), -5 * 3600)
+        self.assertEqual(got.astimezone(dt_timezone.utc).hour, 13)
+
+    def test_no_zone_stays_naive_as_before(self):
+        got = self.parse("2026-10-24T08:00")
+        self.assertIsNone(got.tzinfo)
+        self.assertEqual((got.hour, got.minute), (8, 0))
+        self.assertEqual(self.parse("2026/10/24 08:00").day, 24)
+
+    def test_space_form_and_lists(self):
+        self.assertEqual(self.parse("2026-10-24 08:00 CST").hour, 8)
+        self.assertEqual(self.parse(["2026-10-24T08:00 EST", "2026-10-24T10:00 EST"]).hour, 8)
+
+    def test_unreadable_values_are_none_not_errors(self):
+        for bad in (None, "", [], "ASAP", "2026-10-24T08:00 XYZ", "2026-13-45T08:00 EST"):
+            self.assertIsNone(self.parse(bad), bad)
+
+    def test_internal_booking_parser_uses_it(self):
+        from billing.internal_views import _parse_stop_datetime
+        self.assertEqual(_parse_stop_datetime("2026-10-24T08:00 EST").utcoffset().total_seconds(), -4 * 3600)
+
+    def test_readers_are_told_to_keep_the_zone(self):
+        from billing.ratecon_time import DATE_TIME_ZONE_RULE
+        self.assertIn("keep it exactly", DATE_TIME_ZONE_RULE)
+        self.assertIn("2026-10-24T08:00 EST", DATE_TIME_ZONE_RULE)
+        self.assertIn("2026-10-24T08:00-05:00", DATE_TIME_ZONE_RULE)
+        self.assertNotIn("remove the timezone", DATE_TIME_ZONE_RULE)
