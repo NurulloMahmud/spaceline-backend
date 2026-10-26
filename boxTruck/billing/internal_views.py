@@ -8,6 +8,7 @@ have. Authentication is the shared `X-Internal-Secret` header.
 import logging
 
 from django.db import transaction
+from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from .ratecon_time import parse_ratecon_datetime
 from rest_framework import status, views
@@ -318,3 +319,41 @@ class InternalBrokerBlacklistBulkView(views.APIView):
     def get(self, request):
         entries = BrokerBlacklist.objects.values('company_id', 'mc', 'name')
         return Response(list(entries))
+
+
+class InternalBookedLoadsCountView(views.APIView):
+    """
+    How many loads a company booked in a period, for atrek's dispatch analytics.
+
+    Counts rows in `loads` by `created_at`, whoever created them: loads the
+    email-agent booked and loads a dispatcher typed in by hand both land here,
+    which is why atrek asks the TMS instead of counting its own bids.
+    Cancelled and Rejected loads are left out, same as the other analytics.
+    """
+    permission_classes = [IsInternalService]
+
+    EXCLUDED_STATUSES = ['Cancelled', 'Rejected']
+
+    def get(self, request):
+        company_id = request.query_params.get('company_id')
+        start = parse_datetime(request.query_params.get('start') or '')
+        end = parse_datetime(request.query_params.get('end') or '')
+
+        if not company_id or not company_id.isdigit() or start is None or end is None:
+            return Response(
+                {"error": "company_id, start and end (ISO 8601) are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if timezone.is_naive(start) or timezone.is_naive(end):
+            return Response(
+                {"error": "start and end must include a timezone offset"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        count = (
+            Load.objects
+            .filter(company_id=int(company_id), created_at__range=(start, end))
+            .exclude(status__name__in=self.EXCLUDED_STATUSES)
+            .count()
+        )
+        return Response({"booked_count": count})

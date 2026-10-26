@@ -7,7 +7,7 @@ from .views import (BrokersViewSet, LoadStopsViewSet,
                     GenerateCSVView, DailyReportByDispatchersAPIView, DriversReportAPIView, LoadsPaySummaryAPIView, BrokerImportAPIView, TagViewSet, LoadTagViewSet,
                     BrokerBlacklistViewSet
                     )
-from .internal_views import (InternalBookLoadView, InternalBrokerBlacklistBulkView, InternalBrokerResolveView, InternalBrokersBulkView, InternalBusyDriversView,
+from .internal_views import (InternalBookedLoadsCountView, InternalBookLoadView, InternalBrokerBlacklistBulkView, InternalBrokerResolveView, InternalBrokersBulkView, InternalBusyDriversView,
                              InternalCompanyProfileView, InternalDispatcherView, InternalRateConParseView)
 
 router = SimpleRouter()
@@ -49,6 +49,7 @@ urlpattern = ([
     path('internal/broker-blacklist-bulk/', InternalBrokerBlacklistBulkView.as_view(), name='internal-broker-blacklist-bulk'),
     path('internal/parse-ratecon/', InternalRateConParseView.as_view(), name='internal-parse-ratecon'),
     path('internal/book-load/', InternalBookLoadView.as_view(), name='internal-book-load'),
+    path('internal/booked-loads-count/', InternalBookedLoadsCountView.as_view(), name='internal-booked-loads-count'),
     path('internal/busy-drivers/', InternalBusyDriversView.as_view(), name='internal-busy-drivers'),
 ])
 

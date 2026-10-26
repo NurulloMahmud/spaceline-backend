@@ -314,3 +314,48 @@ class RateConTimeTests(TestCase):
         self.assertIn("2026-10-24T08:00 EST", DATE_TIME_ZONE_RULE)
         self.assertIn("2026-10-24T08:00-05:00", DATE_TIME_ZONE_RULE)
         self.assertNotIn("remove the timezone", DATE_TIME_ZONE_RULE)
+
+
+class InternalBookedLoadsCountTests(TestCase):
+    url = "/api/billing/internal/booked-loads-count/"
+    window = {"start": "2000-01-01T00:00:00Z", "end": "2100-01-01T00:00:00Z"}
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(name="A", shipment_number="1000")
+        cls.other = Company.objects.create(name="B", shipment_number="1000")
+        cls.booked = LoadStatus.objects.create(name="Booked")
+        cls.cancelled = LoadStatus.objects.create(name="Cancelled")
+
+    def setUp(self):
+        import config.settings as cs
+        self.enterContext(mock.patch.object(cs, "INTERNAL_SERVICE_SECRET", "s3cret"))
+        self.client = APIClient()
+        self.headers = {"X-Internal-Secret": "s3cret"}
+
+    def get(self, **params):
+        return self.client.get(self.url, {"company_id": self.co.id, **self.window, **params}, headers=self.headers)
+
+    def test_requires_the_internal_secret(self):
+        r = self.client.get(self.url, {"company_id": self.co.id, **self.window})
+        self.assertIn(r.status_code, (401, 403))
+
+    def test_counts_the_companys_loads_except_cancelled(self):
+        Load.objects.create(company=self.co, load_number="1", status=self.booked)
+        Load.objects.create(company=self.co, load_number="2", status=self.booked)
+        Load.objects.create(company=self.co, load_number="3", status=self.cancelled)
+        Load.objects.create(company=self.other, load_number="4", status=self.booked)
+        r = self.get()
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data, {"booked_count": 2})
+
+    def test_follows_created_at(self):
+        Load.objects.create(company=self.co, load_number="1", status=self.booked)
+        r = self.get(start="2000-01-01T00:00:00Z", end="2000-01-02T00:00:00Z")
+        self.assertEqual(r.data, {"booked_count": 0})
+
+    def test_rejects_a_bad_window(self):
+        self.assertEqual(self.get(start="nope").status_code, 400)
+        self.assertEqual(self.get(start="2026-10-26T05:00:00").status_code, 400)
+        r = self.client.get(self.url, self.window, headers=self.headers)
+        self.assertEqual(r.status_code, 400)
