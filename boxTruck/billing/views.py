@@ -61,8 +61,11 @@ class BrokersViewSet(viewsets.ModelViewSet):
     serializer_class = BrokersSerializer
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['state']
+    # The Brokers page filters by state and by stars (star=5, star__gte=4, star__lte=2).
+    filterset_fields = {'state': ['exact', 'in'], 'star': ['exact', 'gte', 'lte']}
     search_fields = ['name', 'address', 'city', 'email', 'phone_number', 'mc']
+    ordering_fields = ['name', 'star', 'last_updated', 'created_at', 'city', 'state']
+    ordering = ['name']
 
     def get_permissions(self):
         if self.request.method == 'GET':
