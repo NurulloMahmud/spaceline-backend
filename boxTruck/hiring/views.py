@@ -1098,6 +1098,8 @@ class DriverLocationsView(views.APIView):
                 'current_state': driver.current_state,
                 'current_zip': driver.current_zip,
                 'current_location_updated_at': driver.current_location_updated_at,
+                'available_at': driver.available_at,
+                'availability_note': driver.availability_note,
                 'vehicle_type': vehicle.vehicle_type if vehicle else None,
             })
         return Response(drivers)

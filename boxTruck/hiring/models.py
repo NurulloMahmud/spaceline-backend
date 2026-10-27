@@ -74,6 +74,10 @@ class Driver(models.Model):
     # say how fresh the location is. Null until the first update after this
     # field was added.
     current_location_updated_at = models.DateTimeField(null=True, blank=True)
+    # When the driver is free to take a load again: null means now. Set with
+    # the location when the driver is on a load, off duty, or says "after X".
+    available_at = models.DateTimeField(null=True, blank=True)
+    availability_note = models.CharField(max_length=200, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

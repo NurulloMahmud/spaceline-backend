@@ -685,6 +685,10 @@ class NearbyDriverSerializer(serializers.ModelSerializer):
             'current_zip',
             'current_address',
             'current_location_updated_at',
+            'available_at',
+            'availability_note',
+            'available_at',
+            'availability_note',
             'status',
             'vehicle',
             'miles_out',
@@ -837,6 +841,7 @@ class TrackingDriverSerializer(serializers.ModelSerializer):
             'status', 'company', 'dispatcher', 'vehicle',
             'current_zip', 'current_city', 'current_state', 'current_address',
             'current_latitude', 'current_longitude', 'current_location_updated_at',
+            'available_at', 'availability_note',
             'updated_at',
         ]
 
