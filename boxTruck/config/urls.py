@@ -40,6 +40,7 @@ urlpatterns = [
     path('api/billing/', include('billing.urls')),
     path('api/charge/', include('charge.urls')),
     path('api/payroll/', include('payroll.urls')),
+    path('api/accounting/', include('accounting.urls')),
     path('api/mobile/', include('mobile.urls')),
     path('api/dispatchers/', include('dispatchers.urls')),
     path('api/swagger<format>/', schema_view.without_ui(cache_timeout=0), name='schema-json'),
