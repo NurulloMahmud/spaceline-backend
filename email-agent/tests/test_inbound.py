@@ -233,7 +233,15 @@ async def test_broker_reply_creates_a_suggestion(
     assert suggestion.draft_body == "We are holding at $3,200."
     assert suggestion.in_reply_to_message_id == stored.id
 
-    assert [e.type for e in captured] == [events.SUGGESTION_CREATED]
+    assert [e.type for e in captured] == [events.BROKER_REPLIED, events.SUGGESTION_CREATED]
+    replied = captured[0]
+    assert replied.negotiation_id == str(negotiation.id)
+    assert replied.payload["broker_name"] == "Acme Logistics"
+    assert replied.payload["broker_email"] == "broker@acme-logistics.com"
+    assert replied.payload["dispatcher_user_id"] == 7
+    assert replied.payload["message_id"] == str(stored.id)
+    assert replied.payload["pick_up_at"] == "Chicago, IL"
+    assert replied.payload["snippet"].startswith("We can do 2900")
 
 
 async def test_a_failed_draft_still_reaches_the_dispatcher(
@@ -253,7 +261,7 @@ async def test_a_failed_draft_still_reaches_the_dispatcher(
     suggestion = session.query(models.Suggestion).one()
     assert suggestion.status == models.PENDING
     assert "could not draft" in suggestion.ai_reasoning
-    assert [e.type for e in captured] == [events.SUGGESTION_CREATED]
+    assert [e.type for e in captured] == [events.BROKER_REPLIED, events.SUGGESTION_CREATED]
 
 
 async def test_classification_failure_falls_back_to_a_reply_draft(
@@ -521,7 +529,8 @@ async def test_a_booked_negotiation_stops_drafting_replies(
 
     assert session.query(models.EmailMessage).count() == 1, "the message is still archived"
     assert session.query(models.Suggestion).count() == 0
-    assert captured == []
+    # The dispatcher still hears that the broker wrote; nothing is drafted.
+    assert [e.type for e in captured] == [events.BROKER_REPLIED]
 
 
 async def test_thread_text_labels_both_sides(session, negotiation):

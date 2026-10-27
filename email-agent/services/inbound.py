@@ -475,6 +475,27 @@ async def handle_inbound_message(
     session.flush()
     session.refresh(negotiation)
 
+    # Told to every open board before the reply is classified: the dispatcher hears about
+    # the broker's email the moment it lands, whatever the AI makes of it afterwards.
+    snapshot = negotiation.load_snapshot or {}
+    events.publish(
+        events.BROKER_REPLIED,
+        negotiation.company_id,
+        negotiation_id=negotiation.id,
+        load_uuid=negotiation.load_uuid,
+        message_id=str(stored.id),
+        broker_name=negotiation.broker_name or from_email,
+        broker_email=from_email,
+        dispatcher_user_id=negotiation.dispatcher_user_id,
+        subject=message.get("subject"),
+        snippet=(body_text or "")[:160],
+        pick_up_at=snapshot.get("pick_up_at"),
+        deliver_to=snapshot.get("deliver_to"),
+        bid_amount=negotiation.bid_amount,
+        status=negotiation.status,
+        has_attachments=bool(attachments),
+    )
+
     if negotiation.status in (models.BOOKED, models.CLOSED):
         return
 

@@ -495,6 +495,7 @@ Every event's payload:
 | `load_booked` | Load created in the TMS | `tms_load_id`, `load_number`, `shipment`, `carrier_pay`, `driver_pay` | Success toast, move the card to Booked, link to the load |
 | `booking_failed` | Verification passed but the TMS write failed | `error` | **Error** toast; the dispatcher must create the load by hand |
 | `negotiation_updated` | Status or suggestion state changed | `status`, `suggestion_id`, `suggestion_status` | Patch the row in place |
+| `broker_replied` | A broker email landed on a negotiation (before it is classified) | `message_id`, `broker_name`, `broker_email`, `dispatcher_user_id`, `subject`, `snippet`, `pick_up_at`, `deliver_to`, `bid_amount`, `status`, `has_attachments` | Bell notification "<broker> responded", with a sound; opening it shows the thread |
 
 Reconnect with backoff on disconnect; `EventSource` does this natively. Because
 the stream is in-memory, events emitted while disconnected are not replayed —
