@@ -22,7 +22,7 @@ def stub_peers(monkeypatch, load_snapshot, company_profile, driver_profile):
 
     async def fake_send(**kwargs):
         sent.append(kwargs)
-        return {"id": "msg-out-1", "thread_id": "thread-1"}
+        return {"id": f"msg-out-{len(sent)}", "thread_id": f"thread-{len(sent)}"}
 
     async def fake_record_bid(**kwargs):
         return True
@@ -129,6 +129,15 @@ def test_one_bid_per_load(client, auth_headers, account, stub_peers):
     second = client.post("/api/v1/negotiations", headers=auth_headers, json=payload)
     assert second.status_code == 409
     assert second.json()["detail"]["code"] == "already_bid"
+
+
+def test_a_confirmed_second_bid_goes_through(client, auth_headers, account, stub_peers):
+    payload = {"load_uuid": "load-uuid-1", "bid_amount": 3200}
+    first = client.post("/api/v1/negotiations", headers=auth_headers, json=payload)
+    assert first.status_code == 201
+    third = client.post("/api/v1/negotiations", headers=auth_headers, json={**payload, "again": True})
+    assert third.status_code == 201
+    assert third.json()["id"] != first.json()["id"]
 
 
 def test_negotiations_are_company_scoped(client, auth_headers, session, negotiation):

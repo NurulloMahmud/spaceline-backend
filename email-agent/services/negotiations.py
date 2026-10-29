@@ -124,6 +124,7 @@ async def create_negotiation(
     driver_amount: Optional[float] = None,
     broker_email: Optional[str] = None,
     note: str = "",
+    again: bool = False,
 ) -> models.Negotiation:
     account = (
         session.query(models.EmailAccount)
@@ -138,9 +139,10 @@ async def create_negotiation(
             code="mailbox_not_connected",
         )
 
-    # One bid per load per company, ever. Any negotiation on this load counts,
-    # whatever its status: a closed or expired one still means the broker has
-    # already been emailed, and a second bid would land as a fresh thread.
+    # One bid per load per company unless the dispatcher confirmed a second one
+    # (`again`). Any negotiation on this load counts, whatever its status: a
+    # closed or expired one still means the broker has already been emailed, and
+    # a second bid lands as a fresh thread, which is why the board asks first.
     existing = (
         session.query(models.Negotiation)
         .filter(
@@ -150,7 +152,7 @@ async def create_negotiation(
         .order_by(models.Negotiation.created_at.desc())
         .first()
     )
-    if existing:
+    if existing and not again:
         raise NegotiationError(
             "Your company has already bid on this load.",
             status_code=409,

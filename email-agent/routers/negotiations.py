@@ -80,6 +80,7 @@ async def create_negotiation(
             driver_amount=body.driver_amount,
             broker_email=str(body.broker_email) if body.broker_email else None,
             note=body.note,
+            again=body.again,
         )
     except service.NegotiationError as e:
         raise HTTPException(

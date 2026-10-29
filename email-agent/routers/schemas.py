@@ -14,6 +14,9 @@ class CreateNegotiationRequest(BaseModel):
         None, description="required only when the load carries no contact email"
     )
     note: str = ""
+    again: bool = Field(
+        False, description="send another bid although a negotiation is already open on this load"
+    )
 
 
 class SendSuggestionRequest(BaseModel):
