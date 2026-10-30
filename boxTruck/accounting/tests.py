@@ -259,6 +259,47 @@ class InvoiceRowCarriesTheLoadsFilesAndDeliveredTime(AccountingBase):
         self.assertEqual(row['load']['load_files'][0]['file'][:8], 'https://')
 
 
+class SheetImport(AccountingBase):
+    def test_replaces_the_records_with_the_sheets(self):
+        import tempfile, os
+        from accounting.models import InvoiceNote, PayoutNote
+        a = self.load(10001, days_ago=40, status=self.delivered)          # in both sheets, paid
+        b = self.load(10002, days_ago=30, status=self.delivered)          # typo shipment, matched by load number
+        c = self.load(10003, days_ago=1, status=self.dispatched)          # in no sheet
+        Load.objects.filter(pk=b.pk).update(load_number='U6773357')
+        PayoutNote.objects.create(payout=a.payout, text='old note')
+        d = tempfile.mkdtemp()
+        pay = os.path.join(d, 'p.csv'); fac = os.path.join(d, 'f.csv')
+        with open(pay, 'w') as f:
+            f.write('DATE,Invoice#,Load #,Driver names,Payout,Status,,\n')
+            f.write('9/4/2026,SH - 10001,100001,Kwame Osei,"$1,140.00",TRUE,QUICKPAY,WIRE\n')
+            f.write('9/5/2026,SH - 10001,100001,Kwame Osei,$60.00,TRUE,QUICKPAY,\n')
+            f.write('10/29/2026,SH - 10002,U6773357,Jin Park,$570.00,FALSE,STANDARD PAY,\n')
+        with open(fac, 'w') as f:
+            f.write('1 GOOD TO INVOICE,x\nINVOICE, REF#,DEBTOR,PICK UP ,DELIVERY,AMOUNT,STATUS,UPDATE,,Payment Comments,,,\n')
+            f.write('SH - 10001,100001,Northline,,,"1,250.00",4 PAID,24/08/2026,SHort Pay,SH - 10001\t100001\t08/24/2026\t09/23/2026\tEFT_19198260,,,\n')
+            f.write('SH - 100026912,U6773357,Northline,,,$150.00,2 INVOICED,25/09/2026,mail sent,,,,\n')
+        out = StringIO()
+        call_command('import_accounting_sheets', payouts=pay, factoring=fac, stdout=out)
+        self.assertEqual(Payout.objects.count(), 3)
+        self.assertEqual(PayoutNote.objects.filter(text='old note').count(), 0)
+        pa = Payout.objects.get(load=a)
+        self.assertEqual((pa.gross, pa.status, pa.payment_type, pa.paid_at.date().isoformat()), (D('1200'), Payout.PAID, 'Quick Pay', '2026-09-05'))
+        self.assertEqual(list(pa.notes.values_list('text', flat=True)), ['WIRE'])
+        pb = Payout.objects.get(load=b)
+        self.assertEqual((pb.gross, pb.status, pb.payment_type), (D('570'), Payout.PENDING, 'Regular Pay'))
+        ia = Invoice.objects.get(load=a)
+        self.assertEqual((ia.status, ia.amount, ia.original, ia.invoiced_at.date().isoformat(), ia.paid_at.date().isoformat()), (Invoice.PAID, D('1250'), D('1300'), '2026-08-24', '2026-09-23'))
+        self.assertEqual(sorted(ia.notes.values_list('text', flat=True)), ['Paid, reference EFT_19198260', 'SHort Pay'])
+        ib = Invoice.objects.get(load=b)
+        self.assertEqual((ib.status, ib.amount, ib.invoiced_at.date().isoformat()), (Invoice.INVOICED, D('150'), '2026-09-25'))
+        pc, ic = Payout.objects.get(load=c), Invoice.objects.get(load=c)
+        self.assertEqual((pc.status, ic.status), (Payout.PENDING, Invoice.GOOD))
+        text = out.getvalue()
+        self.assertIn('1 load(s) not in the payouts sheet', text)
+        self.assertIn('SH - 10003', text)
+
+
 class ExpenseRules(AccountingBase):
     def test_create_goes_onto_open_payouts_and_states_follow(self):
         l1 = self.load(10020, driver_pay='100', days_ago=3)
