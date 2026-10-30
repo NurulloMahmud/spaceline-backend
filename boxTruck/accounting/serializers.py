@@ -25,6 +25,14 @@ def load_dict(load):
         'company': {'id': load.company_id, 'name': load.company.name} if load.company_id else None,
         'payout_id': load.payout.id if hasattr(load, 'payout') else None,
         'invoice_id': load.invoice.id if hasattr(load, 'invoice') else None,
+        # The Loads page's files and delivered time, for the Factoring table's Files and
+        # Delivered columns. The files come prefetched (see invoice_queryset) so a page of
+        # invoices still costs a fixed number of queries.
+        'delivered_at': load.delivered_at,
+        'load_files': [
+            {'id': f.id, 'name': f.name, 'file': f.file.url if f.file else f.rc_url}
+            for f in load.loadfile_set.all()
+        ],
     }
 
 

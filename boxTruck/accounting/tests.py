@@ -241,6 +241,24 @@ class InvoiceRules(AccountingBase):
         self.assertEqual(c.get(reverse('accounting-invoices'), {'load_status': str(self.invoiced_st.id)}).data['count'], 1)
 
 
+class InvoiceRowCarriesTheLoadsFilesAndDeliveredTime(AccountingBase):
+    def test_files_and_delivered_at_come_with_the_load(self):
+        from billing.models import LoadFile
+        load = self.load(10020, status=self.delivered)
+        when = timezone.now() - timezone.timedelta(hours=5)
+        Load.objects.filter(pk=load.pk).update(delivered_at=when)
+        LoadFile.objects.create(name='RC', load=load, rc_url='https://files.example.com/rc.pdf')
+        LoadFile.objects.create(name='POD', load=load, rc_url='https://files.example.com/pod.pdf')
+        c = self.api(self.acct)
+        # count, the page, one prefetch for every row's files
+        with self.assertNumQueries(3):
+            rows = c.get(reverse('accounting-invoices')).data['results']
+        row = next(r for r in rows if r['load']['id'] == load.id)
+        self.assertEqual(row['load']['delivered_at'], when)
+        self.assertEqual(sorted(f['name'] for f in row['load']['load_files']), ['POD', 'RC'])
+        self.assertEqual(row['load']['load_files'][0]['file'][:8], 'https://')
+
+
 class ExpenseRules(AccountingBase):
     def test_create_goes_onto_open_payouts_and_states_follow(self):
         l1 = self.load(10020, driver_pay='100', days_ago=3)

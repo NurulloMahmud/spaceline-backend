@@ -92,6 +92,7 @@ PAYOUT_RELATED = ('load', 'load__status', 'load__driver', 'load__broker', 'load_
 
 def payout_queryset():
     return Payout.objects.select_related(*PAYOUT_RELATED).prefetch_related(
+        'load__loadfile_set',
         Prefetch('expenses', queryset=PayoutExpense.objects.select_related('deduction', 'deduction__type').prefetch_related('deduction__payout_links__payout'))
     ).annotate(notes_n=Count('notes', distinct=True))
 
@@ -346,7 +347,7 @@ INVOICE_RELATED = ('load', 'load__status', 'load__driver', 'load__broker', 'load
 
 
 def invoice_queryset():
-    return Invoice.objects.select_related(*INVOICE_RELATED).annotate(notes_n=Count('notes', distinct=True))
+    return Invoice.objects.select_related(*INVOICE_RELATED).prefetch_related('load__loadfile_set').annotate(notes_n=Count('notes', distinct=True))
 
 
 def invoice_filters(request, qs, with_status=True):
