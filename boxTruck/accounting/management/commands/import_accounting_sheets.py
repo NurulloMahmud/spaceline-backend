@@ -121,6 +121,12 @@ class Command(BaseCommand):
             Invoice.objects.all().delete()
             for l in loads:
                 payout, invoice = create_for_load(l, take_expenses=False)
+                # Both records date from the load, not from today, so the first step on the
+                # detail panel reads as the booking day.
+                if l.created_at:
+                    Payout.objects.filter(pk=payout.pk).update(created_at=l.created_at)
+                    Invoice.objects.filter(pk=invoice.pk).update(created_at=l.created_at)
+                    payout.created_at = invoice.created_at = l.created_at
                 log_payout(payout, None, 'Created by the sheet import')
                 log_invoice(invoice, None, 'Created by the sheet import')
                 if l.id in pay_by_load:

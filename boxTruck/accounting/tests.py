@@ -295,6 +295,7 @@ class SheetImport(AccountingBase):
         self.assertEqual((ib.status, ib.amount, ib.invoiced_at.date().isoformat()), (Invoice.INVOICED, D('150'), '2026-09-25'))
         pc, ic = Payout.objects.get(load=c), Invoice.objects.get(load=c)
         self.assertEqual((pc.status, ic.status), (Payout.PENDING, Invoice.GOOD))
+        self.assertEqual((pa.created_at, ia.created_at), (a.created_at, a.created_at))
         text = out.getvalue()
         self.assertIn('1 load(s) not in the payouts sheet', text)
         self.assertIn('SH - 10003', text)
