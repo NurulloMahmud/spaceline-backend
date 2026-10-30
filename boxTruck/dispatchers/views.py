@@ -126,7 +126,7 @@ class DispatcherSalaryView(views.APIView):
                 ).exclude(
                     status__name__iexact='rejected'
                 ).select_related(
-                    'driver', 'status'
+                    'driver', 'status', 'payout'
                 )
 
                 kpi = calculate_dispatcher_kpi(
@@ -193,7 +193,7 @@ class DispatcherOwnSalaryView(views.APIView):
         ).exclude(
             status__name__iexact='rejected'
         ).select_related(
-            'driver', 'status'
+            'driver', 'status', 'payout'
         )
         kpi = calculate_dispatcher_kpi(
             dispatcher=user,

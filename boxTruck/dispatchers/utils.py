@@ -5,7 +5,20 @@ from datetime import date, datetime, time, timedelta
 from django.utils import timezone
 from collections import defaultdict
 from django.db import models
+from django.db.models.functions import Coalesce
 from .models import DispatchSalary, DispatchBonus
+
+
+# Dispatchers are paid on the profit they booked. The Quick Pay fee has come off the load's driver
+# pay and counts as company profit, but it is between the company and the driver, so it is left out.
+BOOKED_PROFIT = models.F('carrier_pay') - models.F('driver_pay') - Coalesce(
+    models.F('payout__quick_pay_fee'), models.Value(Decimal('0')), output_field=models.DecimalField(max_digits=20, decimal_places=2)
+)
+
+
+def driver_pay_before_fee(load):
+    payout = getattr(load, 'payout', None)
+    return (load.driver_pay or Decimal('0')) + (payout.quick_pay_fee if payout else Decimal('0'))
 
 
 def get_tier_percentage(company, total_profit, start_date=None):
@@ -92,7 +105,7 @@ def calculate_dispatcher_kpi(dispatcher, loads, company, start_date, end_date):
     total_profit = Decimal('0')
     for load in loads:
         carrier = load.carrier_pay or Decimal('0')
-        driver = load.driver_pay or Decimal('0')
+        driver = driver_pay_before_fee(load)
         total_profit += carrier - driver
 
     percentage = get_tier_percentage(company, total_profit, start_date)
@@ -117,7 +130,7 @@ def calculate_dispatcher_kpi(dispatcher, loads, company, start_date, end_date):
         day_profit = Decimal('0')
         for load in day_loads:
             carrier = load.carrier_pay or Decimal('0')
-            driver = load.driver_pay or Decimal('0')
+            driver = driver_pay_before_fee(load)
             day_profit += carrier - driver
 
         bonus = Decimal('0')
@@ -136,7 +149,7 @@ def calculate_dispatcher_kpi(dispatcher, loads, company, start_date, end_date):
     loads_result = []
     for load in loads:
         carrier = load.carrier_pay or Decimal('0')
-        driver = load.driver_pay or Decimal('0')
+        driver = driver_pay_before_fee(load)
         loads_result.append({
             'id': load.id,
             'load_number': load.load_number,
@@ -208,7 +221,7 @@ def get_dispatcher_gross(dispatcher, company, start_dt, end_dt):
     ).exclude(
         status__name__iexact='rejected'
     ).aggregate(
-        gross=models.Sum(models.F('carrier_pay') - models.F('driver_pay'))
+        gross=models.Sum(BOOKED_PROFIT)
     )['gross']
     return total or Decimal('0')
 
@@ -237,7 +250,7 @@ def get_company_gross_by_dispatcher(company, start_dt, end_dt):
     ).exclude(
         status__name__iexact='rejected'
     ).values('booked_by').annotate(
-        gross=models.Sum(models.F('carrier_pay') - models.F('driver_pay'))
+        gross=models.Sum(BOOKED_PROFIT)
     )
     return {row['booked_by']: row['gross'] or Decimal('0') for row in rows}
 
