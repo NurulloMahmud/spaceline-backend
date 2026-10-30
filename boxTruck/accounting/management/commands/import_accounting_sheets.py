@@ -134,7 +134,7 @@ class Command(BaseCommand):
             rows = list(csv.reader(open(path, newline='', encoding='utf-8-sig')))
         except OSError as e:
             raise CommandError(f'cannot read {path}: {e}')
-        start = next((i for i, r in enumerate(rows) if any(header_contains in c for c in r)), None)
+        start = next((i for i, r in enumerate(rows) if any(c.strip() == header_contains for c in r)), None)
         if start is None:
             raise CommandError(f'{path}: no header row containing {header_contains!r}')
         out = []
@@ -207,7 +207,7 @@ class Command(BaseCommand):
 
         def age(l):
             t = l.delivered_at or l.drop_date or l.pickup_date or l.created_at
-            return (today - t).days if t else None
+            return max(0, (today - t).days) if t else None
         for title, found in (('payouts sheet', pay_by_load), ('factoring sheet', fac_by_load)):
             missing = sorted((l for l in loads if l.id not in found), key=lambda l: (-(age(l) or 0), l.shipment or 0))
             w(f'\n{len(missing)} load(s) not in the {title}:')
