@@ -1,6 +1,7 @@
 """The shapes the Accounting page reads. Built by hand from select_related/prefetched rows so a
 page of payouts or invoices costs a fixed number of queries."""
 from .models import Invoice, Payout, ZERO, debt_of
+from .services import QUICK_PAY_PERCENT, quick_pay_quote
 
 
 def user_dict(u):
@@ -64,7 +65,7 @@ def payout_dict(p, detail=False):
     applied = sum((l.amount for l in links), ZERO)
     out = {
         'id': p.id, 'load': load_dict(p.load), 'gross': p.gross, 'applied': applied, 'amount': max(ZERO, p.gross - applied),
-        'payment_type': p.payment_type, 'status': p.status,
+        'quick_pay_fee': p.quick_pay_fee, 'payment_type': p.payment_type, 'status': p.status,
         'confirmed_at': p.confirmed_at, 'confirmed_by': user_dict(p.confirmed_by),
         'paid_at': p.paid_at, 'paid_by': user_dict(p.paid_by), 'reopened_at': p.reopened_at,
         'expenses': [link_dict(l, p.status) for l in links],
@@ -72,6 +73,8 @@ def payout_dict(p, detail=False):
         'updated_at': p.updated_at, 'created_at': p.created_at,
     }
     if detail:
+        out['quick_pay_percent'] = QUICK_PAY_PERCENT
+        out['quick_pay_quote'] = quick_pay_quote(p.gross)
         out['notes'] = [{'id': n.id, 'user': user_dict(n.user), 'text': n.text, 'created_at': n.created_at} for n in p.notes.all()]
         out['history'] = [{'id': h.id, 'changed_by': user_dict(h.changed_by), 'description': h.description, 'created_at': h.created_at} for h in p.history.all()]
     return out

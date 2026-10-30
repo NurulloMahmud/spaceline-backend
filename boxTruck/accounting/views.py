@@ -19,7 +19,7 @@ from .models import (
 )
 from .serializers import deduction_dict, invoice_dict, link_dict, payout_dict, user_dict
 from .services import (
-    log_invoice, log_payout, money, overpayment_expense, raise_driver_pay, set_load_status, take_expense_everywhere,
+    drop_quick_pay_fee, log_invoice, log_payout, money, overpayment_expense, raise_driver_pay, set_load_status, take_expense_everywhere, take_quick_pay_fee,
 )
 
 ACCOUNTING = ('billing', 'payroll')
@@ -201,6 +201,20 @@ class PayoutDetailView(views.APIView):
             if data['payment_type'] != p.payment_type:
                 log_payout(p, user, f'Payment type {p.payment_type} to {data["payment_type"]}')
                 p.payment_type = data['payment_type']
+                if p.payment_type == Payout.QUICK_PAY:
+                    take_quick_pay_fee(p, user)
+                else:
+                    drop_quick_pay_fee(p, user)
+                changed = True
+
+        # A payout that was already Quick Pay before the fee existed, or booked as Quick Pay.
+        if data.get('take_quick_pay_fee'):
+            if p.status == Payout.PAID:
+                raise ValidationError({'take_quick_pay_fee': 'The payout is paid; only management can reopen it.'})
+            if p.payment_type != Payout.QUICK_PAY:
+                raise ValidationError({'take_quick_pay_fee': 'Only a Quick Pay payout has the fee.'})
+            if p.quick_pay_fee <= 0:
+                take_quick_pay_fee(p, user)
                 changed = True
 
         if 'amount' in data:

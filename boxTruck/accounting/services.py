@@ -1,6 +1,6 @@
 """What the accounting records do on their own: creation with the load, taking open expenses,
 and following the load's pay and status changes."""
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import transaction
 from django.utils import timezone
@@ -16,6 +16,8 @@ PAY_TYPE_ALIASES = {
     'quick pay': 'Quick Pay', 'quickpay': 'Quick Pay', 'regular pay': 'Regular Pay', 'standard pay': 'Regular Pay',
     'zelle in advance': 'Zelle in Advance', 'zelle': 'Zelle in Advance',
 }
+QUICK_PAY_PERCENT = Decimal('5')
+CENT = Decimal('0.01')
 
 
 def money(v):
@@ -37,6 +39,62 @@ def log_payout(payout, user, text):
 
 def log_invoice(invoice, user, text):
     InvoiceHistory.objects.create(invoice=invoice, changed_by=user, description=text)
+
+
+def quick_pay_quote(gross):
+    """The fee Quick Pay would take from this much driver pay."""
+    return (Decimal(gross or 0) * QUICK_PAY_PERCENT / 100).quantize(CENT, ROUND_HALF_UP)
+
+
+def shift_driver_pay(load, delta, user, why):
+    """Change the load's driver pay without the load signals: the payout is already handled."""
+    old = load.driver_pay or ZERO
+    new = old + delta
+    Load.objects.filter(pk=load.pk).update(driver_pay=new, updated_by=user)
+    LoadHistory.objects.create(load=load, changed_by=user, description=f'Load Updated | Driver Pay: {old} -> {new} ({why})')
+    load.driver_pay = new
+
+
+def trim_expenses_to_gross(payout, user):
+    """A lower gross cannot carry what the payout was taking: the newest expenses give back the rest."""
+    excess = payout.applied_total - payout.gross
+    for link in payout.expenses.select_related('deduction', 'deduction__type').order_by('-id'):
+        if excess <= 0:
+            break
+        d = link.deduction
+        cut = min(excess, link.amount)
+        excess -= cut
+        if cut == link.amount:
+            link.delete()
+        else:
+            link.amount -= cut
+            link.save(update_fields=['amount'])
+        log_payout(payout, user, f'{d.type.name if d.type else "Expense"}: {money(cut)} back to open, the payout cannot carry it after the Quick Pay fee')
+
+
+def take_quick_pay_fee(payout, user):
+    """Quick Pay: the company charges the driver the fee. It moves from the driver to the
+    company; what factoring pays does not change. The caller saves the payout."""
+    fee = quick_pay_quote(payout.gross)
+    if fee <= 0:
+        return
+    before = payout.gross
+    payout.quick_pay_fee = fee
+    payout.gross -= fee
+    shift_driver_pay(payout.load, -fee, user, f'{QUICK_PAY_PERCENT}% Quick Pay fee')
+    trim_expenses_to_gross(payout, user)
+    log_payout(payout, user, f'Quick Pay fee {money(fee)} ({QUICK_PAY_PERCENT}% of {money(before)}) moved from the driver to the company')
+
+
+def drop_quick_pay_fee(payout, user):
+    """The payout left Quick Pay: the fee goes back to the driver. The caller saves the payout."""
+    fee = payout.quick_pay_fee
+    if fee <= 0:
+        return
+    payout.quick_pay_fee = ZERO
+    payout.gross += fee
+    shift_driver_pay(payout.load, fee, user, 'Quick Pay fee removed')
+    log_payout(payout, user, f'Quick Pay fee {money(fee)} back to the driver')
 
 
 def take_open_expenses(payout, user=None, exclude=None):
@@ -114,7 +172,11 @@ def follow_load_change(load, old, user=None):
     payout = Payout.objects.filter(load=load).first()
     invoice = Invoice.objects.filter(load=load).first()
     if old.get('driver_pay') != load.driver_pay and payout and payout.status != Payout.PAID and payout.gross == (old.get('driver_pay') or ZERO):
-        Payout.objects.filter(pk=payout.pk).update(gross=load.driver_pay or ZERO)
+        new_pay = load.driver_pay or ZERO
+        # Typed on the Loads page, the driver pay is what the driver gets, so the fee is worked back from it.
+        kept = 100 - QUICK_PAY_PERCENT
+        fee = (new_pay * QUICK_PAY_PERCENT / kept).quantize(CENT, ROUND_HALF_UP) if payout.quick_pay_fee > 0 else ZERO
+        Payout.objects.filter(pk=payout.pk).update(gross=new_pay, quick_pay_fee=fee)
         log_payout(payout, user, f'Driver pay on the load {money(old.get("driver_pay"))} to {money(load.driver_pay)}; payout follows it')
     if old.get('carrier_pay') != load.carrier_pay and invoice and invoice.status != Invoice.PAID and invoice.amount == invoice.original == (old.get('carrier_pay') or ZERO):
         Invoice.objects.filter(pk=invoice.pk).update(original=load.carrier_pay or ZERO, amount=load.carrier_pay or ZERO)

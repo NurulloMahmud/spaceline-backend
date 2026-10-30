@@ -18,13 +18,19 @@ class Payout(models.Model):
     `gross` is what the driver earns on the load (the load's driver pay unless accounting
     changed it). The amount actually paid is gross minus what this payout takes from the
     driver's expenses (PayoutExpense), never stored, always derived, so the two cannot drift.
+
+    `quick_pay_fee` is what Quick Pay moved from the driver to the company. It has already come
+    off both `gross` and the load's driver pay, so the load's profit includes it, and it is kept
+    so the move can be undone when the payout leaves Quick Pay.
     """
     PENDING, CONFIRMED, PAID = 'pending', 'confirmed', 'paid'
     STATUSES = [(PENDING, 'Pending'), (CONFIRMED, 'Confirmed'), (PAID, 'Paid')]
-    PAYMENT_TYPES = ['Quick Pay', 'Regular Pay', 'Zelle in Advance']
+    QUICK_PAY = 'Quick Pay'
+    PAYMENT_TYPES = [QUICK_PAY, 'Regular Pay', 'Zelle in Advance']
 
     load = models.OneToOneField(Load, on_delete=models.CASCADE, related_name='payout')
     gross = models.DecimalField(max_digits=20, decimal_places=2, default=ZERO)
+    quick_pay_fee = models.DecimalField(max_digits=20, decimal_places=2, default=ZERO)
     payment_type = models.CharField(max_length=50, default='Regular Pay')
     status = models.CharField(max_length=20, choices=STATUSES, default=PENDING)
     confirmed_at = models.DateTimeField(null=True, blank=True)
