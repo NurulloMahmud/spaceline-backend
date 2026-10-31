@@ -14,10 +14,6 @@ from django.db import migrations
 KEEP = 'space'
 REMOVE = 'nahl'
 
-# Nahl's drivers, vehicles and driver paperwork stay and become Spaceline's
-# unless this is True.
-DELETE_REMOVED_DRIVERS = False
-
 
 def consolidate(apps, schema_editor):
     Company = apps.get_model('users', 'Company')
@@ -37,8 +33,8 @@ def consolidate(apps, schema_editor):
 
     Load = apps.get_model('billing', 'Load')
     Statement = apps.get_model('payroll', 'Statement')
-    Deduction = apps.get_model('payroll', 'Deduction')
     Driver = apps.get_model('hiring', 'Driver')
+    DriverCompany = apps.get_model('hiring', 'DriverCompany')
     DriverInviteLink = apps.get_model('hiring', 'DriverInviteLink')
     BrokerBlacklist = apps.get_model('billing', 'BrokerBlacklist')
     DispatchSalary = apps.get_model('dispatchers', 'DispatchSalary')
@@ -50,7 +46,6 @@ def consolidate(apps, schema_editor):
     # their load, and statement lines go with their statement.
     Statement.objects.filter(company__in=remove).delete()
     Load.objects.filter(company__in=remove).delete()
-    Deduction.objects.filter(driver__company__in=remove).delete()
 
     # Rates and bonuses decide what a dispatcher is paid, so Nahl's cannot be
     # left to apply to Spaceline. Bonuses with no company were never applied by
@@ -69,8 +64,15 @@ def consolidate(apps, schema_editor):
     UserInvite.objects.filter(company__in=remove).delete()
     DriverInviteLink.objects.filter(company__in=remove).delete()
 
-    if DELETE_REMOVED_DRIVERS:
-        Driver.objects.filter(company__in=remove).delete()
+    # Vehicles, deposits, documents, history, deductions and mobile sign-ins go
+    # with their driver. A driver's own business goes too once no driver is left
+    # on it, but one shared with a Spaceline driver stays.
+    drivers = Driver.objects.filter(company__in=remove)
+    businesses = set(
+        drivers.exclude(driver_company=None).values_list('driver_company_id', flat=True)
+    )
+    drivers.delete()
+    DriverCompany.objects.filter(id__in=businesses, drivers__isnull=True).delete()
 
 
 class Migration(migrations.Migration):

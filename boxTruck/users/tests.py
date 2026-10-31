@@ -166,13 +166,28 @@ class ConsolidateMigrationTests(TransactionTestCase):
 
         status = apps.get_model('hiring', 'DriverStatus').objects.create(name='Active')
         Driver = apps.get_model('hiring', 'Driver')
-        self.space_driver = Driver.objects.create(company=self.space, full_name='S', status=status)
-        self.nahl_driver = Driver.objects.create(company=self.nahl, full_name='N', status=status, team=nahl_team)
+        DriverCompany = apps.get_model('hiring', 'DriverCompany')
+        self.shared_business = DriverCompany.objects.create(name='Shared')
+        nahl_business = DriverCompany.objects.create(name='Only Nahl')
+        self.unattached_business = DriverCompany.objects.create(name='No drivers')
+        apps.get_model('hiring', 'CompanyFile').objects.create(company=nahl_business, name='W-9')
+        self.space_driver = Driver.objects.create(
+            company=self.space, full_name='S', status=status, driver_company=self.shared_business)
+        self.nahl_driver = Driver.objects.create(
+            company=self.nahl, full_name='N', status=status, team=nahl_team, driver_company=nahl_business)
+        Driver.objects.create(company=self.nahl, full_name='N2', status=status, driver_company=self.shared_business)
+        apps.get_model('hiring', 'Vehicle').objects.create(
+            driver=self.nahl_driver, make='Ford', length=144, width=68, height=72, payload=3200, gvw=9900)
+        apps.get_model('hiring', 'Deposit').objects.create(driver=self.nahl_driver)
+        apps.get_model('hiring', 'DriverFile').objects.create(driver=self.nahl_driver, name='CDL')
+        apps.get_model('mobile', 'DriverAuthToken').objects.create(
+            driver=self.nahl_driver, expires_at='2030-01-01T00:00:00Z')
         apps.get_model('hiring', 'DriverInviteLink').objects.create(created_by=self.nahl_user, company=self.nahl)
 
         Load = apps.get_model('billing', 'Load')
         self.space_load = Load.objects.create(company=self.space, driver=self.space_driver, load_number='S1')
         nahl_load = Load.objects.create(company=self.nahl, driver=self.nahl_driver, load_number='N1')
+        self.borrowed_load = Load.objects.create(company=self.space, driver=self.nahl_driver, load_number='S2')
 
         Payout = apps.get_model('accounting', 'Payout')
         Payout.objects.create(load=self.space_load)
@@ -219,7 +234,7 @@ class ConsolidateMigrationTests(TransactionTestCase):
         from accounting.models import Invoice, Payout
         from billing.models import Load
         from payroll.models import Deduction, Statement
-        self.assertEqual(list(Load.objects.values_list('load_number', flat=True)), ['S1'])
+        self.assertEqual(sorted(Load.objects.values_list('load_number', flat=True)), ['S1', 'S2'])
         self.assertEqual(Payout.objects.get().load_id, self.space_load.id)
         self.assertEqual(Invoice.objects.get().load_id, self.space_load.id)
         self.assertEqual(Statement.objects.count(), 1)
@@ -241,13 +256,25 @@ class ConsolidateMigrationTests(TransactionTestCase):
         self.assertEqual(CustomUser.objects.get(username='space').team_id, self.space_team.id)
         self.assertEqual(UserInvite.objects.count(), 0)
 
-    def test_nahl_drivers_stay_unless_asked_otherwise(self):
+    def test_nahl_drivers_go_with_everything_of_theirs(self):
         self._to_latest()
-        from hiring.models import Driver, DriverInviteLink
-        driver = Driver.objects.get(id=self.nahl_driver.id)
-        self.assertIsNone(driver.team_id)
-        self.assertEqual(Driver.objects.count(), 2)
-        self.assertEqual(DriverInviteLink.objects.count(), 0)
+        from hiring.models import CompanyFile, Deposit, Driver, DriverFile, DriverInviteLink, Vehicle
+        from mobile.models import DriverAuthToken
+        self.assertEqual(Driver.objects.get().id, self.space_driver.id)
+        for model in (Vehicle, Deposit, DriverFile, DriverInviteLink, CompanyFile, DriverAuthToken):
+            self.assertEqual(model.objects.count(), 0, model.__name__)
+
+    def test_only_businesses_left_empty_by_nahl_go(self):
+        self._to_latest()
+        from hiring.models import DriverCompany
+        self.assertEqual(
+            set(DriverCompany.objects.values_list('name', flat=True)), {'Shared', 'No drivers'}
+        )
+
+    def test_a_spaceline_load_a_nahl_driver_ran_stays_without_a_driver(self):
+        self._to_latest()
+        from billing.models import Load
+        self.assertIsNone(Load.objects.get(id=self.borrowed_load.id).driver_id)
 
     def test_an_unknown_company_stops_everything(self):
         Company_old = self.old.get_model('users', 'Company')
@@ -255,6 +282,6 @@ class ConsolidateMigrationTests(TransactionTestCase):
         with self.assertRaisesMessage(RuntimeError, 'Priority Freight LLC'):
             self._to_latest()
         self.assertEqual(Company_old.objects.count(), 3)
-        self.assertEqual(self.old.get_model('billing', 'Load').objects.count(), 2)
+        self.assertEqual(self.old.get_model('billing', 'Load').objects.count(), 3)
         self.assertEqual(self.old.get_model('users', 'CustomUser').objects.count(), 2)
         third.delete()
