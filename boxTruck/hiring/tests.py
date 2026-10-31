@@ -1027,3 +1027,80 @@ class TrackingEndpointTests(TestCase):
         self.assertEqual(filtered.data['needs_update'], 1)
         self.assertIsNone(client.get(self.summary_url).data['needs_update'])
         self.assertEqual(client.get(self.summary_url, {'status': self.active.id}).status_code, 400)
+
+
+class OnboardingDriverOpenTests(TestCase):
+    """Every row on the onboarding list has to open. Imported and quick-created
+    drivers have no driver_company, and hiring sees drivers of every company."""
+
+    def setUp(self):
+        self.company = Company.objects.create(name='Space Line LLC')
+        self.other_company = Company.objects.create(name='Other LLC')
+        self.status = DriverStatus.objects.create(name='pending')
+        self.client = APIClient()
+
+    def _user(self, username, department):
+        return CustomUser.objects.create_user(
+            username=username, password='x', company=self.company,
+            department=Department.objects.create(name=department),
+        )
+
+    def _driver(self, company, **kwargs):
+        return Driver.objects.create(
+            company=company, status=self.status, full_name='Test Driver', **kwargs,
+        )
+
+    def _modal(self, driver):
+        return self.client.get(reverse('driver-company-modal'), {'driver': driver.id})
+
+    def test_modal_opens_a_driver_without_a_company(self):
+        self.client.force_authenticate(self._user('recruiter', 'hiring'))
+        driver = self._driver(self.other_company)
+
+        response = self._modal(driver)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIsNone(response.data['id'])
+        self.assertEqual(response.data['documents'], [])
+        self.assertEqual([d['id'] for d in response.data['drivers']], [driver.id])
+
+    def test_modal_opens_own_company_driver_without_a_company(self):
+        self.client.force_authenticate(self._user('dispatcher', 'dispatch'))
+
+        response = self._modal(self._driver(self.company))
+
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_modal_hides_another_companys_driver_without_a_company(self):
+        self.client.force_authenticate(self._user('dispatcher', 'dispatch'))
+
+        response = self._modal(self._driver(self.other_company))
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_modal_still_returns_the_company_when_there_is_one(self):
+        self.client.force_authenticate(self._user('recruiter', 'hiring'))
+        driver_company = DriverCompany.objects.create(name='Bob Hauling LLC')
+        driver = self._driver(self.other_company, driver_company=driver_company)
+
+        response = self._modal(driver)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['id'], driver_company.id)
+        self.assertEqual([d['id'] for d in response.data['drivers']], [driver.id])
+
+    def test_hiring_can_read_a_driver_of_another_company(self):
+        self.client.force_authenticate(self._user('recruiter', 'hiring'))
+        driver = self._driver(self.other_company)
+
+        response = self.client.get(reverse('drivers-detail', args=[driver.id]))
+
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_other_departments_cannot_read_a_driver_of_another_company(self):
+        self.client.force_authenticate(self._user('dispatcher', 'dispatch'))
+        driver = self._driver(self.other_company)
+
+        response = self.client.get(reverse('drivers-detail', args=[driver.id]))
+
+        self.assertEqual(response.status_code, 404)

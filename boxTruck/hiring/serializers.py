@@ -404,6 +404,12 @@ class DriverCompanyModalSerializer(serializers.ModelSerializer):
             'documents'
         ]
 
+    @classmethod
+    def without_company(cls, driver):
+        data = dict.fromkeys(cls.Meta.fields)
+        data.update(drivers=[cls()._get_driver(driver)], documents=[])
+        return data
+
     def get_drivers(self, obj):
         return [self._get_driver(driver) for driver in obj.drivers.all()]
 

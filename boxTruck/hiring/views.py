@@ -14,7 +14,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework import status, viewsets, views, generics, parsers
 from django.db.models import Count, F, Q
-from django.http import QueryDict
+from django.http import Http404, QueryDict
 from hiring.google_maps import geocode_zip
 from hiring.haversine import haversine
 from mobile.models import DriverLocation
@@ -64,10 +64,10 @@ class DriverViewSet(viewsets.ModelViewSet):
             if telegram_group_id:
                 qs = qs.filter(telegram_group_id=telegram_group_id)
             return qs
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll']:
+        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll', 'hiring']:
             return Driver.objects.all()
         return Driver.objects.filter(company=self.request.user.company)
-    
+
     def perform_create(self, serializer):
         if self.request.user.department.name.lower() in ['management', 'billing', 'payroll']:
             serializer.save()
@@ -392,6 +392,14 @@ class DriverCompanyModalView(views.APIView):
             return Response({'detail': 'driver query param is required.'}, status=400)
 
         driver = get_object_or_404(Driver, pk=driver_id)
+        # Imported and quick-created drivers have no company yet, but they are
+        # still on the list and have to open.
+        if driver.driver_company_id is None:
+            department = request.user.department.name.lower()
+            if department not in ['management', 'billing', 'payroll', 'hiring'] and driver.company_id != request.user.company_id:
+                raise Http404
+            return Response(DriverCompanyModalSerializer.without_company(driver))
+
         qs = self.get_queryset(request.user)
         company = get_object_or_404(
             qs.prefetch_related(
