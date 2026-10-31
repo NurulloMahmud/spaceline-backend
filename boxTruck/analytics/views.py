@@ -10,6 +10,7 @@ import calendar
 from django.db.models.functions import TruncMonth
 from django.db.models import Sum, Count
 from billing.models import Load
+from accounting.services import service_fee_profit
 
 
 class LoadAnalyticsAPIView(APIView):
@@ -180,6 +181,7 @@ class LoadSummaryAnalyticsAPIView(APIView):
         total_carrier_pay = aggregated["total_carrier_pay"] or Decimal("0.00")
         total_driver_pay = aggregated["total_driver_pay"] or Decimal("0.00")
         total_profit = total_carrier_pay - total_driver_pay
+        service_fees = service_fee_profit(start_date, end_date)
 
         return Response({
             "start_date": start_date.strftime("%Y-%m-%d"),
@@ -188,4 +190,7 @@ class LoadSummaryAnalyticsAPIView(APIView):
             "total_carrier_pay": float(total_carrier_pay),
             "total_driver_pay": float(total_driver_pay),
             "total_profit": float(total_profit),
+            "service_fee_profit": float(service_fees["quick_pay"] + service_fees["expenses"]),
+            "service_fee_quick_pay": float(service_fees["quick_pay"]),
+            "service_fee_expenses": float(service_fees["expenses"]),
         })

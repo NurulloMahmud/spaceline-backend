@@ -407,6 +407,74 @@ class ExpenseRules(AccountingBase):
         self.assertTrue(Deduction.objects.get(pk=r.data['id']).is_deleted)
 
 
+class ServiceFeeProfit(AccountingBase):
+    def fees(self, start=None, end=None):
+        today = timezone.localdate()
+        r = self.api(self.boss).get(reverse('load-summary-analytics'), {'start_date': start or today, 'end_date': end or today})
+        self.assertEqual(r.status_code, 200)
+        return r.data['service_fee_profit'], r.data['service_fee_quick_pay'], r.data['service_fee_expenses']
+
+    def pay(self, load):
+        r = self.api(self.boss).patch(reverse('accounting-payout', args=[Payout.objects.get(load=load).id]), {'status': 'paid'})
+        self.assertEqual(r.status_code, 200)
+
+    def expense_with_fee(self, amount, fee):
+        r = self.api(self.acct).post(reverse('accounting-expenses'), {'driver': self.driver.id, 'type': self.fuel.id, 'amount': amount, 'fee': fee})
+        self.assertEqual(r.status_code, 201)
+        return r.data['id']
+
+    def test_quick_pay_fee_counts_only_while_the_payout_is_paid(self):
+        load = self.load(10040, pay='Regular Pay')
+        url = reverse('accounting-payout', args=[Payout.objects.get(load=load).id])
+        self.api(self.acct).patch(url, {'payment_type': 'Quick Pay'})
+        self.assertEqual(self.fees(), (0, 0, 0))
+        self.pay(load)
+        self.assertEqual(self.fees(), (43.7, 43.7, 0))
+        self.api(self.boss).patch(url, {'status': 'confirmed'})
+        self.assertEqual(self.fees(), (0, 0, 0))
+
+    def test_expense_fee_counts_once_the_driver_paid_the_expense(self):
+        self.expense_with_fee('100', '10')
+        load = self.load(10041, pay='Regular Pay')
+        self.assertEqual(self.fees(), (0, 0, 0))
+        self.pay(load)
+        self.assertEqual(self.fees(), (10, 0, 10))
+
+    def test_partly_paid_expense_earns_its_share_of_the_fee(self):
+        self.expense_with_fee('100', '10')
+        first = self.load(10042, driver_pay='55', pay='Regular Pay')
+        self.pay(first)
+        self.assertEqual(self.fees(), (5, 0, 5))
+        second = self.load(10043, driver_pay='55', pay='Regular Pay')
+        self.assertEqual(self.fees(), (5, 0, 5))
+        self.pay(second)
+        self.assertEqual(self.fees(), (10, 0, 10))
+
+    def test_expense_paid_by_a_statement_counts_on_its_date_and_only_once(self):
+        d = self.expense('100', paid=True)
+        Deduction.objects.filter(pk=d.pk).update(fee=D('10'))
+        load = self.load(10044, pay='Regular Pay')
+        PayoutExpense.objects.create(payout=Payout.objects.get(load=load), deduction=d, amount=D('100'))
+        self.pay(load)
+        self.assertEqual(self.fees(d.date, timezone.localdate()), (10, 0, 10))
+        self.assertEqual(self.fees(d.date - timezone.timedelta(days=9), d.date - timezone.timedelta(days=1)), (0, 0, 0))
+
+    def test_period_follows_the_paid_date_and_skips_deleted_expenses(self):
+        self.expense_with_fee('100', '10')
+        load = self.load(10045, days_ago=40, pay='Regular Pay')
+        self.pay(load)
+        today = timezone.localdate()
+        self.assertEqual(self.fees(), (10, 0, 10))
+        self.assertEqual(self.fees(today - timezone.timedelta(days=45), today - timezone.timedelta(days=35)), (0, 0, 0))
+        Deduction.objects.update(is_deleted=True)
+        self.assertEqual(self.fees(), (0, 0, 0))
+
+    def test_dispatch_cannot_read_it(self):
+        today = timezone.localdate()
+        r = self.api(self.disp).get(reverse('load-summary-analytics'), {'start_date': today, 'end_date': today})
+        self.assertEqual(r.status_code, 403)
+
+
 class Backfill(AccountingBase):
     def test_creates_missing_records_without_taking_expenses(self):
         self.expense('100')

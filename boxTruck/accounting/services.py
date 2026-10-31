@@ -3,6 +3,8 @@ and following the load's pay and status changes."""
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import transaction
+from django.db.models import Sum
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from billing.models import Load, LoadHistory
@@ -216,3 +218,15 @@ def overpayment_expense(load, over, user, payout):
     DeductionHistory.objects.create(deduction=d, changed_by=user, description='Deduction Created (overpayment from payout)')
     take_expense_everywhere(d, user, exclude_payout=payout.id)
     return d
+
+
+def service_fee_profit(start, end):
+    """Quick Pay and expense fees the driver has already paid, in the period they were paid."""
+    paid_payouts = {'payout__status': Payout.PAID, 'payout__paid_at__date__range': [start, end]}
+    quick_pay = Payout.objects.filter(status=Payout.PAID, paid_at__date__range=[start, end]).aggregate(s=Coalesce(Sum('quick_pay_fee'), ZERO))['s']
+    # An expense marked paid by a closed statement has no payment date, so its own date stands in.
+    expenses = Deduction.objects.filter(is_deleted=False, paid=True, fee__gt=0, date__range=[start, end]).aggregate(s=Coalesce(Sum('fee'), ZERO))['s']
+    # Paid through payouts, the fee is earned in step with the debt: half the expense paid, half the fee.
+    links = PayoutExpense.objects.filter(deduction__is_deleted=False, deduction__paid=False, deduction__fee__gt=0, deduction__amount__gt=0, **paid_payouts)
+    expenses += sum((amount * fee / total for amount, fee, total in links.values_list('amount', 'deduction__fee', 'deduction__amount')), ZERO)
+    return {'quick_pay': quick_pay.quantize(CENT, ROUND_HALF_UP), 'expenses': expenses.quantize(CENT, ROUND_HALF_UP)}
