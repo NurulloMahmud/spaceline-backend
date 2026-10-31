@@ -8,6 +8,7 @@ from reportlab.lib import colors
 from reportlab.lib.enums import TA_RIGHT, TA_CENTER
 import os
 from config import settings
+from users.models import Company
 
 def get_normalized_carrier_name(name):
     name = name.upper()
@@ -126,12 +127,13 @@ def generate_rts_invoice(load):
     ]))
     elements.append(invoice_table)
     elements.append(Spacer(1, 0.4 * inch))
+    company = Company.current()
     company_info_data = [
         [
             [
                 Paragraph("<b>Assigned For:</b>", styles['SectionHeader']),
-                Paragraph(get_normalized_carrier_name(load.company.name) if load.company else "N/A", styles['Normal']),
-                Paragraph(load.company.address if (load.company and load.company.address) else "N/A", styles['Normal'])
+                Paragraph(get_normalized_carrier_name(company.name), styles['Normal']),
+                Paragraph(company.address or "N/A", styles['Normal'])
             ],
             [
                 Paragraph("<b>BILL TO:</b>", styles['SectionHeader']),
@@ -143,8 +145,8 @@ def generate_rts_invoice(load):
 
     assigned_for_content = [
         [Paragraph("<b>Assigned For:</b>", styles['SectionHeader'])],
-        [Paragraph(get_normalized_carrier_name(load.company.name) if load.company else "N/A", styles['Normal'])],
-        [Paragraph(load.company.address if (load.company and load.company.address) else "N/A", styles['Normal'])]
+        [Paragraph(get_normalized_carrier_name(company.name), styles['Normal'])],
+        [Paragraph(company.address or "N/A", styles['Normal'])]
     ]
 
     bill_to_address = ""

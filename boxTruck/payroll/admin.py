@@ -4,8 +4,8 @@ from .models import (Statement, StatementLoad, StatementStatus, StatementDeducti
 # Register your models here.
 @admin.register(Statement)
 class StatementAdmin(admin.ModelAdmin):
-    list_display = ['driver', 'company', 'start_date', 'end_date', 'gross_amount', 'status', 'final']
-    list_filter = ['status', 'final', 'company']
+    list_display = ['driver', 'start_date', 'end_date', 'gross_amount', 'status', 'final']
+    list_filter = ['status', 'final']
     search_fields = ['driver__name']
 
 

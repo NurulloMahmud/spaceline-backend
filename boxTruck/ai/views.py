@@ -33,29 +33,11 @@ class AskQuestionView(APIView):
         question = serializer.validated_data['question']
         conversation_id = serializer.validated_data.get('conversation_id')
         user = request.user
-        company = user.company
-        ALL_DATA_DEPARTMENTS = ['Management', 'Billing', 'Payroll']
-        department_name = user.department.name if user.department else None
-        has_global_access = (
-            user.is_superuser
-            or user.is_staff
-            or department_name in ALL_DATA_DEPARTMENTS
-        )
-
-        if not has_global_access and not company:
-            return Response(
-                {"error": "Your account is not linked to a company."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        company_id_for_query = None if has_global_access else company.id
 
         conversation = None
         if conversation_id:
             try:
-                qs_filter = {"id": conversation_id, "user": user}
-                if not has_global_access:
-                    qs_filter["company"] = company
-                conversation = AIConversation.objects.get(**qs_filter)
+                conversation = AIConversation.objects.get(id=conversation_id, user=user)
             except AIConversation.DoesNotExist:
                 return Response(
                     {"error": "Conversation not found."},
@@ -66,7 +48,6 @@ class AskQuestionView(APIView):
             title = question[:80] + ('...' if len(question) > 80 else '')
             conversation = AIConversation.objects.create(
                 user=user,
-                company=company,
                 title=title
             )
 
@@ -78,15 +59,6 @@ class AskQuestionView(APIView):
                 content = f"[Previous SQL used: {msg.sql_query}]\n{msg.content}"
             history.append({"role": msg.role, "content": content})
 
-        if company_id_for_query:
-            history.insert(0, {
-                "role": "system",
-                "content": (
-                    f"REMINDER: Every SQL query MUST include `loads.company_id = {company_id_for_query}` "
-                    f"in the WHERE clause. No exceptions. Never filter by username alone without company_id."
-                )
-            })
-
         AIMessage.objects.create(
             conversation=conversation,
             role='user',
@@ -94,7 +66,6 @@ class AskQuestionView(APIView):
         )
         result = ask_ai_analyst(
             question=question,
-            company_id=company_id_for_query,
             conversation_history=history
         )
 
@@ -133,8 +104,7 @@ class ConversationListView(APIView):
 
     def get(self, request):
         conversations = AIConversation.objects.filter(
-            user=request.user,
-            company=request.user.company
+            user=request.user
         ).order_by('-last_updated')
 
         serializer = AIConversationListSerializer(conversations, many=True)
@@ -153,8 +123,7 @@ class ConversationDetailView(APIView):
         try:
             return AIConversation.objects.get(
                 id=pk,
-                user=request.user,
-                company=request.user.company
+                user=request.user
             )
         except AIConversation.DoesNotExist:
             return None
@@ -220,8 +189,7 @@ class ConversationMessagesView(APIView):
         try:
             conversation = AIConversation.objects.get(
                 id=pk,
-                user=request.user,
-                company=request.user.company
+                user=request.user
             )
         except AIConversation.DoesNotExist:
             return Response({"error": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -239,8 +207,7 @@ class ConversationDeleteView(APIView):
         try:
             conversation = AIConversation.objects.get(
                 id=pk,
-                user=request.user,
-                company=request.user.company
+                user=request.user
             )
         except AIConversation.DoesNotExist:
             return Response({"error": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)

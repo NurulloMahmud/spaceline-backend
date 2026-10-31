@@ -48,7 +48,7 @@ class DriverViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated | IsInternalService]
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['status', 'company', 'telegram_group_id', 'team', 'dispatcher']
+    filterset_fields = ['status', 'telegram_group_id', 'team', 'dispatcher']
     search_fields = ['full_name', 'ssn', 'phone_number', 'email', 'driver_id', 'address', 'unit_number']
 
     def get_serializer_class(self):
@@ -64,15 +64,13 @@ class DriverViewSet(viewsets.ModelViewSet):
             if telegram_group_id:
                 qs = qs.filter(telegram_group_id=telegram_group_id)
             return qs
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll', 'hiring']:
-            return Driver.objects.all()
-        return Driver.objects.filter(company=self.request.user.company)
+        return Driver.objects.all()
 
     def perform_create(self, serializer):
         if self.request.user.department.name.lower() in ['management', 'billing', 'payroll']:
             serializer.save()
         else:
-            serializer.save(company=self.request.user.company, referral_by=self.request.user)
+            serializer.save(referral_by=self.request.user)
     
     def partial_update(self, request, *args, **kwargs):
         from .google_maps import geocode_zip
@@ -80,7 +78,6 @@ class DriverViewSet(viewsets.ModelViewSet):
         driver = self.get_object()
         old_instance = copy.deepcopy(driver)
         old_instance.status = driver.status
-        old_instance.company = driver.company
         old_instance.manager = driver.manager
         old_instance.referral_by = driver.referral_by
         old_instance.driver_company = driver.driver_company
@@ -89,7 +86,6 @@ class DriverViewSet(viewsets.ModelViewSet):
         updated_driver = serializer.save()
         updated_driver.refresh_from_db()
         updated_driver.status
-        updated_driver.company
         updated_driver.manager
         updated_driver.referral_by
         updated_driver.driver_company
@@ -139,9 +135,7 @@ class DriverDropdownAPIView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll']:
-            return Driver.objects.all()
-        return Driver.objects.filter(company=self.request.user.company)
+        return Driver.objects.all()
 
 
 class DriverFileViewSet(viewsets.ModelViewSet):
@@ -205,9 +199,7 @@ class VehicleViewSet(viewsets.ModelViewSet):
             return VehicleViewSerializer
         
     def get_queryset(self):
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll', 'hiring']:
-            return Vehicle.objects.all()
-        return Vehicle.objects.filter(driver__company=self.request.user.company)
+        return Vehicle.objects.all()
     
     def partial_update(self, request, *args, **kwargs):
         vehicle = self.get_object()
@@ -250,9 +242,7 @@ class DriverCompanyViewSet(viewsets.ModelViewSet):
             return DriverCompanyViewSerializer
 
     def get_queryset(self):
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll', 'hiring']:
-            return DriverCompany.objects.all()
-        return DriverCompany.objects.filter(drivers__company=self.request.user.company).distinct()
+        return DriverCompany.objects.all()
 
     def partial_update(self, request, *args, **kwargs):
         driver_company = self.get_object()
@@ -299,9 +289,7 @@ class DepositViewSet(viewsets.ModelViewSet):
             return DepositViewSerializer
 
     def get_queryset(self):
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll', 'hiring']:
-            return Deposit.objects.all()
-        return Deposit.objects.filter(driver__company=self.request.user.company)
+        return Deposit.objects.all()
 
     def partial_update(self, request, *args, **kwargs):
         deposit = self.get_object()
@@ -338,17 +326,10 @@ class DriverListView(generics.ListAPIView):
         'hired_date',
         'terminated_date',
         'dob',
-        'company',
     }
 
     def get_queryset(self):
-        user = self.request.user
-        department = user.department.name.lower()
-
-        if department in ['management', 'billing', 'payroll', 'hiring']:
-            qs = Driver.objects.all()
-        else:
-            qs = Driver.objects.filter(company=user.company)
+        qs = Driver.objects.all()
 
         status_id = self.request.query_params.get('status')
         search = self.request.query_params.get('search')
@@ -371,7 +352,6 @@ class DriverListView(generics.ListAPIView):
         else:
             qs = qs.order_by('-created_at')
         return qs.select_related(
-            'company',
             'status',
             'manager'
         )
@@ -379,12 +359,6 @@ class DriverListView(generics.ListAPIView):
 
 class DriverCompanyModalView(views.APIView):
     permission_classes = [IsAuthenticated]
-
-    def get_queryset(self, user):
-        department = user.department.name.lower()
-        if department in ['management', 'billing', 'payroll', 'hiring']:
-            return DriverCompany.objects.all()
-        return DriverCompany.objects.filter(drivers__company=user.company).distinct()
 
     def get(self, request):
         driver_id = request.query_params.get('driver')
@@ -395,14 +369,10 @@ class DriverCompanyModalView(views.APIView):
         # Imported and quick-created drivers have no company yet, but they are
         # still on the list and have to open.
         if driver.driver_company_id is None:
-            department = request.user.department.name.lower()
-            if department not in ['management', 'billing', 'payroll', 'hiring'] and driver.company_id != request.user.company_id:
-                raise Http404
             return Response(DriverCompanyModalSerializer.without_company(driver))
 
-        qs = self.get_queryset(request.user)
         company = get_object_or_404(
-            qs.prefetch_related(
+            DriverCompany.objects.prefetch_related(
                 'drivers__status',
                 'drivers__vehicles',
                 'companyfile_set',
@@ -424,7 +394,6 @@ class GenerateInviteLinkView(views.APIView):
 
         invite = DriverInviteLink.objects.create(
             created_by=request.user,
-            company=request.user.company,
             manager=manager,
             expires_at=timezone.now() + timedelta(days=7)
         )
@@ -449,7 +418,6 @@ class GenerateDriverSignLinkView(views.APIView):
 
         invite = DriverInviteLink.objects.create(
             created_by=request.user,
-            company=driver.company,
             driver=driver,
             expires_at=timezone.now() + timedelta(days=7),
         )
@@ -596,7 +564,6 @@ class DriverBulkCreateHRView(views.APIView):
         data = mutable_request_data(request.data)
         pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
         data['status'] = pending_status.id
-        data['company'] = request.user.company.id
         data['referral_by'] = request.user.id
         serializer = DriverBulkCreateSerializer(data=data)
         if serializer.is_valid():
@@ -616,7 +583,7 @@ class DriverBulkCreateInviteView(views.APIView):
 
         try:
             invite = DriverInviteLink.objects.select_related(
-                'created_by', 'company'
+                'created_by'
             ).get(token=token)
         except DriverInviteLink.DoesNotExist:
             return Response({'detail': 'Invalid token.'}, status=400)
@@ -631,7 +598,6 @@ class DriverBulkCreateInviteView(views.APIView):
         data.pop('driver_company', None)
         pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
         data['status'] = pending_status.id
-        data['company'] = invite.company.id
         data['referral_by'] = invite.created_by.id
         if invite.manager_id:
             data['manager'] = invite.manager_id
@@ -691,7 +657,7 @@ class DriverInviteSubmitView(views.APIView):
             return Response({'detail': 'Token is required.'}, status=400)
 
         try:
-            invite = DriverInviteLink.objects.select_related('created_by', 'company').get(token=token)
+            invite = DriverInviteLink.objects.select_related('created_by').get(token=token)
         except DriverInviteLink.DoesNotExist:
             return Response({'detail': 'Invalid token.'}, status=400)
 
@@ -707,9 +673,10 @@ class DriverInviteSubmitView(views.APIView):
                 status=409,
             )
 
-        if not invite.company.contract_template_text:
+        company = Company.current()
+        if not company.contract_template_text:
             return Response(
-                {'detail': f"Company '{invite.company.name}' has no contract_template_text configured."},
+                {'detail': f"Company '{company.name}' has no contract_template_text configured."},
                 status=422,
             )
 
@@ -756,7 +723,6 @@ class DriverInviteSubmitView(views.APIView):
 
         with transaction.atomic():
             driver = Driver.objects.create(
-                company=invite.company,
                 full_name=full_name,
                 phone_number=phone_number,
                 emergency_phone_number=data.get('company_emergency_phone') or '',
@@ -835,7 +801,7 @@ class DriverInviteSubmitView(views.APIView):
                 ] if part
             )
             today = timezone.now()
-            contract_bytes = generate_contract(invite.company, {
+            contract_bytes = generate_contract(company, {
                 'effective_day': today.strftime('%d'),
                 'effective_month': today.strftime('%B'),
                 'effective_year': today.strftime('%y'),
@@ -1085,12 +1051,7 @@ class DriverLocationsView(views.APIView):
             current_longitude__isnull=False,
         ).prefetch_related('vehicles')
 
-        company_id = request.query_params.get('company_id', '')
-        if company_id:
-            if not company_id.isdigit():
-                return Response({'detail': 'company_id must be a number.'}, status=400)
-            qs = qs.filter(company_id=int(company_id))
-
+        company_id = Company.current().id
         drivers = []
         for driver in qs:
             vehicle = driver.vehicles.first()
@@ -1099,7 +1060,7 @@ class DriverLocationsView(views.APIView):
                 'full_name': driver.full_name,
                 'unit_number': driver.unit_number,
                 'phone_number': driver.phone_number,
-                'company_id': driver.company_id,
+                'company_id': company_id,
                 'current_latitude': driver.current_latitude,
                 'current_longitude': driver.current_longitude,
                 'current_city': driver.current_city,
@@ -1138,22 +1099,16 @@ class DriverNearbyView(views.APIView):
         pickup_lat = geo['lat']
         pickup_lng = geo['lng']
 
-        is_internal = bool(request.headers.get('X-Internal-Secret'))
         qs = Driver.objects.filter(
             status__name__iexact='active',
             current_latitude__isnull=False,
             current_longitude__isnull=False,
         ).select_related(
-            'status', 'company'
+            'status'
         ).prefetch_related(
             'vehicles',
             'vehicles__vehicleequipment_set',
         )
-
-        if not is_internal:
-            department = request.user.department.name.lower() if request.user.department else ''
-            if department != 'management':
-                qs = qs.filter(company=request.user.company)
 
         nearby = []
         for driver in qs:
@@ -1183,9 +1138,7 @@ class VehicleDropdownView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll']:
-            return Vehicle.objects.all()
-        return Vehicle.objects.filter(driver__company=self.request.user.company)
+        return Vehicle.objects.all()
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -1214,13 +1167,7 @@ class DriverAssignmentView(views.APIView):
         data = serializer.validated_data
         driver_ids = data['driver_ids']
 
-        department = getattr(request.user, 'department', None)
-        is_management = bool(department and department.name.lower() in
-                             ['management', 'billing', 'payroll'])
-
         drivers = Driver.objects.filter(id__in=driver_ids)
-        if not is_management:
-            drivers = drivers.filter(company=request.user.company)
 
         found = set(drivers.values_list('id', flat=True))
         rejected = [d for d in driver_ids if d not in found]
@@ -1236,9 +1183,6 @@ class DriverAssignmentView(views.APIView):
                 if not team:
                     return Response({"team": "Team not found."},
                                     status=status.HTTP_400_BAD_REQUEST)
-                if not is_management and team.company_id != request.user.company_id:
-                    return Response({"team": "That team belongs to another company."},
-                                    status=status.HTTP_403_FORBIDDEN)
                 updates['team'] = team
 
         if 'dispatcher' in data:
@@ -1250,9 +1194,6 @@ class DriverAssignmentView(views.APIView):
                 if not dispatcher:
                     return Response({"dispatcher": "User not found."},
                                     status=status.HTTP_400_BAD_REQUEST)
-                if not is_management and dispatcher.company_id != request.user.company_id:
-                    return Response({"dispatcher": "That user belongs to another company."},
-                                    status=status.HTTP_403_FORBIDDEN)
                 updates['dispatcher'] = dispatcher
 
         updated = drivers.update(**updates) if updates else 0
@@ -1276,9 +1217,6 @@ class UnassignedDriversAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         queryset = Driver.objects.all()
-        department = getattr(self.request.user, 'department', None)
-        if not (department and department.name.lower() in ['management', 'billing', 'payroll']):
-            queryset = queryset.filter(company=self.request.user.company)
 
         missing = self.request.query_params.get('missing', 'either')
         if missing == 'team':
@@ -1289,7 +1227,7 @@ class UnassignedDriversAPIView(generics.ListAPIView):
             queryset = queryset.filter(
                 Q(team__isnull=True) | Q(dispatcher__isnull=True)
             )
-        return queryset.select_related('company', 'status', 'team', 'dispatcher').order_by('full_name')
+        return queryset.select_related('status', 'team', 'dispatcher').order_by('full_name')
 
 
 # --- Tracking page --------------------------------------------------------
@@ -1303,15 +1241,10 @@ def _tracking_queryset(request, with_located_before=True):
     page's "Needs update" tab means (the frontend sends the start of today in
     the dispatcher's time zone).
     """
-    user = request.user
-    department = (user.department.name.lower() if user.department else '')
-    if department in ['management', 'billing', 'payroll']:
-        qs = Driver.objects.all()
-    else:
-        qs = Driver.objects.filter(company=user.company)
+    qs = Driver.objects.all()
 
     params = request.query_params
-    for name in ('status', 'company', 'dispatcher'):
+    for name in ('status', 'dispatcher'):
         value = params.get(name, '')
         if value:
             if not value.isdigit():
@@ -1359,7 +1292,7 @@ class TrackingDriverListView(generics.ListAPIView):
 
     def get_queryset(self):
         qs = _tracking_queryset(self.request).select_related(
-            'status', 'company', 'dispatcher'
+            'status', 'dispatcher'
         ).prefetch_related('vehicles')
         ordering = self.request.query_params.get('ordering', 'full_name')
         if ordering == 'current_location_updated_at':

@@ -2,7 +2,7 @@ from django.db import models
 
 from billing.models import Load
 from hiring.models import Driver
-from users.models import Company, CustomUser
+from users.models import CustomUser
 
 # Create your models here.
 class StatementStatus(models.Model):
@@ -70,7 +70,6 @@ class DeductionHistory(models.Model):
 class Statement(models.Model):
     start_date = models.DateField()
     end_date = models.DateField()
-    company = models.ForeignKey(Company, on_delete=models.CASCADE)
     driver = models.ForeignKey(Driver, on_delete=models.CASCADE, null=True, blank=True)
     created_by = models.ForeignKey(CustomUser, on_delete=models.CASCADE, null=True, blank=True, related_name='created_by')
     gross_amount = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)

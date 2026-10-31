@@ -5,7 +5,6 @@ from .models import DispatchSalary, DispatchBonus
 class DispatchSalaryViewSerializer(serializers.ModelSerializer):
     created_by = serializers.SerializerMethodField()
     updated_by = serializers.SerializerMethodField()
-    company = serializers.SerializerMethodField()
 
     class Meta:
         model = DispatchSalary
@@ -31,14 +30,6 @@ class DispatchSalaryViewSerializer(serializers.ModelSerializer):
             }
         return None
 
-    def get_company(self, obj):
-        if obj.company:
-            return {
-                'id': obj.company.id,
-                'name': obj.company.name,
-            }
-        return None
-
 
 class DispatchSalaryWriteSerializer(serializers.ModelSerializer):
     
@@ -50,7 +41,6 @@ class DispatchSalaryWriteSerializer(serializers.ModelSerializer):
 class DispatchBonusViewSerializer(serializers.ModelSerializer):
     created_by = serializers.SerializerMethodField()
     updated_by = serializers.SerializerMethodField()
-    company = serializers.SerializerMethodField()
 
     class Meta:
         model = DispatchBonus
@@ -73,14 +63,6 @@ class DispatchBonusViewSerializer(serializers.ModelSerializer):
                 'username': obj.updated_by.username,
                 'first_name': obj.updated_by.first_name,
                 'last_name': obj.updated_by.last_name,
-            }
-        return None
-
-    def get_company(self, obj):
-        if obj.company:
-            return {
-                'id': obj.company.id,
-                'name': obj.company.name,
             }
         return None
 

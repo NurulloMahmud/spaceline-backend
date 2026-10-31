@@ -10,7 +10,7 @@ def _department_name(user):
 
 
 class CanManageBilling(BasePermission):
-    """Authenticated, belongs to a company, and is in management or billing."""
+    """Authenticated and in management or billing."""
 
     message = "Only management or billing staff can manage the company's payment method."
 
@@ -19,6 +19,5 @@ class CanManageBilling(BasePermission):
         return bool(
             user
             and user.is_authenticated
-            and getattr(user, "company_id", None)
             and _department_name(user) in _BILLING_DEPARTMENTS
         )

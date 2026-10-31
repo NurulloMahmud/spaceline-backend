@@ -24,22 +24,17 @@ from hiring.models import Driver  # noqa: E402  (team deletion unassigns drivers
 User = get_user_model()
 
 
-class CompanyViewSet(viewsets.ModelViewSet):
-    queryset = Company.objects.all()
+class CompanyProfileView(generics.RetrieveUpdateAPIView):
+    """The one company this deployment belongs to. There is no list, create or delete."""
     serializer_class = CompanySerializer
 
     def get_permissions(self):
         if self.request.method == 'GET':
-            permission_classes = [AllowAny]
-        else:
-            permission_classes = [IsAdminUser]
-        return [permission() for permission in permission_classes]
-    
-    def get_queryset(self):
-        user = self.request.user
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll']:
-            return Company.objects.all()
-        return Company.objects.filter(id=user.company.id)
+            return [IsAuthenticated()]
+        return [IsAdminUser()]
+
+    def get_object(self):
+        return Company.current()
 
 
 class RegisterAPIView(CreateAPIView):
@@ -70,9 +65,7 @@ class UserListAPIView(generics.ListAPIView):
     serializer_class = UserListSerializer
 
     def get_queryset(self):
-        if self.request.user.department.name.lower() == 'management':
-            return CustomUser.objects.all()
-        return CustomUser.objects.filter(company=self.request.user.company)
+        return CustomUser.objects.all()
 
     def get_permissions(self):
         if self.request.method == 'GET':
@@ -224,11 +217,7 @@ class DispatchUsers(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        user = self.request.user
-        if user.department.name.lower() in ['management', 'billing', 'payroll']:
-            return CustomUser.objects.filter(department__name__in=['Dispatch', 'Dispatch Manager'])
-        else:
-            return CustomUser.objects.filter(company=user.company, department__name__in=['Dispatch', 'Dispatch Manager'])
+        return CustomUser.objects.filter(department__name__in=['Dispatch', 'Dispatch Manager'])
 
 
 class UpdaterUsersAPIView(generics.ListAPIView):
@@ -236,9 +225,7 @@ class UpdaterUsersAPIView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        user = self.request.user
-        department_name = user.department.name.lower() if user.department else None
-        queryset = CustomUser.objects.filter(
+        return CustomUser.objects.filter(
             department__name__in=['Updater']
         ).annotate(
             active_loads_count=Count(
@@ -246,11 +233,6 @@ class UpdaterUsersAPIView(generics.ListAPIView):
                 filter=~Q(updated_by__status__name__in=['Delivered', 'Cancelled', 'Invoiced', 'Rejected', 'Factored'])
             )
         )
-
-        if department_name in ['management', 'billing', 'payroll']:
-            return queryset
-        else:
-            return queryset.filter(company=user.company)
 
 
 class CreateInviteView(generics.CreateAPIView):
@@ -272,7 +254,7 @@ class CreateInviteView(generics.CreateAPIView):
 class InviteDetailView(views.APIView):
     def get(self, request, token):
         try:
-            invite = UserInvite.objects.select_related('company', 'department').get(token=token)
+            invite = UserInvite.objects.select_related('department').get(token=token)
         except UserInvite.DoesNotExist:
             return Response({"detail": "Invalid invite link."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -284,7 +266,7 @@ class InviteDetailView(views.APIView):
 
         return Response({
             "username": invite.username,
-            "company": invite.company.name if invite.company else None,
+            "company": Company.current().name,
             "department": invite.department.name if invite.department else None,
         })
     
@@ -319,10 +301,6 @@ class UserBulkView(views.APIView):
 class TeamViewSet(viewsets.ModelViewSet):
     """
     Dispatch teams.
-
-    Everything is company-scoped: management sees every company's teams, and
-    anyone else only their own. A team can never be created for, or moved to,
-    another company by a non-management user.
     """
     serializer_class = TeamSerializer
 
@@ -331,26 +309,15 @@ class TeamViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated()]
         return [(IsAdminUser | IsDispatchManager)()]
 
-    def _is_management(self):
-        department = getattr(self.request.user, 'department', None)
-        return bool(department and department.name.lower() == 'management')
-
     def get_queryset(self):
         queryset = (
             Team.objects
-            .select_related('company', 'lead')
+            .select_related('lead')
             .annotate(
                 members_total=Count('members', distinct=True),
                 drivers_total=Count('drivers', distinct=True),
             )
         )
-        if not self._is_management():
-            queryset = queryset.filter(company=self.request.user.company)
-
-        company = self.request.query_params.get('company')
-        if company and company.isdigit():
-            queryset = queryset.filter(company_id=company)
-
         is_active = self.request.query_params.get('is_active')
         if is_active in ('true', 'false'):
             queryset = queryset.filter(is_active=is_active == 'true')
@@ -362,18 +329,7 @@ class TeamViewSet(viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        company = serializer.validated_data.get('company')
-        if not self._is_management():
-            # A dispatch manager creates teams for their own company only,
-            # whatever the payload says.
-            company = self.request.user.company
-        serializer.save(company=company, created_by=self.request.user)
-
-    def perform_update(self, serializer):
-        if not self._is_management():
-            serializer.save(company=self.request.user.company)
-        else:
-            serializer.save()
+        serializer.save(created_by=self.request.user)
 
     def destroy(self, request, *args, **kwargs):
         """
@@ -406,7 +362,7 @@ class TeamViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         user_ids = serializer.validated_data['user_ids']
 
-        eligible = CustomUser.objects.filter(id__in=user_ids, company=team.company)
+        eligible = CustomUser.objects.filter(id__in=user_ids)
         found = set(eligible.values_list('id', flat=True))
         rejected = [uid for uid in user_ids if uid not in found]
 
@@ -415,7 +371,7 @@ class TeamViewSet(viewsets.ModelViewSet):
             "assigned": updated,
             "rejected_user_ids": rejected,
             "detail": (
-                "Users not in this team's company were skipped."
+                "Users that do not exist were skipped."
                 if rejected else "All users assigned."
             ),
         })
@@ -441,10 +397,6 @@ class UnassignedUsersAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         queryset = CustomUser.objects.filter(team__isnull=True).select_related('department')
-        department = getattr(self.request.user, 'department', None)
-        if not (department and department.name.lower() == 'management'):
-            queryset = queryset.filter(company=self.request.user.company)
-
         only_dispatch = self.request.query_params.get('dispatch_only')
         if only_dispatch != 'false':
             queryset = queryset.filter(

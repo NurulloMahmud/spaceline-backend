@@ -87,7 +87,7 @@ def paginate(view, request, qs, to_dict):
 
 # --- Payouts -------------------------------------------------------------------------------------
 
-PAYOUT_RELATED = ('load', 'load__status', 'load__driver', 'load__broker', 'load__company', 'load__invoice', 'confirmed_by', 'paid_by')
+PAYOUT_RELATED = ('load', 'load__status', 'load__driver', 'load__broker', 'load__invoice', 'confirmed_by', 'paid_by')
 
 
 def payout_queryset():
@@ -106,8 +106,6 @@ def payout_filters(request, qs, with_status=True):
         qs = qs.filter(load__status_id__in=load_statuses)
     if p.get('driver'):
         qs = qs.filter(load__driver_id=p['driver'])
-    if p.get('company'):
-        qs = qs.filter(load__company_id=p['company'])
     if p.get('payment_type'):
         qs = qs.filter(payment_type=p['payment_type'])
     if p.get('pickup_from'):
@@ -357,7 +355,7 @@ class LoadStatusView(views.APIView):
 
 # --- Invoices ------------------------------------------------------------------------------------
 
-INVOICE_RELATED = ('load', 'load__status', 'load__driver', 'load__broker', 'load__company', 'load__payout')
+INVOICE_RELATED = ('load', 'load__status', 'load__driver', 'load__broker', 'load__payout')
 
 
 def invoice_queryset():
@@ -376,8 +374,6 @@ def invoice_filters(request, qs, with_status=True):
         qs = qs.filter(load__status_id__in=load_statuses)
     if p.get('broker'):
         qs = qs.filter(load__broker_id=p['broker'])
-    if p.get('company'):
-        qs = qs.filter(load__company_id=p['company'])
     if p.get('short') in ('1', 'true'):
         qs = qs.filter(amount__lt=F('original'))
     if p.get('pickup_from'):
@@ -503,8 +499,6 @@ def expense_filters(request, qs, with_state=True):
         qs = qs.filter(owed_sum__lte=0)
     if p.get('driver'):
         qs = qs.filter(driver_id=p['driver'])
-    if p.get('company'):
-        qs = qs.filter(driver__company_id=p['company'])
     if p.get('type'):
         qs = qs.filter(type_id=p['type'])
     if p.get('date_from'):

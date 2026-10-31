@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from hiring.models import Driver, DriverFile
 from hiring.pdf_generation import fill_w9, generate_contract
+from users.models import Company
 
 W9_NAME = 'W-9 (Generated)'
 CONTRACT_NAME = 'Contractor Agreement (Generated)'
@@ -26,7 +27,8 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         dry_run = options['dry_run']
-        drivers = Driver.objects.select_related('company', 'driver_company').all().order_by('id')
+        drivers = Driver.objects.select_related('driver_company').all().order_by('id')
+        company = Company.current()
 
         generated = 0
         skipped_no_company_profile = 0
@@ -50,7 +52,7 @@ class Command(BaseCommand):
                 ))
                 continue
 
-            if not driver.company or not driver.company.contract_template_text:
+            if not company.contract_template_text:
                 skipped_no_template += 1
                 self.stdout.write(self.style.WARNING(
                     f"driver {driver.id} ({driver.full_name}): company has no contract_template_text, skipping"
@@ -91,7 +93,7 @@ class Command(BaseCommand):
                         ] if part
                     )
                     today = timezone.now()
-                    contract_bytes = generate_contract(driver.company, {
+                    contract_bytes = generate_contract(company, {
                         'effective_day': today.strftime('%d'),
                         'effective_month': today.strftime('%B'),
                         'effective_year': today.strftime('%y'),

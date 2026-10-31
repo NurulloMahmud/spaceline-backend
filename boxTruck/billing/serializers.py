@@ -59,7 +59,6 @@ class LoadHistoryViewSerializer(serializers.ModelSerializer):
         if obj.load:
             return {
                 "id": obj.load.id,
-                "company": obj.load.company.name,
             }
         return None
 
@@ -91,7 +90,6 @@ class LoadStopViewSerializer(serializers.ModelSerializer):
         if obj.load:
             return {
                 "id": obj.load.id,
-                "company": obj.load.company.name,
                 "load_number": obj.load.load_number
             }
         return None
@@ -117,7 +115,6 @@ class BatchLoadViewSerializer(serializers.ModelSerializer):
             return {
                 "id": obj.load.id,
                 "load_number": obj.load.load_number,
-                "company": obj.load.company.name,
                 "shipment": f"SH - {obj.load.shipment}" if obj.load.shipment else None,
                 "carrier_pay": obj.load.carrier_pay,
                 "driver_pay": obj.load.driver_pay,
@@ -222,7 +219,6 @@ class LoadFilesViewSerializer(serializers.ModelSerializer):
         if obj.load:
             return {
                 "id": obj.load.id,
-                "company": obj.load.company.name
             }
         return None
     
@@ -270,8 +266,6 @@ class LoadsWriteSerializer(serializers.ModelSerializer):
         split_drop_date = attrs.get('split_drop_date')
         driver_payment = attrs.get('driver_payment')
         request = self.context.get('request')
-        user = request.user if request else None
-        user_dept = getattr(getattr(user, 'department', None), 'name', '').lower()
 
         if request and request.method != 'POST':
             return attrs
@@ -305,11 +299,6 @@ class LoadsWriteSerializer(serializers.ModelSerializer):
             if load_number and Load.objects.filter(load_number=load_number).exists():
                 raise serializers.ValidationError({
                     "load_number": f"Load with load_number '{load_number}' already exists."
-                })
-
-            if user_dept in ['management', 'billing', 'payroll'] and not attrs.get('company'):
-                raise serializers.ValidationError({
-                    "company": "Company is required for users in management, billing, or payroll."
                 })
         return attrs
 
@@ -345,7 +334,6 @@ class LoadsWriteSerializer(serializers.ModelSerializer):
 
     def _create_split_load(self, validated_data, main_load, split_pickup_date, split_drop_date, driver_payment):
         validated_data.update({
-            'company': main_load.company,
             'broker': main_load.broker,
             'booked_by': main_load.booked_by,
             'loaded_miles': main_load.loaded_miles,
@@ -528,7 +516,6 @@ class LoadTagWriteSerializer(serializers.ModelSerializer):
 
 
 class LoadsViewSerializer(serializers.ModelSerializer):
-    company = serializers.SerializerMethodField(method_name='get_company')
     booked_by = serializers.SerializerMethodField(method_name='get_booked_by')
     created_by = serializers.SerializerMethodField(method_name='get_created_by')
     updated_by = serializers.SerializerMethodField(method_name='get_updated_by')
@@ -543,7 +530,7 @@ class LoadsViewSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Load
-        fields = ['id', 'company', 'driver', 'booked_by', 'created_by', 'broker', 'shipment', 'load_number',
+        fields = ['id', 'driver', 'booked_by', 'created_by', 'broker', 'shipment', 'load_number',
                   'driver_pay', 'carrier_pay', 'pickup_date', 'drop_date', 'status', 'created_at', 'payment_type',
                   'last_updated', 'load_files', 'load_stops', 'note', 'loaded_miles', 'empty_miles', 'main_load',
                   'delivered_at', 'updated_by', 'tags', 'dispatcher_note', 'profit'
@@ -574,14 +561,6 @@ class LoadsViewSerializer(serializers.ModelSerializer):
                 "username": obj.updated_by.username,
                 "first_name": obj.updated_by.first_name,
                 "last_name": obj.updated_by.last_name
-            }
-        return None
-
-    def get_company(self, obj):
-        if obj.company:
-            return {
-                "id": obj.company.id,
-                "name": obj.company.name
             }
         return None
 
@@ -621,7 +600,6 @@ class LoadsViewSerializer(serializers.ModelSerializer):
                 "id": obj.driver.id,
                 "full_name": obj.driver.full_name,
                 "unit_numer": obj.driver.unit_number if obj.driver.unit_number else None,
-                "company": obj.driver.company.name if obj.driver.company.name else None
             }
         return None
 
@@ -663,13 +641,12 @@ class BrokerBlacklistSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        company = validated_data['company']
         mc = validated_data['mc']
         if mc:
-            existing = BrokerBlacklist.objects.filter(company=company, mc=mc).first()
+            existing = BrokerBlacklist.objects.filter(mc=mc).first()
         else:
             existing = BrokerBlacklist.objects.filter(
-                company=company, mc='', name__iexact=validated_data['name']
+                mc='', name__iexact=validated_data['name']
             ).first()
 
         self.existed = existing is not None

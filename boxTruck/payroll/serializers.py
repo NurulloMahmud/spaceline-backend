@@ -3,6 +3,7 @@ from django.db.models import Sum
 from decimal import Decimal
 from django.utils.timezone import now
 from hiring.models import Driver
+from users.models import Company
 from .models import Deduction, DeductionHistory, DeductionType, StatementDeduction, StatementStatus, Statement, StatementLoad
 
 
@@ -43,7 +44,6 @@ class StatementLoadUseSerializer(serializers.ModelSerializer):
         if obj.load:
             return {
                 "id": obj.load.id,
-                "company": obj.load.company.name,
                 "load_number": obj.load.load_number,
                 "shipment": f"SH - {obj.load.shipment}" if obj.load.shipment else None,
                 "driver_pay": obj.load.driver_pay,
@@ -78,7 +78,6 @@ class StatementLoadViewSerializer(serializers.ModelSerializer):
         if obj.load:
             return {
                 "id": obj.load.id,
-                "company": obj.load.company.name,
                 "load_number": obj.load.load_number,
                 "shipment": f"SH - {obj.load.shipment}" if obj.load.shipment else None,
                 "pickup_date": obj.load.pickup_date,
@@ -100,7 +99,6 @@ class StatementViewSerializer(serializers.ModelSerializer):
     status = StatementStatusSerializer()
     created_by = serializers.SerializerMethodField()
     driver = serializers.SerializerMethodField()
-    company = serializers.SerializerMethodField()
     loads = StatementLoadUseSerializer(source="statementload_set", many=True, read_only=True)
     deductions = StatementDeductionUseSerializer(source="statementdeduction_set", many=True, read_only=True)
     total_amount = serializers.SerializerMethodField()
@@ -126,12 +124,6 @@ class StatementViewSerializer(serializers.ModelSerializer):
             return {'id': d.id, 'name': d.full_name}
         return None
 
-    def get_company(self, obj):
-        c = getattr(obj, 'company', None)
-        if c:
-            return {'id': c.id, 'name': c.name}
-        return None
-    
     def get_total_amount(self, obj):
         total_deductions = Decimal("0.00")
         for sd in obj.statementdeduction_set.all():
@@ -151,21 +143,12 @@ class StatementWriteSerializer(serializers.ModelSerializer):
 
 
 class DriverDropdownSerializer(serializers.ModelSerializer):
-    company = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
 
     class Meta:
         model = Driver
-        fields = ['id', 'company', 'full_name', 'status']
+        fields = ['id', 'full_name', 'status']
 
-    def get_company(self, obj):
-        if obj.company:
-            return {
-                'id': obj.company.id,
-                'name': obj.company.name
-            }
-        return None
-    
     def get_status(self, obj):
         if obj.status:
             return {
@@ -256,18 +239,16 @@ class StatementViewForPDFSerializer(serializers.ModelSerializer):
             return {
                 'id': obj.driver.id,
                 'name': obj.driver.full_name,
-                'company': obj.driver.company.name,
             }
         return None
 
     def get_company(self, obj):
-        if obj.company:
-            return {
-                'id': obj.company.id,
-                'name': obj.company.name,
-                'address': obj.company.address if obj.company.address else "123 Road Street Address"
-            }
-        return None
+        company = Company.current()
+        return {
+            'id': company.id,
+            'name': company.name,
+            'address': company.address if company.address else "123 Road Street Address"
+        }
     
     def get_total_amount(self, obj):
         total_deductions = Decimal("0.00")

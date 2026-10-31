@@ -21,17 +21,17 @@ D = Decimal
 class QuickPayFeeLeavesDispatcherPayAlone(TestCase):
     def setUp(self):
         self.company = Company.objects.create(name='Space Line LLC', shipment_number='10001')
-        self.boss = CustomUser.objects.create_user(username='boss', password='x', company=self.company, department=Department.objects.create(name='Management'))
-        self.acct = CustomUser.objects.create_user(username='elena', password='x', company=self.company, department=Department.objects.create(name='Billing'))
-        self.disp = CustomUser.objects.create_user(username='dana', password='x', company=self.company, department=Department.objects.create(name='Dispatch'))
-        driver = Driver.objects.create(full_name='Kwame Osei', unit_number='19', status=DriverStatus.objects.create(name='Active'), company=self.company)
-        self.load = Load.objects.create(company=self.company, driver=driver, broker=Broker.objects.create(name='Northline Logistics', mc='784512'), load_number='100001',
+        self.boss = CustomUser.objects.create_user(username='boss', password='x', department=Department.objects.create(name='Management'))
+        self.acct = CustomUser.objects.create_user(username='elena', password='x', department=Department.objects.create(name='Billing'))
+        self.disp = CustomUser.objects.create_user(username='dana', password='x', department=Department.objects.create(name='Dispatch'))
+        driver = Driver.objects.create(full_name='Kwame Osei', unit_number='19', status=DriverStatus.objects.create(name='Active'))
+        self.load = Load.objects.create(driver=driver, broker=Broker.objects.create(name='Northline Logistics', mc='784512'), load_number='100001',
                                         driver_pay=D('874'), carrier_pay=D('1300'), payment_type='Regular Pay', status=LoadStatus.objects.create(name='Dispatched'),
                                         pickup_date=timezone.now() - timezone.timedelta(minutes=1), booked_by=self.disp, created_by=self.disp)
         # The fee would lift the $426.00 profit over both of these lines.
-        DispatchSalary.objects.create(company=self.company, min_amount=D('0'), max_amount=D('449.99'), percentage=D('10'))
-        DispatchSalary.objects.create(company=self.company, min_amount=D('450'), percentage=D('20'))
-        DispatchBonus.objects.create(company=self.company, min_daily_profit=D('450'), bonus_amount=D('50'))
+        DispatchSalary.objects.create(min_amount=D('0'), max_amount=D('449.99'), percentage=D('10'))
+        DispatchSalary.objects.create(min_amount=D('450'), percentage=D('20'))
+        DispatchBonus.objects.create(min_daily_profit=D('450'), bonus_amount=D('50'))
 
     def api(self, user):
         c = APIClient()

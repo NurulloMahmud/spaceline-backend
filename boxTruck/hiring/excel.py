@@ -5,7 +5,6 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser
 from .models import Driver, DriverStatus
-from users.models import Company
 
 STATUS_MAP = {
     "Active":      "Active",
@@ -40,24 +39,10 @@ class ImportDriversView(APIView):
 
     def post(self, request):
         file = request.FILES.get("file")
-        company_id = request.data.get("company_id")
         if not file:
             return Response(
                 {"error": "No file provided. Send the xlsx as 'file'."},
                 status=status.HTTP_400_BAD_REQUEST,
-            )
-        if not company_id:
-            return Response(
-                {"error": "No company_id provided."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            company = Company.objects.get(pk=company_id)
-        except Company.DoesNotExist:
-            return Response(
-                {"error": f"Company with id={company_id} does not exist."},
-                status=status.HTTP_404_NOT_FOUND,
             )
 
         try:
@@ -109,7 +94,6 @@ class ImportDriversView(APIView):
 
             drivers_to_create.append(
                 Driver(
-                    company=company,
                     full_name=full_name,
                     status=driver_status,
                     dob=_parse_date(row.get("DOB")),

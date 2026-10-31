@@ -42,12 +42,12 @@ class DriverInviteFlowTests(TestCase):
             contract_template_text='Agreement between {{contractor_name}} and us.',
         )
         self.staff = CustomUser.objects.create_user(
-            username='recruiter', password='x', company=self.company,
+            username='recruiter', password='x',
             first_name='Rec', last_name='Ruiter',
         )
         DriverStatus.objects.create(name='pending')
         self.invite = DriverInviteLink.objects.create(
-            created_by=self.staff, company=self.company,
+            created_by=self.staff,
             expires_at=timezone.now() + timezone.timedelta(days=7),
         )
         self.submit_url = reverse('driver-invite-submit')
@@ -148,7 +148,7 @@ class DriverInviteFlowTests(TestCase):
         """The token decides whose files these are, never the request body."""
         self._register()
         someone_else = Driver.objects.create(
-            company=self.company, full_name='Other Driver',
+            full_name='Other Driver',
             status=DriverStatus.objects.get(name='pending'),
         )
 
@@ -179,7 +179,6 @@ class DriverInviteFlowTests(TestCase):
         driver_id = self._register().data['driver_id']
 
         driver = Driver.objects.get(id=driver_id)
-        self.assertEqual(driver.company, self.company)
         self.assertEqual(driver.referral_by, self.staff)
         self.assertEqual(driver.status.name, 'pending')
         self.assertEqual(driver.driver_company.name, 'Bob Hauling LLC')
@@ -211,11 +210,11 @@ class RegistrationUploadTests(TestCase):
             contract_template_text='Agreement between {{contractor_name}} and us.',
         )
         self.staff = CustomUser.objects.create_user(
-            username='recruiter2', password='x', company=self.company,
+            username='recruiter2', password='x',
         )
         DriverStatus.objects.create(name='pending')
         self.invite = DriverInviteLink.objects.create(
-            created_by=self.staff, company=self.company,
+            created_by=self.staff,
             expires_at=timezone.now() + timezone.timedelta(days=7),
         )
         self.submit_url = reverse('driver-invite-submit')
@@ -360,15 +359,15 @@ class DriverSignLinkTests(TestCase):
             name='Space Line LLC', contract_template_text='Agreement.',
         )
         self.staff = CustomUser.objects.create_user(
-            username='recruiter2', password='x', company=self.company,
+            username='recruiter2', password='x',
             first_name='Rec', last_name='Ruiter',
         )
         self.driver = Driver.objects.create(
-            company=self.company, full_name='Existing Driver',
+            full_name='Existing Driver',
             status=DriverStatus.objects.create(name='pending'),
         )
         self.invite = DriverInviteLink.objects.create(
-            created_by=self.staff, company=self.company, driver=self.driver,
+            created_by=self.staff, driver=self.driver,
             expires_at=timezone.now() + timezone.timedelta(days=7),
         )
 
@@ -490,7 +489,7 @@ class DocumentParseEndpointTests(TestCase):
     def setUp(self):
         self.company = Company.objects.create(name='Space Line LLC')
         self.staff = CustomUser.objects.create_user(
-            username='recruiter', password='x', company=self.company,
+            username='recruiter', password='x',
         )
         # JWT is the only configured authentication class, so a session
         # login is not enough to reach the view.
@@ -714,7 +713,7 @@ class LargeUploadTests(TestCase):
             contract_template_text='Agreement with {contractor_name}.',
         )
         self.staff = CustomUser.objects.create_user(
-            username='recruiter', password='x', company=self.company,
+            username='recruiter', password='x',
         )
         DriverStatus.objects.create(name='pending')
         self.client = APIClient()
@@ -761,7 +760,7 @@ class LargeUploadTests(TestCase):
 
     def test_invite_endpoint_accepts_a_file_too_big_to_hold_in_memory(self):
         invite = DriverInviteLink.objects.create(
-            created_by=self.staff, company=self.company,
+            created_by=self.staff,
             expires_at=timezone.now() + timezone.timedelta(days=7),
         )
         url = f"{reverse('driver-create-invite')}?token={invite.token}"
@@ -797,7 +796,7 @@ class DriverCompanySharingTests(TestCase):
             contract_template_text='Agreement with {contractor_name}.',
         )
         self.staff = CustomUser.objects.create_user(
-            username='recruiter', password='x', company=self.company,
+            username='recruiter', password='x',
             department=Department.objects.create(name='hiring'),
         )
         DriverStatus.objects.create(name='pending')
@@ -857,7 +856,7 @@ class DriverCompanySharingTests(TestCase):
 
     def test_invite_endpoint_ignores_a_submitted_driver_company_id(self):
         invite = DriverInviteLink.objects.create(
-            created_by=self.staff, company=self.company,
+            created_by=self.staff,
             expires_at=timezone.now() + timezone.timedelta(days=7),
         )
         url = f"{reverse('driver-create-invite')}?token={invite.token}"
@@ -931,15 +930,14 @@ class TrackingEndpointTests(TestCase):
 
     def setUp(self):
         self.company = Company.objects.create(name='Space Line LLC')
-        self.other = Company.objects.create(name='Other LLC')
         management = Department.objects.create(name='Management')
         dispatch = Department.objects.create(name='Dispatch')
         self.manager = CustomUser.objects.create_user(
-            username='boss', password='x', company=self.company, department=management,
+            username='boss', password='x', department=management,
             first_name='Big', last_name='Boss',
         )
         self.dispatcher = CustomUser.objects.create_user(
-            username='disp', password='x', company=self.company, department=dispatch,
+            username='disp', password='x', department=dispatch,
             first_name='Dana', last_name='Ortiz',
         )
         self.active = DriverStatus.objects.create(name='Active')
@@ -947,18 +945,18 @@ class TrackingEndpointTests(TestCase):
         now = timezone.now()
         self.today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        def driver(name, unit, status, company, located_at, dispatcher=None):
+        def driver(name, unit, status, located_at, dispatcher=None):
             return Driver.objects.create(
-                full_name=name, unit_number=unit, status=status, company=company,
+                full_name=name, unit_number=unit, status=status,
                 current_location_updated_at=located_at, dispatcher=dispatcher,
                 current_zip='43215' if located_at else None,
             )
 
-        self.fresh = driver('Jin Park', '101', self.active, self.company, now, self.dispatcher)
-        self.stale = driver('Kwame Osei', '102', self.active, self.company, now - timezone.timedelta(days=2))
-        self.never = driver('Owen Hughes', '103', self.active, self.company, None, self.dispatcher)
-        self.pend = driver('Sam Turner', '104', self.pending, self.company, None)
-        self.elsewhere = driver('Grant Wells', '105', self.active, self.other, None)
+        self.fresh = driver('Jin Park', '101', self.active, now, self.dispatcher)
+        self.stale = driver('Kwame Osei', '102', self.active, now - timezone.timedelta(days=2))
+        self.never = driver('Owen Hughes', '103', self.active, None, self.dispatcher)
+        self.pend = driver('Sam Turner', '104', self.pending, None)
+        self.elsewhere = driver('Grant Wells', '105', self.active, None)
         Vehicle.objects.create(driver=self.stale, make='Ford', model='Transit', vehicle_type='cargo van', length=144, width=68, height=72, payload=3200, gvw=9900)
         for i in range(3):
             DriverFile.objects.create(driver=self.stale, name=f'Doc {i}')
@@ -970,26 +968,24 @@ class TrackingEndpointTests(TestCase):
         client.force_authenticate(user)
         return client
 
-    def test_dispatcher_sees_own_company_in_a_fixed_number_of_queries(self):
+    def test_dispatcher_sees_every_driver_in_a_fixed_number_of_queries(self):
         client = self._client(self.dispatcher)
         with self.assertNumQueries(3):
-            # count, the page with status/company/dispatcher joined, the vehicles prefetched
+            # count, the page with status/dispatcher joined, the vehicles prefetched
             response = client.get(self.list_url)
         self.assertEqual(response.status_code, 200)
         names = [row['full_name'] for row in response.data['results']]
-        self.assertEqual(names, ['Jin Park', 'Kwame Osei', 'Owen Hughes', 'Sam Turner'])
-        self.assertEqual(response.data['count'], 4)
+        self.assertEqual(names, ['Grant Wells', 'Jin Park', 'Kwame Osei', 'Owen Hughes', 'Sam Turner'])
+        self.assertEqual(response.data['count'], 5)
         row = next(r for r in response.data['results'] if r['id'] == self.stale.id)
         self.assertEqual(row['vehicle']['vehicle_type'], 'cargo van')
         self.assertEqual(row['status'], {'id': self.active.id, 'name': 'Active'})
-        self.assertEqual(row['company'], {'id': self.company.id, 'name': 'Space Line LLC'})
         self.assertNotIn('documents', row)
         self.assertNotIn('ssn', row)
 
-    def test_management_sees_every_company_and_filters_by_it(self):
+    def test_management_filters_the_list(self):
         client = self._client(self.manager)
         self.assertEqual(client.get(self.list_url).data['count'], 5)
-        self.assertEqual(client.get(self.list_url, {'company': self.other.id}).data['count'], 1)
         self.assertEqual(client.get(self.list_url, {'dispatcher': self.dispatcher.id}).data['count'], 2)
         self.assertEqual(client.get(self.list_url, {'search': '10 3'}).data['count'], 0)
         self.assertEqual(client.get(self.list_url, {'search': '103'}).data['results'][0]['full_name'], 'Owen Hughes')
@@ -1002,7 +998,7 @@ class TrackingEndpointTests(TestCase):
             'located_before': self.today_start.isoformat(),
             'ordering': 'current_location_updated_at',
         })
-        self.assertEqual([r['full_name'] for r in response.data['results']], ['Owen Hughes', 'Kwame Osei'])
+        self.assertEqual([r['full_name'] for r in response.data['results']], ['Owen Hughes', 'Grant Wells', 'Kwame Osei'])
         self.assertEqual(client.get(self.list_url, {'located_before': 'yesterday'}).status_code, 400)
 
     def test_page_size_is_capped(self):
@@ -1019,9 +1015,9 @@ class TrackingEndpointTests(TestCase):
                 'located_before': self.today_start.isoformat(),
             })
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['by_status'], {str(self.active.id): 3, str(self.pending.id): 1})
-        self.assertEqual(response.data['total'], 4)
-        self.assertEqual(response.data['needs_update'], 2)
+        self.assertEqual(response.data['by_status'], {str(self.active.id): 4, str(self.pending.id): 1})
+        self.assertEqual(response.data['total'], 5)
+        self.assertEqual(response.data['needs_update'], 3)
         filtered = client.get(self.summary_url, {'dispatcher': self.dispatcher.id, 'needs_status': self.active.id, 'located_before': self.today_start.isoformat()})
         self.assertEqual(filtered.data['by_status'], {str(self.active.id): 2})
         self.assertEqual(filtered.data['needs_update'], 1)
@@ -1035,19 +1031,18 @@ class OnboardingDriverOpenTests(TestCase):
 
     def setUp(self):
         self.company = Company.objects.create(name='Space Line LLC')
-        self.other_company = Company.objects.create(name='Other LLC')
         self.status = DriverStatus.objects.create(name='pending')
         self.client = APIClient()
 
     def _user(self, username, department):
         return CustomUser.objects.create_user(
-            username=username, password='x', company=self.company,
+            username=username, password='x',
             department=Department.objects.create(name=department),
         )
 
-    def _driver(self, company, **kwargs):
+    def _driver(self, **kwargs):
         return Driver.objects.create(
-            company=company, status=self.status, full_name='Test Driver', **kwargs,
+            status=self.status, full_name='Test Driver', **kwargs,
         )
 
     def _modal(self, driver):
@@ -1055,7 +1050,7 @@ class OnboardingDriverOpenTests(TestCase):
 
     def test_modal_opens_a_driver_without_a_company(self):
         self.client.force_authenticate(self._user('recruiter', 'hiring'))
-        driver = self._driver(self.other_company)
+        driver = self._driver()
 
         response = self._modal(driver)
 
@@ -1067,21 +1062,14 @@ class OnboardingDriverOpenTests(TestCase):
     def test_modal_opens_own_company_driver_without_a_company(self):
         self.client.force_authenticate(self._user('dispatcher', 'dispatch'))
 
-        response = self._modal(self._driver(self.company))
+        response = self._modal(self._driver())
 
         self.assertEqual(response.status_code, 200, response.data)
-
-    def test_modal_hides_another_companys_driver_without_a_company(self):
-        self.client.force_authenticate(self._user('dispatcher', 'dispatch'))
-
-        response = self._modal(self._driver(self.other_company))
-
-        self.assertEqual(response.status_code, 404)
 
     def test_modal_still_returns_the_company_when_there_is_one(self):
         self.client.force_authenticate(self._user('recruiter', 'hiring'))
         driver_company = DriverCompany.objects.create(name='Bob Hauling LLC')
-        driver = self._driver(self.other_company, driver_company=driver_company)
+        driver = self._driver(driver_company=driver_company)
 
         response = self._modal(driver)
 
@@ -1089,18 +1077,11 @@ class OnboardingDriverOpenTests(TestCase):
         self.assertEqual(response.data['id'], driver_company.id)
         self.assertEqual([d['id'] for d in response.data['drivers']], [driver.id])
 
-    def test_hiring_can_read_a_driver_of_another_company(self):
+    def test_hiring_can_read_a_driver(self):
         self.client.force_authenticate(self._user('recruiter', 'hiring'))
-        driver = self._driver(self.other_company)
+        driver = self._driver()
 
         response = self.client.get(reverse('drivers-detail', args=[driver.id]))
 
         self.assertEqual(response.status_code, 200, response.data)
 
-    def test_other_departments_cannot_read_a_driver_of_another_company(self):
-        self.client.force_authenticate(self._user('dispatcher', 'dispatch'))
-        driver = self._driver(self.other_company)
-
-        response = self.client.get(reverse('drivers-detail', args=[driver.id]))
-
-        self.assertEqual(response.status_code, 404)

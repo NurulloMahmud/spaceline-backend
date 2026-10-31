@@ -12,8 +12,8 @@ class AIMessageInline(admin.TabularInline):
 
 @admin.register(AIConversation)
 class AIConversationAdmin(admin.ModelAdmin):
-    list_display = ('id', 'user', 'company', 'title', 'created_at', 'last_updated')
-    list_filter = ('company', 'created_at')
+    list_display = ('id', 'user', 'title', 'created_at', 'last_updated')
+    list_filter = ('created_at',)
     search_fields = ('user__username', 'title')
     readonly_fields = ('created_at', 'last_updated')
     inlines = [AIMessageInline]

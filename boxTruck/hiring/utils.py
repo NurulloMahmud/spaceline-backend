@@ -1,6 +1,5 @@
 DRIVER_FK_DISPLAY = {
     'status': lambda obj: obj.status.name if obj.status else None,
-    'company': lambda obj: obj.company.name if obj.company else None,
     'manager': lambda obj: obj.manager.username if obj.manager else None,
     'referral_by': lambda obj: obj.referral_by.username if obj.referral_by else None,
     'driver_company': lambda obj: obj.driver_company.name if obj.driver_company else None,

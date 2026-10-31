@@ -46,7 +46,6 @@ class LoadStatus(models.Model):
 
 
 class Load(models.Model):
-    company = models.ForeignKey(Company, on_delete=models.SET_NULL, null=True, blank=True)
     driver = models.ForeignKey(Driver, on_delete=models.SET_NULL, null=True, blank=True)
     booked_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='booked_by')
     created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True)
@@ -73,11 +72,11 @@ class Load(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.pk:
-            last_load = Load.objects.filter(company=self.company).order_by('-shipment').first()
+            last_load = Load.objects.order_by('-shipment').first()
             if last_load and last_load.shipment is not None:
                 self.shipment = last_load.shipment + 1
             else:
-                self.shipment = int(self.company.shipment_number)
+                self.shipment = int(Company.current().shipment_number)
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -245,9 +244,6 @@ def normalize_mc(value):
 
 
 class BrokerBlacklist(models.Model):
-    company = models.ForeignKey(
-        Company, on_delete=models.CASCADE, related_name='broker_blacklist'
-    )
     name = models.CharField(max_length=200)
     mc = models.CharField(max_length=20, blank=True)
     reason = models.TextField(null=True, blank=True)
@@ -269,20 +265,18 @@ class BrokerBlacklist(models.Model):
         verbose_name = 'Broker Blacklist Entry'
         verbose_name_plural = 'Broker Blacklist'
         indexes = [
-            models.Index(fields=['company', 'mc'], name='broker_blacklist_co_mc_idx'),
-            models.Index(fields=['company'], name='broker_blacklist_co_idx'),
+            models.Index(fields=['mc'], name='broker_blacklist_mc_idx'),
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=['company', 'mc'],
+                fields=['mc'],
                 condition=~Q(mc=''),
-                name='broker_blacklist_unique_company_mc',
+                name='broker_blacklist_unique_mc',
             ),
             models.UniqueConstraint(
-                'company',
                 Lower('name'),
                 condition=Q(mc=''),
-                name='broker_blacklist_unique_company_name',
+                name='broker_blacklist_unique_name',
             ),
             models.CheckConstraint(
                 condition=~(Q(mc='') & Q(name='')),

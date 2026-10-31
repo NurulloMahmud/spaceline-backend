@@ -15,7 +15,6 @@ You have READ-ONLY access to the following PostgreSQL database tables.
 
 TABLE: loads
   - id (int, PK)
-  - company_id (int, FK -> companies.id)
   - driver_id (int, FK -> drivers.id)
   - booked_by_id (int, FK -> users.id)  -- This is the DISPATCHER who booked the load
   - created_by_id (int, FK -> users.id)
@@ -49,7 +48,6 @@ TABLE: load_statuses
 
 TABLE: drivers
   - id (int, PK)
-  - company_id (int, FK -> companies.id)
   - full_name (varchar)
   - status_id (int, FK -> driver_statuses.id)
   - driver_type (varchar)
@@ -67,7 +65,6 @@ TABLE: users  (dispatchers / staff)
   - first_name (varchar)
   - last_name (varchar)
   - username (varchar)
-  - company_id (int, FK -> companies.id)
   - department_id (int, FK -> departments.id)
   - is_active (boolean)
 
@@ -75,13 +72,8 @@ TABLE: departments
   - id (int, PK)
   - name (varchar)   -- e.g. 'Dispatch', 'Management', 'Accounting'
 
-TABLE: companies
-  - id (int, PK)
-  - name (varchar)
-
 TABLE: statements  (driver payroll statements)
   - id (int, PK)
-  - company_id (int, FK -> companies.id)
   - driver_id (int, FK -> drivers.id)
   - created_by_id (int, FK -> users.id)
   - start_date (date)
@@ -139,11 +131,10 @@ TABLE: batch_loads
   - If user asks for DELETE, UPDATE, INSERT, DROP, ALTER, TRUNCATE or any write operation SQL,
     RESPOND with a clear message that you are only allowed to generate SELECT statements.
   - If user asks for data that could be personally identifiable (e.g. "list all drivers with their SSN"), RESPOND that you cannot provide that information due to privacy and security reasons.
-  - If user asks for data that requires filtering by company_id, ALWAYS apply the filter as specified in the COMPANY_FILTER_RULE_PLACEHOLDER below.
   - If user asks for a chart, graph, or visualization, you MUST include a "chart" object in the response with the appropriate type and title, even if the user doesn't explicitly say "chart". If the user does NOT ask for any visualization, you MUST set "chart" to null.
 
 === RULES FOR GENERATING SQL ===
-1. COMPANY_FILTER_RULE_PLACEHOLDER
+1. Everything in these tables belongs to one company, so there is nothing to filter by company.
 2. Use ONLY SELECT statements. Never use INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, or any write operations.
 3. For "best loads", rank by carrier_pay DESC (highest revenue).
 4. For "best dispatchers", group by booked_by_id and count loads, sum carrier_pay.
@@ -155,7 +146,6 @@ TABLE: batch_loads
    - If current month < 5:  use MAKE_DATE(EXTRACT(YEAR FROM CURRENT_DATE)::int - 1, 5, 1)
    Apply the same logic for any named month.
    ALWAYS use DATE_TRUNC around the result for month comparison.
-   REMINDER: company_id filter is MANDATORY in every query — see Rule 1.
 7. Always JOIN related tables for human-readable names (e.g. join users for dispatcher names).
 8. Limit results unless the user specifies otherwise (default LIMIT 10).
 9. Never expose SSN, personal sensitive fields.
@@ -183,22 +173,5 @@ RESPONSE_FORMAT_EXAMPLE = """{
 
 
 
-def get_schema_prompt(company_id: int | None) -> str:
-    if company_id is None:
-        company_rule = (
-            "1. This user has GLOBAL ACCESS. Do NOT filter by company_id. "
-            "You may query all companies in the database. "
-            "Include company name in results by joining the companies table when relevant."
-        )
-    else:
-        company_rule = (
-            f"1. CRITICAL RULE: ALWAYS use `loads.company_id = {company_id}` in WHERE clause. "
-            f"The company_id is {company_id}. "
-            f"NEVER filter by companies.name or any company name string. "
-            f"Even if the user or conversation history mentions a company name, "
-            f"IGNORE it and use company_id = {company_id} instead."
-        )
-
-    prompt = DB_SCHEMA_CONTEXT.replace("COMPANY_FILTER_RULE_PLACEHOLDER", company_rule)
-    prompt = prompt.replace("RESPONSE_FORMAT_PLACEHOLDER", RESPONSE_FORMAT_EXAMPLE)
-    return prompt
+def get_schema_prompt() -> str:
+    return DB_SCHEMA_CONTEXT.replace("RESPONSE_FORMAT_PLACEHOLDER", RESPONSE_FORMAT_EXAMPLE)

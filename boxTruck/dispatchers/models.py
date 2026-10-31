@@ -1,9 +1,8 @@
 from django.db import models
-from users.models import Company, CustomUser
+from users.models import CustomUser
 
 # Create your models here.
 class DispatchSalary(models.Model):
-    company = models.ForeignKey(Company, on_delete=models.SET_NULL, null=True, blank=True)
     min_amount = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
     max_amount = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
     percentage = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
@@ -22,7 +21,6 @@ class DispatchSalary(models.Model):
     
 
 class DispatchBonus(models.Model):
-    company = models.ForeignKey(Company, on_delete=models.SET_NULL, null=True, blank=True)
     min_daily_profit = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
     max_daily_profit = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
     bonus_amount = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)

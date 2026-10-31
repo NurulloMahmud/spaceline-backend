@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 from config import settings
 from hiring.models import Driver
-from users.models import Company, CustomUser
+from users.models import CustomUser
 from rest_framework.filters import OrderingFilter, SearchFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.permissions import IsAuthenticated
@@ -127,7 +127,7 @@ class StatementViewSet(viewsets.ModelViewSet):
     queryset = Statement.objects.all()
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['company', 'driver', 'status', 'final', 'created_by']
+    filterset_fields = ['driver', 'status', 'final', 'created_by']
     search_fields = ['driver__full_name']
 
     def get_serializer_class(self):
@@ -147,8 +147,6 @@ class StatementViewSet(viewsets.ModelViewSet):
         queryset = Statement.objects.select_related(
             'status',
             'driver',
-            'driver__company',
-            'company',
             'created_by',
         ).prefetch_related(
             'statementload_set',
@@ -160,7 +158,7 @@ class StatementViewSet(viewsets.ModelViewSet):
                 return Statement.objects.none()
             queryset = Statement.objects.filter(start_date__gte=start_date, end_date__lte=end_date)
             if user.department.name.lower() not in ['management', 'billing', 'payroll', 'accounting', 'audit']:
-                queryset = queryset.filter(company=user.company).exclude(status__name='In Process')
+                queryset = queryset.exclude(status__name='In Process')
         return queryset.order_by('driver__full_name')
 
     def create(self, request, *args, **kwargs):
@@ -182,7 +180,6 @@ class StatementViewSet(viewsets.ModelViewSet):
             request_data = self.request.data
             start_date = request_data.get("start_date")
             end_date = request_data.get("end_date")
-            company_id = request_data.get("company")
             payment_type = request_data.get("payment_type")
             provided_driver_ids = request_data.get("driver_ids", [])
             if not provided_driver_ids:
@@ -275,7 +272,6 @@ class StatementViewSet(viewsets.ModelViewSet):
                 statement_data = {
                     "start_date": start_date_obj,
                     "end_date": end_date_obj,
-                    "company": company_id,
                     "driver": driver_status.id,
                     "created_by": self.request.user.id,
                     "gross_amount": gross_amount,
@@ -364,19 +360,7 @@ class ActiveDriversList(generics.ListAPIView):
     search_fields = ['full_name']
 
     def get_queryset(self):
-        active_drivers = Driver.objects.exclude(status__name='Inactive')
-        company_id = self.request.query_params.get('company_id')
-        user = self.request.user
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll', 'accounting', 'audit']:
-            if company_id:
-                return active_drivers.filter(company=company_id).order_by('full_name')
-            return active_drivers.all().order_by('full_name')
-        elif self.request.user.department.name.lower() in ['dispatch manager', 'team lead', 'dispatch', 'updater']:
-            if company_id:
-                return active_drivers.filter(company=company_id).order_by('full_name')
-            return active_drivers.filter(company=user.company).order_by('full_name')
-        else:
-            return active_drivers.filter(company=user.company).order_by('full_name')
+        return Driver.objects.exclude(status__name='Inactive').order_by('full_name')
 
 
 class InactiveDriversList(generics.ListAPIView):
@@ -384,19 +368,7 @@ class InactiveDriversList(generics.ListAPIView):
     search_fields = ['full_name']
 
     def get_queryset(self):
-        active_drivers = Driver.objects.filter(status__name='Inactive')
-        company_id = self.request.query_params.get('company_id')
-        user = self.request.user
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll', 'accounting', 'audit']:
-            if company_id:
-                return active_drivers.filter(company=company_id).order_by('full_name')
-            return active_drivers.all().order_by('full_name')
-        elif self.request.user.department.name.lower() in ['dispatch manager', 'team lead', 'dispatch', 'updater']:
-            if company_id:
-                return active_drivers.filter(company=company_id).order_by('full_name')
-            return active_drivers.filter(company=user.company).order_by('full_name')
-        else:
-            return active_drivers.filter(company=user.company).order_by('full_name')
+        return Driver.objects.filter(status__name='Inactive').order_by('full_name')
 
 
 class DeductionTypeViewSet(viewsets.ModelViewSet):
@@ -424,15 +396,11 @@ class DeductionViewSet(viewsets.ModelViewSet):
     queryset = Deduction.objects.all()
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['driver', 'type', 'paid', 'driver__company']
+    filterset_fields = ['driver', 'type', 'paid']
     search_fields = ['note', 'driver__full_name', 'amount']
 
     def get_queryset(self):
-        user = self.request.user
-        if user.department.name.lower() in ['management', 'billing', 'payroll']:
-            return Deduction.objects.filter(is_deleted=False).order_by('-id')
-        company_drivers = Driver.objects.filter(company=user.company)
-        return Deduction.objects.filter(driver__in=company_drivers, is_deleted=False).order_by('-id')
+        return Deduction.objects.filter(is_deleted=False).order_by('-id')
 
     def get_serializer_class(self):
         if self.request.method in ['POST', 'PUT', 'PATCH']:
@@ -740,34 +708,12 @@ class DeductionStatisticsView(generics.ListAPIView):
 
     def list(self, request, *args, **kwargs):
         from django.db.models import Sum
-        user = request.user
-        department_name = getattr(getattr(user, 'department', None), 'name', '').lower()
-        allowed_departments = ['management', 'payroll', 'billing', 'accounting', 'audit']
-        company_id = request.query_params.get('carrier')
-        if department_name in allowed_departments:
-            deductions = Deduction.objects.filter(is_deleted=False)
-        else:
-            deductions = Deduction.objects.filter(driver__company=user.company, is_deleted=False)
-
-        if company_id:
-            deductions = deductions.filter(driver__company=user.company, is_deleted=False)
+        deductions = Deduction.objects.filter(is_deleted=False)
 
         paid_deductions = deductions.filter(paid=True)
         unpaid_deductions = deductions.filter(paid=False)
         total_paid = paid_deductions.aggregate(total=Sum('amount'))['total'] or 0
         total_unpaid = unpaid_deductions.aggregate(total=Sum('amount'))['total'] or 0
-        paid_drivers = (
-            paid_deductions
-            .values('driver__company__name')
-            .annotate(total_paid=Sum('amount'))
-            .order_by('driver__company__name')
-        )
-        unpaid_drivers = (
-            unpaid_deductions
-            .values('driver__company__name')
-            .annotate(total_unpaid=Sum('amount'))
-            .order_by('driver__company__name')
-        )
         paid_types = (
             paid_deductions
             .values('type__name')
@@ -782,19 +728,11 @@ class DeductionStatisticsView(generics.ListAPIView):
         )
         return Response({
             "total_paid_deductions": total_paid,
-            "paid_companies": [
-                {"company": item['driver__company__name'], "total_paid": item['total_paid']}
-                for item in paid_drivers
-            ],
             "paid_types": [
                 {"type": item['type__name'], "total_paid": item['total_paid']}
                 for item in paid_types
             ],
             "total_unpaid_deductions": total_unpaid,
-            "unpaid_companies": [
-                {"company": item['driver__company__name'], "total_unpaid": item['total_unpaid']}
-                for item in unpaid_drivers
-            ],
             "unpaid_types": [
                 {"type": item['type__name'], "total_unpaid": item['total_unpaid']}
                 for item in unpaid_types

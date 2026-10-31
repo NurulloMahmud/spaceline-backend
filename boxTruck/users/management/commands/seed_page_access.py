@@ -6,7 +6,7 @@ from users.models import CustomUser, Department, Page, UserPageAccess
 
 PAGES = [
     ('dashboard', 'Dashboard'),
-    ('companies', 'Companies'),
+    ('companies', 'Company'),
     ('users', 'Users'),
     ('drivers', 'Drivers'),
     ('statuses', 'Statuses'),

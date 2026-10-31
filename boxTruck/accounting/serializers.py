@@ -23,7 +23,6 @@ def load_dict(load):
         'status': {'id': load.status_id, 'name': load.status.name} if load.status_id else None,
         'driver': {'id': load.driver_id, 'full_name': load.driver.full_name, 'unit_number': load.driver.unit_number} if load.driver_id else None,
         'broker': {'id': load.broker_id, 'name': load.broker.name, 'mc': load.broker.mc} if load.broker_id else None,
-        'company': {'id': load.company_id, 'name': load.company.name} if load.company_id else None,
         'payout_id': load.payout.id if hasattr(load, 'payout') else None,
         'invoice_id': load.invoice.id if hasattr(load, 'invoice') else None,
         # The Loads page's files and delivered time, for the Factoring table's Files and

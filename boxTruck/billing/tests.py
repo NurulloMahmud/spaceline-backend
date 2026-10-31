@@ -30,16 +30,13 @@ class ApiTests(TestCase):
         cls.mgmt = Department.objects.create(name="Management")
         cls.disp = Department.objects.create(name="Dispatch")
         cls.co_a = Company.objects.create(name="A")
-        cls.co_b = Company.objects.create(name="B")
         cls.mgr_a = CustomUser.objects.create_user(
-            username="mgr_a", password="x", first_name="M", last_name="A",
-            company=cls.co_a, department=cls.mgmt, is_active=True)
+            username="mgr_a", password="x", first_name="M", last_name="A", department=cls.mgmt, is_active=True)
         cls.mgr_b = CustomUser.objects.create_user(
             username="mgr_b", password="x", first_name="M", last_name="B",
-            company=cls.co_b, department=cls.mgmt, is_active=True)
+            department=cls.mgmt, is_active=True)
         cls.disp_a = CustomUser.objects.create_user(
-            username="disp_a", password="x", first_name="D", last_name="A",
-            company=cls.co_a, department=cls.disp, is_active=True)
+            username="disp_a", password="x", first_name="D", last_name="A", department=cls.disp, is_active=True)
 
     def client_for(self, user):
         c = APIClient()
@@ -49,12 +46,10 @@ class ApiTests(TestCase):
     def test_create_normalizes_and_scopes(self):
         c = self.client_for(self.mgr_a)
         r = c.post("/api/billing/broker-blacklist/",
-                   {"name": "Priority 1 Inc", "mc": "MC 0312916", "reason": "no pay",
-                    "company": self.co_b.id}, format="json")
+                   {"name": "Priority 1 Inc", "mc": "MC 0312916", "reason": "no pay"}, format="json")
         self.assertEqual(r.status_code, 201, r.data)
         self.assertEqual(r.data["mc"], "312916")
         row = BrokerBlacklist.objects.get(pk=r.data["id"])
-        self.assertEqual(row.company, self.co_a)   # body company_id ignored
         self.assertEqual(row.created_by, self.mgr_a)
 
     def test_post_is_idempotent(self):
@@ -88,48 +83,33 @@ class ApiTests(TestCase):
         self.assertEqual(c.post("/api/billing/broker-blacklist/",
                                 {"name": "X"}, format="json").status_code, 403)
 
-    def test_list_and_delete_are_company_scoped(self):
-        mine = BrokerBlacklist.objects.create(company=self.co_a, name="Mine", mc="111")
-        theirs = BrokerBlacklist.objects.create(company=self.co_b, name="Theirs", mc="222")
-        c = self.client_for(self.mgr_a)
-        r = c.get("/api/billing/broker-blacklist/")
-        self.assertEqual([e["id"] for e in r.data], [mine.id])
-        self.assertEqual(c.delete(f"/api/billing/broker-blacklist/{theirs.id}/").status_code, 404)
-        self.assertTrue(BrokerBlacklist.objects.filter(pk=theirs.id).exists())
-        self.assertEqual(c.delete(f"/api/billing/broker-blacklist/{mine.id}/").status_code, 204)
-
     def test_update_methods_are_not_exposed(self):
-        row = BrokerBlacklist.objects.create(company=self.co_a, name="Mine", mc="111")
+        row = BrokerBlacklist.objects.create(name="Mine", mc="111")
         c = self.client_for(self.mgr_a)
         url = f"/api/billing/broker-blacklist/{row.id}/"
         self.assertEqual(c.put(url, {"name": "Other"}, format="json").status_code, 405)
         self.assertEqual(c.patch(url, {"name": "Other"}, format="json").status_code, 405)
         self.assertEqual(c.get(url).status_code, 200)
 
-    def test_same_mc_allowed_across_companies(self):
-        BrokerBlacklist.objects.create(company=self.co_a, name="P1", mc="312916")
-        BrokerBlacklist.objects.create(company=self.co_b, name="P1", mc="312916")
-        self.assertEqual(BrokerBlacklist.objects.count(), 2)
-
     def test_db_constraints(self):
-        BrokerBlacklist.objects.create(company=self.co_a, name="P1", mc="312916")
+        BrokerBlacklist.objects.create(name="P1", mc="312916")
         with self.assertRaises(IntegrityError):
-            BrokerBlacklist.objects.create(company=self.co_a, name="Other", mc="312916")
+            BrokerBlacklist.objects.create(name="Other", mc="312916")
 
     def test_check_constraint(self):
         with self.assertRaises(IntegrityError):
-            BrokerBlacklist.objects.create(company=self.co_a, name="", mc="")
+            BrokerBlacklist.objects.create(name="", mc="")
 
     def test_empty_mc_rows_may_repeat_name_when_mc_set(self):
-        BrokerBlacklist.objects.create(company=self.co_a, name="Same", mc="1")
-        BrokerBlacklist.objects.create(company=self.co_a, name="Same", mc="2")
+        BrokerBlacklist.objects.create(name="Same", mc="1")
+        BrokerBlacklist.objects.create(name="Same", mc="2")
         self.assertEqual(BrokerBlacklist.objects.count(), 2)
 
     def test_internal_bulk(self):
         import config.settings as cs
         self.enterContext(mock.patch.object(cs, "INTERNAL_SERVICE_SECRET", "s3cret"))
-        BrokerBlacklist.objects.create(company=self.co_a, name="Priority 1 Inc", mc="312916")
-        BrokerBlacklist.objects.create(company=self.co_b, name="No File Broker", mc="")
+        BrokerBlacklist.objects.create(name="Priority 1 Inc", mc="312916")
+        BrokerBlacklist.objects.create(name="No File Broker", mc="")
         c = APIClient()
         url = "/api/billing/internal/broker-blacklist-bulk/"
         self.assertIn(c.get(url).status_code, (401, 403))
@@ -137,7 +117,7 @@ class ApiTests(TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertCountEqual(r.data, [
             {"company_id": self.co_a.id, "mc": "312916", "name": "Priority 1 Inc"},
-            {"company_id": self.co_b.id, "mc": "", "name": "No File Broker"},
+            {"company_id": self.co_a.id, "mc": "", "name": "No File Broker"},
         ])
 
 
@@ -148,31 +128,28 @@ class DriversReportTests(TestCase):
     def setUpTestData(cls):
         cls.mgmt = Department.objects.create(name="Management")
         cls.disp = Department.objects.create(name="Dispatch")
-        # Load.save() numbers each load from its company's shipment_number.
+        # Load.save() numbers each load from the company's shipment_number.
         cls.co_a = Company.objects.create(name="A", shipment_number="1000")
-        cls.co_b = Company.objects.create(name="B", shipment_number="1000")
         cls.mgr = CustomUser.objects.create_user(
-            username="mgr", password="x", first_name="M", last_name="G",
-            company=cls.co_a, department=cls.mgmt, is_active=True)
+            username="mgr", password="x", first_name="M", last_name="G", department=cls.mgmt, is_active=True)
         cls.disp_a = CustomUser.objects.create_user(
-            username="disp", password="x", first_name="D", last_name="A",
-            company=cls.co_a, department=cls.disp, is_active=True)
+            username="disp", password="x", first_name="D", last_name="A", department=cls.disp, is_active=True)
         status = DriverStatus.objects.create(name="Active")
-        cls.d1 = Driver.objects.create(company=cls.co_a, full_name="Ann", unit_number="U1", status=status)
-        cls.d2 = Driver.objects.create(company=cls.co_b, full_name="Bob", unit_number="U2", status=status)
+        cls.d1 = Driver.objects.create(full_name="Ann", unit_number="U1", status=status)
+        cls.d2 = Driver.objects.create(full_name="Bob", unit_number="U2", status=status)
         ok = LoadStatus.objects.create(name="Delivered")
         cancelled = LoadStatus.objects.create(name="Cancelled")
 
-        def load(company, driver, carrier, pay, day, status=ok):
+        def load(driver, carrier, pay, day, status=ok):
             return Load.objects.create(
-                company=company, driver=driver, carrier_pay=carrier, driver_pay=pay,
+                driver=driver, carrier_pay=carrier, driver_pay=pay,
                 pickup_date=timezone.make_aware(datetime(2026, 10, day, 9, 0)), status=status)
 
-        load(cls.co_a, cls.d1, 1000, 700, 10)
-        load(cls.co_a, cls.d1, 500, 300, 11)
-        load(cls.co_a, cls.d1, 9999, 1, 12, status=cancelled)   # excluded
-        load(cls.co_a, cls.d1, 800, 500, 25)                     # outside the period
-        load(cls.co_b, cls.d2, 2000, 1500, 10)
+        load(cls.d1, 1000, 700, 10)
+        load(cls.d1, 500, 300, 11)
+        load(cls.d1, 9999, 1, 12, status=cancelled)   # excluded
+        load(cls.d1, 800, 500, 25)                     # outside the period
+        load(cls.d2, 2000, 1500, 10)
 
     def get(self, user, **params):
         c = APIClient()
@@ -182,23 +159,14 @@ class DriversReportTests(TestCase):
     def test_totals_per_driver(self):
         r = self.get(self.disp_a)
         self.assertEqual(r.status_code, 200, r.data)
-        self.assertEqual(len(r.data), 1)                         # company A only
-        row = r.data[0]
+        self.assertEqual(len(r.data), 2)
+        row = next(x for x in r.data if x["driver__full_name"] == "Ann")
         self.assertEqual(row["driver__full_name"], "Ann")
         self.assertEqual(row["driver__unit_number"], "U1")
         self.assertEqual(row["total_loads"], 2)
         self.assertEqual(row["total_carrier_pay"], Decimal("1500"))
         self.assertEqual(row["total_driver_pay"], Decimal("1000"))
         self.assertEqual(row["total_profit"], Decimal("500"))
-
-    def test_management_sees_every_company_and_can_filter(self):
-        self.assertEqual({r["driver__full_name"] for r in self.get(self.mgr).data}, {"Ann", "Bob"})
-        only_b = self.get(self.mgr, company=self.co_b.id)
-        self.assertEqual([r["driver__full_name"] for r in only_b.data], ["Bob"])
-
-    def test_company_param_is_ignored_for_dispatchers(self):
-        r = self.get(self.disp_a, company=self.co_b.id)
-        self.assertEqual([x["driver__full_name"] for x in r.data], ["Ann"])
 
     def test_bad_input_is_a_400(self):
         self.assertEqual(self.get(self.mgr, start_date="nope").status_code, 400)
@@ -215,8 +183,7 @@ class LoadHistoryStopsTests(TestCase):
         cls.dept = Department.objects.create(name="Dispatch")
         cls.co = Company.objects.create(name="A", shipment_number="1000")
         cls.user = CustomUser.objects.create_user(
-            username="d", password="x", first_name="D", last_name="A",
-            company=cls.co, department=cls.dept, is_active=True)
+            username="d", password="x", first_name="D", last_name="A", department=cls.dept, is_active=True)
         LoadStatus.objects.create(name="Booked")
 
     def setUp(self):
@@ -232,7 +199,7 @@ class LoadHistoryStopsTests(TestCase):
             self.addCleanup(p.stop)
 
     def _create_load(self, **extra):
-        body = {"company": self.co.id, "load_number": "L-1", "carrier_pay": "1000", "driver_pay": "700"}
+        body = {"load_number": "L-1", "carrier_pay": "1000", "driver_pay": "700"}
         body.update(extra)
         r = self.client.post("/api/billing/loads/", body, format="json")
         self.assertEqual(r.status_code, 201, r.data)
@@ -323,7 +290,6 @@ class InternalBookedLoadsCountTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         cls.co = Company.objects.create(name="A", shipment_number="1000")
-        cls.other = Company.objects.create(name="B", shipment_number="1000")
         cls.booked = LoadStatus.objects.create(name="Booked")
         cls.cancelled = LoadStatus.objects.create(name="Cancelled")
 
@@ -334,28 +300,25 @@ class InternalBookedLoadsCountTests(TestCase):
         self.headers = {"X-Internal-Secret": "s3cret"}
 
     def get(self, **params):
-        return self.client.get(self.url, {"company_id": self.co.id, **self.window, **params}, headers=self.headers)
+        return self.client.get(self.url, {**self.window, **params}, headers=self.headers)
 
     def test_requires_the_internal_secret(self):
-        r = self.client.get(self.url, {"company_id": self.co.id, **self.window})
+        r = self.client.get(self.url, self.window)
         self.assertIn(r.status_code, (401, 403))
 
-    def test_counts_the_companys_loads_except_cancelled(self):
-        Load.objects.create(company=self.co, load_number="1", status=self.booked)
-        Load.objects.create(company=self.co, load_number="2", status=self.booked)
-        Load.objects.create(company=self.co, load_number="3", status=self.cancelled)
-        Load.objects.create(company=self.other, load_number="4", status=self.booked)
+    def test_counts_loads_except_cancelled(self):
+        Load.objects.create(load_number="1", status=self.booked)
+        Load.objects.create(load_number="2", status=self.booked)
+        Load.objects.create(load_number="3", status=self.cancelled)
         r = self.get()
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data, {"booked_count": 2})
 
     def test_follows_created_at(self):
-        Load.objects.create(company=self.co, load_number="1", status=self.booked)
+        Load.objects.create(load_number="1", status=self.booked)
         r = self.get(start="2000-01-01T00:00:00Z", end="2000-01-02T00:00:00Z")
         self.assertEqual(r.data, {"booked_count": 0})
 
     def test_rejects_a_bad_window(self):
         self.assertEqual(self.get(start="nope").status_code, 400)
         self.assertEqual(self.get(start="2026-10-26T05:00:00").status_code, 400)
-        r = self.client.get(self.url, self.window, headers=self.headers)
-        self.assertEqual(r.status_code, 400)

@@ -1,6 +1,6 @@
 import uuid
 from django.db import models
-from users.models import Company, CustomUser, Team
+from users.models import CustomUser, Team
 
 
 class DriverStatus(models.Model):
@@ -16,7 +16,6 @@ class DriverStatus(models.Model):
 
 
 class Driver(models.Model):
-    company = models.ForeignKey(Company, on_delete=models.CASCADE)
     full_name = models.CharField(max_length=255)
     ssn = models.CharField(max_length=255, null=True, blank=True)
     status = models.ForeignKey(DriverStatus, on_delete=models.CASCADE)
@@ -231,7 +230,6 @@ class CompanyHistory(models.Model):
 class DriverInviteLink(models.Model):
     token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     created_by = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
-    company = models.ForeignKey(Company, on_delete=models.CASCADE)
     manager = models.ForeignKey(
         CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='managed_invite_links',

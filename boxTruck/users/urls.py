@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import SimpleRouter
 
-from .views import (CompanyViewSet, RegisterAPIView, PasswordResetRequestView, PasswordResetView, DispatchUsers,
+from .views import (CompanyProfileView, RegisterAPIView, PasswordResetRequestView, PasswordResetView, DispatchUsers,
                     UserProfileUpdateView, UserUpdateView, UserListAPIView, UserRetrieveAPIView, DepartmentViewSet,
                     UpdaterUsersAPIView, CreateInviteView, InviteDetailView, RegisterWithInviteView, UserBulkView,
                     PageViewSet, UserPageAccessViewSet, MyPageAccessView,
@@ -9,7 +9,6 @@ from .views import (CompanyViewSet, RegisterAPIView, PasswordResetRequestView, P
                     )
 
 router = SimpleRouter()
-router.register(r'companies', CompanyViewSet, basename='company') #checked
 router.register(r'departments', DepartmentViewSet, basename='department') #checked
 router.register(r'teams', TeamViewSet, basename='team')
 router.register(r'pages', PageViewSet, basename='page')
@@ -17,6 +16,7 @@ router.register(r'user-page-access', UserPageAccessViewSet, basename='user-page-
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('company/', CompanyProfileView.as_view(), name='company'),
     path('password-change/', UserProfileUpdateView.as_view(), name='password-change'), #checked
     path('list/', UserListAPIView.as_view(), name='list'), #checked
     path('update/<int:pk>/', UserUpdateView.as_view(), name='update'), #checked

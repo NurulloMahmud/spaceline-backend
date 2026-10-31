@@ -33,9 +33,8 @@ class InternalCompanyProfileView(views.APIView):
     permission_classes = [IsInternalService]
 
     def get(self, request, company_id):
-        company = Company.objects.filter(id=company_id).first()
-        if not company:
-            return Response({"error": "Company not found"}, status=status.HTTP_404_NOT_FOUND)
+        # The path keeps its id because the email-agent sends one. There is only one company.
+        company = Company.current()
 
         logo_url = None
         if company.logo:
@@ -62,7 +61,7 @@ class InternalDispatcherView(views.APIView):
     permission_classes = [IsInternalService]
 
     def get(self, request, user_id):
-        user = CustomUser.objects.select_related('company').filter(id=user_id).first()
+        user = CustomUser.objects.filter(id=user_id).first()
         if not user:
             return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
         return Response({
@@ -71,7 +70,7 @@ class InternalDispatcherView(views.APIView):
             "last_name": user.last_name,
             "full_name": f"{user.first_name} {user.last_name}".strip(),
             "username": user.username,
-            "company_id": user.company_id,
+            "company_id": Company.current().id,
         })
 
 
@@ -202,20 +201,12 @@ class InternalBookLoadView(views.APIView):
         if not payload:
             payload = request.data
 
-        company_id = payload.get('company_id')
         driver_id = payload.get('driver_id')
         broker_id = payload.get('broker_id')
 
-        if not company_id:
-            return Response({"error": "company_id is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        company = Company.objects.filter(id=company_id).first()
-        if not company:
-            return Response({"error": "Company not found"}, status=status.HTTP_404_NOT_FOUND)
-
         load_number = (payload.get('load_number') or '').strip() or None
         if load_number:
-            existing = Load.objects.filter(company=company, load_number=load_number).first()
+            existing = Load.objects.filter(load_number=load_number).first()
             if existing:
                 return Response({
                     "load_id": existing.id,
@@ -233,7 +224,6 @@ class InternalBookLoadView(views.APIView):
         try:
             with transaction.atomic():
                 load = Load.objects.create(
-                    company=company,
                     driver_id=driver_id,
                     broker_id=broker_id,
                     booked_by=booked_by,
@@ -274,7 +264,7 @@ class InternalBookLoadView(views.APIView):
                     description=payload.get('history_note') or 'Booked automatically from a verified rate confirmation.',
                 )
         except Exception as e:
-            logger.error("internal book-load failed | company=%s | error=%s", company_id, e)
+            logger.error("internal book-load failed | error=%s", e)
             return Response(
                 {"error": f"Failed to create load: {e}"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -317,13 +307,15 @@ class InternalBrokerBlacklistBulkView(views.APIView):
     permission_classes = [IsInternalService]
 
     def get(self, request):
-        entries = BrokerBlacklist.objects.values('company_id', 'mc', 'name')
-        return Response(list(entries))
+        # atrek keys its blacklist cache by company_id.
+        company_id = Company.current().id
+        entries = BrokerBlacklist.objects.values('mc', 'name')
+        return Response([{**entry, 'company_id': company_id} for entry in entries])
 
 
 class InternalBookedLoadsCountView(views.APIView):
     """
-    How many loads a company booked in a period, for atrek's dispatch analytics.
+    How many loads were booked in a period, for atrek's dispatch analytics.
 
     Counts rows in `loads` by `created_at`, whoever created them: loads the
     email-agent booked and loads a dispatcher typed in by hand both land here,
@@ -335,13 +327,12 @@ class InternalBookedLoadsCountView(views.APIView):
     EXCLUDED_STATUSES = ['Cancelled', 'Rejected']
 
     def get(self, request):
-        company_id = request.query_params.get('company_id')
         start = parse_datetime(request.query_params.get('start') or '')
         end = parse_datetime(request.query_params.get('end') or '')
 
-        if not company_id or not company_id.isdigit() or start is None or end is None:
+        if start is None or end is None:
             return Response(
-                {"error": "company_id, start and end (ISO 8601) are required"},
+                {"error": "start and end (ISO 8601) are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if timezone.is_naive(start) or timezone.is_naive(end):
@@ -352,7 +343,7 @@ class InternalBookedLoadsCountView(views.APIView):
 
         count = (
             Load.objects
-            .filter(company_id=int(company_id), created_at__range=(start, end))
+            .filter(created_at__range=(start, end))
             .exclude(status__name__in=self.EXCLUDED_STATUSES)
             .count()
         )

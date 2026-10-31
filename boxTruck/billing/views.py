@@ -19,7 +19,7 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from users.serializers import UserListSerializer
 from django.db.models import Q
-from users.models import CustomUser
+from users.models import Company, CustomUser
 from .models import (Broker, BrokerBlacklist, LoadStatus, Load, LoadHistory, LoadFile, LoadStop,
                      Batch, BatchLoad, PaymentType, Tag, LoadTag
                      )
@@ -95,10 +95,7 @@ class LoadsViewSet(viewsets.ModelViewSet):
     search_fields = ['load_number', 'shipment', 'loadstop__trailer_info', 'load__driver__full_name']
 
     def get_queryset(self):
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll']:
-            queryset = Load.objects.all()
-        else:
-            queryset = Load.objects.filter(company=self.request.user.company)
+        queryset = Load.objects.all()
         search_term = self.request.query_params.get('search', None)
         tag_ids = self.request.query_params.get('tags', None)
         except_tags = self.request.query_params.get('except', 'false').lower() == 'true'
@@ -162,7 +159,7 @@ class LoadsViewSet(viewsets.ModelViewSet):
         pickup_date = load.pickup_date.strftime('%Y-%m-%d %H:%M:%S') if load.pickup_date else "N/A"
         drop_date = load.drop_date.strftime('%Y-%m-%d %H:%M:%S') if load.drop_date else "N/A"
         shipment = load.shipment if load.shipment else "N/A"
-        carrier_name = load.company.name if load.company else "N/A"
+        carrier_name = Company.current().name
         load_number = load.load_number
         carrier_pay = load.carrier_pay
         driver_pay = load.driver_pay
@@ -236,7 +233,6 @@ class LoadsViewSet(viewsets.ModelViewSet):
         ignore_fields = {'created_at', 'last_updated'}
         changes = []
         field_mappings = {
-            'company': lambda obj: obj.company.name if obj.company else None,
             'broker': lambda obj: obj.broker.name if obj.broker else None,
             'process': lambda obj: obj.process.name if obj.process else None,
             'status': lambda obj: obj.status.name if obj.status else None,
@@ -570,14 +566,7 @@ class BookedByListAPIView(generics.ListAPIView):
     serializer_class = UserListSerializer
 
     def get_queryset(self):
-        user = self.request.user
-        user_department = user.department.name.lower()
-        if user_department == 'management':
-            return CustomUser.objects.filter(department__name__iexact='dispatch')
-        return CustomUser.objects.filter(
-            department__name__iexact='dispatch',
-            company=user.company
-        )
+        return CustomUser.objects.filter(department__name__iexact='dispatch')
 
 
 class RateConfirmationUploadView(views.APIView):
@@ -675,9 +664,6 @@ class BatchLoadDropDown(generics.ListAPIView):
     def get_queryset(self):
         assigned_load_ids = BatchLoad.objects.values_list('load_id', flat=True)
         queryset = Load.objects.filter(status__name__in=['Factored']).exclude(id__in=assigned_load_ids)
-        company_id = self.request.query_params.get('carrier')
-        if company_id:
-            queryset = queryset.filter(company_id=company_id)
         return queryset.order_by('-id')
 
 
@@ -784,7 +770,6 @@ class BatchLoadByIDListAPIView(generics.ListAPIView):
     pagination_class = CustomPagination
     serializer_class = BatchLoadViewSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['load__company__name']
     search_fields = ['load__load_number', 'load__shipment']
 
     def get_queryset(self):
@@ -794,7 +779,6 @@ class BatchLoadByIDListAPIView(generics.ListAPIView):
 
 class LoadsCountByProcessView(views.APIView):
     def get(self, request):
-        user = self.request.user
         queryset = Load.objects.all()
         start_date_str = self.request.query_params.get('start_date')
         end_date_str = self.request.query_params.get('end_date')
@@ -812,10 +796,7 @@ class LoadsCountByProcessView(views.APIView):
             queryset = queryset.filter(
                 drop_date__lte=delivery_date
             )
-        if user.department.name.lower() in ['dispatch', 'dispatch manager', 'team lead', 'updater']:
-            queryset = queryset.filter(company=user.company)
         filter_params = {
-            'company': request.query_params.get('carrier'),
             'broker': request.query_params.get('broker'),
             'booked_by': request.query_params.get('booked_by'),
             'from_facility': request.query_params.get('from_facility'),
@@ -908,18 +889,12 @@ class DailyReportByDispatchersAPIView(views.APIView):
 
         start_dt = datetime.combine(start_date, time.min)
         end_dt = datetime.combine(end_date, time.max)
-        user_department = request.user.department
-        privileged_departments = ['management', 'payroll', 'billing']
-        is_privileged = user_department and user_department.name.lower() in privileged_departments
         loads = Load.objects.filter(
             booked_by__department__name__iexact='dispatch',
         ).exclude(
             status__name__in=['Cancelled', 'Rejected']
         )
         loads = loads.filter(pickup_date__range=(start_dt, end_dt))
-        if not is_privileged:
-            loads = loads.filter(booked_by__company=request.user.company)
-        
         profit_expression = ExpressionWrapper(
             F('carrier_pay') - F('driver_pay'),
             output_field=DecimalField(max_digits=20, decimal_places=2)
@@ -976,10 +951,6 @@ class DriversReportAPIView(views.APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        user_department = request.user.department
-        privileged_departments = ['management', 'payroll', 'billing']
-        is_privileged = user_department and user_department.name.lower() in privileged_departments
-
         loads = Load.objects.filter(
             driver__isnull=False,
             **{f'{date_type}__range': (
@@ -989,13 +960,6 @@ class DriversReportAPIView(views.APIView):
         ).exclude(
             status__name__in=['Cancelled', 'Rejected']
         )
-        if is_privileged:
-            company = request.query_params.get('company')
-            if company:
-                loads = loads.filter(company_id=company)
-        else:
-            loads = loads.filter(company=request.user.company)
-
         zero = Value(0, output_field=DecimalField(max_digits=20, decimal_places=2))
         profit_expression = ExpressionWrapper(
             Coalesce(F('carrier_pay'), zero) - Coalesce(F('driver_pay'), zero),
@@ -1018,16 +982,8 @@ class LoadsPaySummaryAPIView(views.APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
-        user = request.user
-        privileged_departments = ['management', 'billing', 'payroll']
-        is_privileged = user.department and user.department.name.lower() in privileged_departments
+        queryset = Load.objects.all().exclude(status__name__in=['Cancelled', 'Rejected'])
 
-        if is_privileged:
-            queryset = Load.objects.all().exclude(status__name__in=['Cancelled', 'Rejected'])
-        else:
-            queryset = Load.objects.filter(company=user.company).exclude(status__name__in=['Cancelled', 'Rejected'])
-
-        company = request.query_params.get('company')
         broker = request.query_params.get('broker')
         booked_by = request.query_params.get('booked_by')
         load_status = request.query_params.get('status')
@@ -1039,8 +995,6 @@ class LoadsPaySummaryAPIView(views.APIView):
         tag_ids = request.query_params.get('tags', None)
         except_tags = request.query_params.get('except', 'false').lower() == 'true'
 
-        if company:
-            queryset = queryset.filter(company=company)
         if broker:
             queryset = queryset.filter(broker=broker)
         if booked_by:
@@ -1061,9 +1015,6 @@ class LoadsPaySummaryAPIView(views.APIView):
                 queryset = queryset.exclude(loadtag__tag_id__in=tag_id_list).distinct()
             else:
                 queryset = queryset.filter(loadtag__tag_id__in=tag_id_list).distinct()
-
-        if not is_privileged:
-            queryset = queryset.filter(driver__company=user.company)
 
         if date_type not in ['pickup_date', 'drop_date']:
             return Response({'message': 'Invalid date_type. Use "pickup_date" or "drop_date".'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1270,7 +1221,7 @@ class BestProfitLoadsAPIView(views.APIView):
 
         loads = (
             Load.objects
-            .select_related("company", "driver", "broker")
+            .select_related("driver", "broker")
             .filter(drop_date__date=target_date)
             .annotate(
                 profit=ExpressionWrapper(
@@ -1284,7 +1235,6 @@ class BestProfitLoadsAPIView(views.APIView):
         for load in loads:
             data.append({
                 "id": load.id,
-                "company_name": load.company.name if load.company else None,
                 "shipment": f"SH - {load.shipment}" if load.shipment else None,
                 "booked_by": load.booked_by.username if load.booked_by else None,
                 "updated_by": load.updated_by.username if load.updated_by else None,
@@ -1328,7 +1278,6 @@ class BrokerBlacklistViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return (
             BrokerBlacklist.objects
-            .filter(company=self.request.user.company)
             .select_related('created_by')
             .order_by('-created_at')
         )
@@ -1341,7 +1290,4 @@ class BrokerBlacklistViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=code)
 
     def perform_create(self, serializer):
-        serializer.save(
-            company=self.request.user.company,
-            created_by=self.request.user,
-        )
+        serializer.save(created_by=self.request.user)

@@ -1,10 +1,9 @@
 from django.db import models
-from users.models import CustomUser, Company
+from users.models import CustomUser
 
 
 class AIConversation(models.Model):
     user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name='ai_conversations')
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='ai_conversations')
     title = models.CharField(max_length=255, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     last_updated = models.DateTimeField(auto_now=True)

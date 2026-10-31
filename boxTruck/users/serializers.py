@@ -20,14 +20,13 @@ class TeamSummarySerializer(serializers.ModelSerializer):
 
 class TeamSerializer(serializers.ModelSerializer):
     lead_name = serializers.SerializerMethodField()
-    company_name = serializers.CharField(source='company.name', read_only=True)
     member_count = serializers.SerializerMethodField()
     driver_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Team
         fields = [
-            'id', 'name', 'description', 'company', 'company_name',
+            'id', 'name', 'description',
             'lead', 'lead_name', 'is_active',
             'member_count', 'driver_count', 'created_at', 'last_updated',
         ]
@@ -46,16 +45,6 @@ class TeamSerializer(serializers.ModelSerializer):
     def get_driver_count(self, obj):
         value = getattr(obj, 'drivers_total', None)
         return value if value is not None else obj.drivers.count()
-
-    def validate(self, attrs):
-        """A team lead must belong to the same company as the team."""
-        company = attrs.get('company') or getattr(self.instance, 'company', None)
-        lead = attrs.get('lead') or getattr(self.instance, 'lead', None)
-        if lead and company and lead.company_id != company.id:
-            raise serializers.ValidationError(
-                {"lead": "The team lead must belong to the same company as the team."}
-            )
-        return attrs
 
 
 class TeamAssignUsersSerializer(serializers.Serializer):
@@ -105,8 +94,11 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def get_token(cls, user):
         token = super().get_token(user)
         token["department"] = user.department.name if user.department else None
-        token["company"] = user.company.name if user.company else None
-        token["company_id"] = user.company.id if user.company else None
+        # atrek and the email-agent read these two claims. They are the deployment's
+        # company now, not the user's.
+        company = Company.current()
+        token["company"] = company.name
+        token["company_id"] = company.id
         return token
 
     def validate(self, attrs):
@@ -115,14 +107,15 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         if not self.user.is_active:
             raise serializers.ValidationError("User is not active")
 
+        company = Company.current()
         data.update({
             'user_id': self.user.id,
             'username': self.user.username,
             'first_name': self.user.first_name,
             'last_name': self.user.last_name,
             'department': self.user.department.name if self.user.department else None,
-            'company_id': self.user.company.id if self.user.company else None,
-            'company': self.user.company.name if self.user.company else None
+            'company_id': company.id,
+            'company': company.name,
         })
         return data
 
@@ -150,10 +143,9 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = CustomUser
-        fields = ['id', 'username', 'password', 'first_name', 'last_name', 'company', 'department', 'is_active']
+        fields = ['id', 'username', 'password', 'first_name', 'last_name', 'department', 'is_active']
         extra_kwargs = {
             'id': {'read_only': True},
-            'company': {'read_only': True},
             'first_name': {'read_only': True},
             'last_name': {'read_only': True},
             'department': {'read_only': True},
@@ -174,7 +166,7 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
 class UserUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
-        fields = ['id', 'username', 'first_name', 'last_name', 'company', 'department', 'team', 'is_active', 'started_working_date']
+        fields = ['id', 'username', 'first_name', 'last_name', 'department', 'team', 'is_active', 'started_working_date']
         extra_kwargs = {
             'username': {'read_only': True},
             'password': {'read_only': True}
@@ -214,7 +206,6 @@ class UserPageAccessSerializer(serializers.ModelSerializer):
 
 
 class UserListSerializer(serializers.ModelSerializer):
-    company = CompanySerializer()
     team = TeamSummarySerializer(read_only=True)
     department = serializers.SerializerMethodField(method_name='get_department')
     page_access = UserPageAccessSerializer(many=True, read_only=True)
@@ -224,7 +215,7 @@ class UserListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CustomUser
-        fields = ['id', 'username', 'first_name', 'last_name', 'company', 'department', 'team', 'is_active', 'started_working_date', 'page_access']
+        fields = ['id', 'username', 'first_name', 'last_name', 'department', 'team', 'is_active', 'started_working_date', 'page_access']
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -245,7 +236,6 @@ class MyPageAccessSerializer(serializers.ModelSerializer):
 
 
 class UpdaterUsersSerializer(serializers.ModelSerializer):
-    company = CompanySerializer()
     department = serializers.SerializerMethodField(method_name='get_department')
     active_loads_count = serializers.IntegerField(read_only=True)
 
@@ -259,7 +249,6 @@ class UpdaterUsersSerializer(serializers.ModelSerializer):
             'username',
             'first_name',
             'last_name',
-            'company',
             'department',
             'is_active',
             'active_loads_count'
@@ -296,7 +285,6 @@ class InviteUserSerializer(serializers.ModelSerializer):
         return UserInvite.objects.create(
             username=validated_data['username'],
             department=validated_data['department'],
-            company=request.user.company,
             invited_by=request.user
         )
 
@@ -311,7 +299,7 @@ class RegisterWithInviteSerializer(serializers.Serializer):
         token = attrs.get("token")
 
         try:
-            invite = UserInvite.objects.select_related('company', 'department').get(token=token)
+            invite = UserInvite.objects.select_related('department').get(token=token)
         except UserInvite.DoesNotExist:
             raise serializers.ValidationError({"token": "Invalid invite token."})
 
@@ -335,7 +323,6 @@ class RegisterWithInviteSerializer(serializers.Serializer):
             first_name=validated_data["first_name"],
             last_name=validated_data["last_name"],
             password=validated_data["password"],
-            company=invite.company,
             department=invite.department,
             is_active=True
         )

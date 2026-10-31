@@ -21,7 +21,7 @@ from .bot import send_rts_upload_message
 def async_generate_invoices(batch_id, load_ids, user_id):
     def _generate():
         try:
-            loads = Load.objects.filter(id__in=load_ids).select_related('company', 'broker')
+            loads = Load.objects.filter(id__in=load_ids).select_related('broker')
             batch = Batch.objects.get(id=batch_id)
             success_count = 0
             failed_count = 0
@@ -209,7 +209,7 @@ def notify_drivers_async(load_id: int):
     def task():
         try:
             load = Load.objects.select_related(
-                'broker', 'company'
+                'broker'
             ).get(id=load_id)
         except Load.DoesNotExist:
             return
@@ -263,7 +263,7 @@ def notify_group_async(load_id: int, delay_seconds: int = 5):
     def task():
         time.sleep(delay_seconds)
         try:
-            load = Load.objects.select_related('broker', 'company').get(id=load_id)
+            load = Load.objects.select_related('broker').get(id=load_id)
         except Load.DoesNotExist:
             return
         load_driver = Load.objects.filter(load=load)

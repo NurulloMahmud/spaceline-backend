@@ -24,14 +24,13 @@ class CheckPhoneView(views.APIView):
         if not phone_number:
             return Response({'detail': 'phone_number is required.'}, status=400)
 
-        drivers = Driver.objects.filter(phone_number=phone_number).select_related('company')
+        drivers = Driver.objects.filter(phone_number=phone_number)
         if not drivers.exists():
-            all_companies = Company.objects.all()
             return Response({
                 'exists': False,
                 'has_sms': False,
                 'has_email': False,
-                'companies': CompanyViewSerializer(all_companies, many=True).data,
+                'companies': [CompanyViewSerializer(Company.current()).data],
             })
         driver = drivers.first()
         return Response({
@@ -108,7 +107,7 @@ class VerifyOTPView(views.APIView):
 
         assigned_drivers = Driver.objects.filter(
             phone_number=phone_number
-        ).select_related('company')
+        )
         if not assigned_drivers.exists():
             return Response({'detail': 'Driver not found.'}, status=404)
 
@@ -130,7 +129,7 @@ class VerifyOTPView(views.APIView):
             'companies': [
                 {
                     'driver_id': d.id,
-                    'company': CompanyViewSerializer(d.company).data,
+                    'company': CompanyViewSerializer(Company.current()).data,
                 }
                 for d in assigned_drivers
             ]
@@ -147,7 +146,7 @@ class SelectCompanyView(views.APIView):
             return Response({'detail': 'phone_number and driver_id are required.'}, status=400)
 
         try:
-            driver = Driver.objects.select_related('company').get(
+            driver = Driver.objects.get(
                 id=driver_id,
                 phone_number=phone_number,
             )
@@ -163,7 +162,7 @@ class SelectCompanyView(views.APIView):
             'token': str(auth_token.token),
             'driver_id': driver.id,
             'full_name': driver.full_name,
-            'company': CompanyViewSerializer(driver.company).data,
+            'company': CompanyViewSerializer(Company.current()).data,
             'expires_at': auth_token.expires_at,
         })
 
@@ -189,7 +188,7 @@ class VerifyDriverTokenView(views.APIView):
 
         return Response({
             'driver_id': auth_token.driver.id,
-            'company_id': auth_token.driver.company.id,
+            'company_id': Company.current().id,
             'full_name': auth_token.driver.full_name,
         })
 

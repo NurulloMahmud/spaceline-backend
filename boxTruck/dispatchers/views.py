@@ -6,7 +6,7 @@ from rest_framework import viewsets, views, generics
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from billing.models import Load
-from dispatchers.utils import calculate_bonus, calculate_dispatcher_kpi, calculate_target, get_company_actual_gross_by_dispatcher, get_company_dispatcher_targets, get_dispatcher_gross, get_previous_3_months
+from dispatchers.utils import calculate_bonus, calculate_dispatcher_kpi, calculate_target, get_actual_gross_by_dispatcher, get_dispatcher_targets, get_dispatcher_gross, get_previous_3_months
 from users.models import Company, CustomUser
 from users.permissions import IsAdminUser
 from .serializers import DispatchSalaryViewSerializer, DispatchBonusViewSerializer, DispatchSalaryWriteSerializer, DispatchBonusWriteSerializer
@@ -16,9 +16,7 @@ from .models import DispatchSalary, DispatchBonus
 class DispatchSalaryViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll']:
-            return DispatchSalary.objects.all().order_by('company__name')
-        return DispatchSalary.objects.filter(company=self.request.user.company).order_by('company__name')
+        return DispatchSalary.objects.all().order_by('min_amount')
 
     def get_serializer_class(self):
         if self.request.method in ['POST', 'PUT', 'PATCH']:
@@ -45,9 +43,7 @@ class DispatchSalaryViewSet(viewsets.ModelViewSet):
 class DispatchBonusViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll']:
-            return DispatchBonus.objects.all()
-        return DispatchBonus.objects.filter(company=self.request.user.company)
+        return DispatchBonus.objects.all()
 
     def get_serializer_class(self):
         if self.request.method in ['POST', 'PUT', 'PATCH']:
@@ -90,75 +86,62 @@ class DispatcherSalaryView(views.APIView):
         if start_date < EARLIEST_DATE:
             return Response({'detail': 'You cannot view data before June 2026.'}, status=400)
 
-        user = request.user
-        department = user.department.name.lower() if user.department else ''
-        is_management = department == 'management'
-        if is_management:
-            companies = Company.objects.all()
-        else:
-            companies = Company.objects.filter(id=user.company.id)
-
         current_month_start = start_date.replace(day=1)
         local_tz = timezone.get_current_timezone()
         month_start_dt = timezone.make_aware(datetime.combine(current_month_start, time.min), local_tz)
         month_last_day = monthrange(current_month_start.year, current_month_start.month)[1]
         month_end_dt = timezone.make_aware(datetime.combine(current_month_start.replace(day=month_last_day), time.max), local_tz)
         now_dt = min(timezone.now(), month_end_dt)
-        result = []
-        for company in companies:
-            dispatchers = CustomUser.objects.filter(
-                company=company,
-                department__name__iexact='dispatch',
-            ).select_related('department', 'company')
-            if not dispatchers.exists():
-                continue
-            company_targets = get_company_dispatcher_targets(
-                company, current_month_start, dispatcher_ids=[d.id for d in dispatchers]
+        company = Company.current()
+        dispatchers = CustomUser.objects.filter(
+            department__name__iexact='dispatch',
+        ).select_related('department')
+        if not dispatchers.exists():
+            return Response([])
+        targets = get_dispatcher_targets(
+            current_month_start, dispatcher_ids=[d.id for d in dispatchers]
+        )
+        actual_gross_by_dispatcher = get_actual_gross_by_dispatcher(month_start_dt, now_dt)
+        dispatchers_result = []
+        for dispatcher in dispatchers:
+            loads = Load.objects.filter(
+                booked_by=dispatcher,
+                pickup_date__date__gte=start_date,
+                pickup_date__date__lte=end_date,
+            ).exclude(
+                status__name__iexact='rejected'
+            ).select_related(
+                'driver', 'status', 'payout'
             )
-            company_actual_gross = get_company_actual_gross_by_dispatcher(company, month_start_dt, now_dt)
-            dispatchers_result = []
-            for dispatcher in dispatchers:
-                loads = Load.objects.filter(
-                    company=company,
-                    booked_by=dispatcher,
-                    pickup_date__date__gte=start_date,
-                    pickup_date__date__lte=end_date,
-                ).exclude(
-                    status__name__iexact='rejected'
-                ).select_related(
-                    'driver', 'status', 'payout'
-                )
 
-                kpi = calculate_dispatcher_kpi(
-                    dispatcher=dispatcher,
-                    loads=list(loads),
-                    company=company,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-                target_info = company_targets.get(dispatcher.id, {"target": 0, "based_on": []})
-                actual_gross = float(company_actual_gross.get(dispatcher.id, Decimal('0')))
-                kpi['monthly_target'] = {
-                    'current_month': current_month_start.strftime('%B %Y'),
-                    'target': target_info['target'],
-                    'based_on': target_info['based_on'],
-                    'actual_gross': actual_gross,
-                    'remaining_to_target': max(target_info['target'] - actual_gross, 0),
-                    'is_on_track': actual_gross >= target_info['target'],
-                    'bonus_earned': calculate_bonus(actual_gross, target_info['target']),
-                }
+            kpi = calculate_dispatcher_kpi(
+                dispatcher=dispatcher,
+                loads=list(loads),
+                start_date=start_date,
+                end_date=end_date,
+            )
+            target_info = targets.get(dispatcher.id, {"target": 0, "based_on": []})
+            actual_gross = float(actual_gross_by_dispatcher.get(dispatcher.id, Decimal('0')))
+            kpi['monthly_target'] = {
+                'current_month': current_month_start.strftime('%B %Y'),
+                'target': target_info['target'],
+                'based_on': target_info['based_on'],
+                'actual_gross': actual_gross,
+                'remaining_to_target': max(target_info['target'] - actual_gross, 0),
+                'is_on_track': actual_gross >= target_info['target'],
+                'bonus_earned': calculate_bonus(actual_gross, target_info['target']),
+            }
 
-                if kpi['grand_total'] == 0 and actual_gross == 0 and not kpi['loads']:
-                    continue
-
-                dispatchers_result.append(kpi)
-            if not dispatchers_result:
+            if kpi['grand_total'] == 0 and actual_gross == 0 and not kpi['loads']:
                 continue
-            result.append({
-                'company': {'id': company.id, 'name': company.name},
-                'dispatchers': dispatchers_result,
-            })
-        return Response(result)
+
+            dispatchers_result.append(kpi)
+        if not dispatchers_result:
+            return Response([])
+        return Response([{
+            'company': {'id': company.id, 'name': company.name},
+            'dispatchers': dispatchers_result,
+        }])
 
 
 class DispatcherOwnSalaryView(views.APIView):
@@ -186,7 +169,6 @@ class DispatcherOwnSalaryView(views.APIView):
         if start_date < EARLIEST_DATE:
             return Response({'detail': 'You cannot view data before June 2026.'}, status=400)
         loads = Load.objects.filter(
-            company=user.company,
             booked_by=user,
             pickup_date__date__gte=start_date,
             pickup_date__date__lte=end_date,
@@ -198,7 +180,6 @@ class DispatcherOwnSalaryView(views.APIView):
         kpi = calculate_dispatcher_kpi(
             dispatcher=user,
             loads=list(loads),
-            company=user.company,
             start_date=start_date,
             end_date=end_date,
         )
@@ -224,7 +205,7 @@ class DispatcherTargetView(views.APIView):
         months = get_previous_3_months(current_month_start)
         last_three_months = []
         for start_dt, end_dt, label in months:
-            gross = get_dispatcher_gross(user, user.company, start_dt, end_dt)
+            gross = get_dispatcher_gross(user, start_dt, end_dt)
             if gross == 0:
                 gross = Decimal('3000')
             last_three_months.append({"month": label, "gross": float(gross)})
@@ -233,7 +214,7 @@ class DispatcherTargetView(views.APIView):
         local_tz = timezone.get_current_timezone()
         month_start_dt = timezone.make_aware(datetime.combine(current_month_start, time.min), local_tz)
         now_dt = timezone.now()
-        actual_gross = get_dispatcher_gross(user, user.company, month_start_dt, now_dt)
+        actual_gross = get_dispatcher_gross(user, month_start_dt, now_dt)
         bonus = calculate_bonus(float(actual_gross), target)
         return Response({
             'current_month': current_month_start.strftime('%B %Y'),

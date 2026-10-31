@@ -21,7 +21,7 @@ def driver_pay_before_fee(load):
     return (load.driver_pay or Decimal('0')) + (payout.quick_pay_fee if payout else Decimal('0'))
 
 
-def get_tier_percentage(company, total_profit, start_date=None):
+def get_tier_percentage(total_profit, start_date=None):
     if total_profit <= 0:
         return Decimal('0')
     if start_date is None:
@@ -31,7 +31,6 @@ def get_tier_percentage(company, total_profit, start_date=None):
     first_day = datetime(year, month, 1).date()
     last_day = datetime(year, month, calendar.monthrange(year, month)[1]).date()
     tier = DispatchSalary.objects.filter(
-        models.Q(company=company) | models.Q(company__isnull=True),
         min_amount__lte=total_profit,
         created_at__date__gte=first_day,
         created_at__date__lte=last_day,
@@ -40,7 +39,6 @@ def get_tier_percentage(company, total_profit, start_date=None):
     ).order_by('-created_at').first()
     if not tier:
         tier = DispatchSalary.objects.filter(
-            models.Q(company=company) | models.Q(company__isnull=True),
             min_amount__lte=total_profit,
         ).filter(
             models.Q(max_amount__gte=total_profit) | models.Q(max_amount__isnull=True)
@@ -49,9 +47,8 @@ def get_tier_percentage(company, total_profit, start_date=None):
         return Decimal('0')
     return tier.percentage or Decimal('0')
 
-def get_daily_bonus(company, day_profit):
+def get_daily_bonus(day_profit):
     bonus = DispatchBonus.objects.filter(
-        company=company,
         min_daily_profit__lte=day_profit,
     ).filter(
         models.Q(max_daily_profit__gte=day_profit) | models.Q(max_daily_profit__isnull=True)
@@ -93,7 +90,7 @@ def calculate_prorated_fixed(dispatcher, start_date, end_date):
     prorated_fixed = daily_fixed * Decimal(working_days_in_period)
     return prorated_fixed.quantize(Decimal('0.01')), working_days_in_period, total_working_days_in_month
 
-def calculate_dispatcher_kpi(dispatcher, loads, company, start_date, end_date):
+def calculate_dispatcher_kpi(dispatcher, loads, start_date, end_date):
     local_tz = timezone.get_current_timezone()
     days_map = defaultdict(list)
     for load in loads:
@@ -108,7 +105,7 @@ def calculate_dispatcher_kpi(dispatcher, loads, company, start_date, end_date):
         driver = driver_pay_before_fee(load)
         total_profit += carrier - driver
 
-    percentage = get_tier_percentage(company, total_profit, start_date)
+    percentage = get_tier_percentage(total_profit, start_date)
     flex_salary = total_profit * percentage / Decimal('100')
     if is_probation(dispatcher):
             fixed_salary, working_days_in_period, total_working_days = calculate_prorated_fixed(
@@ -135,7 +132,7 @@ def calculate_dispatcher_kpi(dispatcher, loads, company, start_date, end_date):
 
         bonus = Decimal('0')
         if day_profit > 0:
-            bonus = get_daily_bonus(company, day_profit) or Decimal('0')
+            bonus = get_daily_bonus(day_profit) or Decimal('0')
             total_bonus += bonus
 
         if day_profit > 0 or bonus > 0:
@@ -212,9 +209,8 @@ def get_previous_3_months(reference_month: date):
         result.append((start_dt, end_dt, label))
     return result
 
-def get_dispatcher_gross(dispatcher, company, start_dt, end_dt):
+def get_dispatcher_gross(dispatcher, start_dt, end_dt):
     total = Load.objects.filter(
-        company=company,
         booked_by=dispatcher,
         pickup_date__gte=start_dt,
         pickup_date__lte=end_dt,
@@ -241,9 +237,8 @@ def calculate_target(last_three_months):
 def calculate_bonus(actual_gross, target):
     return 100 if actual_gross >= target else 0
 
-def get_company_gross_by_dispatcher(company, start_dt, end_dt):
+def get_gross_by_dispatcher(start_dt, end_dt):
     rows = Load.objects.filter(
-        company=company,
         pickup_date__gte=start_dt,
         pickup_date__lte=end_dt,
         booked_by__isnull=False,
@@ -254,10 +249,10 @@ def get_company_gross_by_dispatcher(company, start_dt, end_dt):
     )
     return {row['booked_by']: row['gross'] or Decimal('0') for row in rows}
 
-def get_company_dispatcher_targets(company, current_month_start, dispatcher_ids=None):
+def get_dispatcher_targets(current_month_start, dispatcher_ids=None):
     months = get_previous_3_months(current_month_start)
     month_grosses = [
-        get_company_gross_by_dispatcher(company, start_dt, end_dt)
+        get_gross_by_dispatcher(start_dt, end_dt)
         for start_dt, end_dt, label in months
     ]
     if dispatcher_ids is None:
@@ -282,5 +277,5 @@ def get_company_dispatcher_targets(company, current_month_start, dispatcher_ids=
         }
     return results
 
-def get_company_actual_gross_by_dispatcher(company, month_start_dt, now_dt):
-    return get_company_gross_by_dispatcher(company, month_start_dt, now_dt)
+def get_actual_gross_by_dispatcher(month_start_dt, now_dt):
+    return get_gross_by_dispatcher(month_start_dt, now_dt)

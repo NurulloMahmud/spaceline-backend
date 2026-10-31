@@ -2,6 +2,7 @@ import uuid
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 
 
 class Department(models.Model):
@@ -32,6 +33,16 @@ class Company(models.Model):
     contract_signer_name = models.CharField(max_length=255, null=True, blank=True)
     contract_signer_title = models.CharField(max_length=255, null=True, blank=True)
 
+    @classmethod
+    def current(cls):
+        """The one company this deployment belongs to."""
+        return cls.objects.order_by('id').first() or cls.objects.create(name='Company')
+
+    def save(self, *args, **kwargs):
+        if self.pk is None and Company.objects.exists():
+            raise ValidationError('This deployment already has its company.')
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.id}. {self.name}"
 
@@ -51,8 +62,7 @@ class Team(models.Model):
     live database — assignment is done through the endpoints instead, and
     the unassigned lists show what is still outstanding.
     """
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='teams')
-    name = models.CharField(max_length=100)
+    name = models.CharField(max_length=100, unique=True)
     lead = models.ForeignKey(
         'CustomUser', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='teams_led',
@@ -67,24 +77,18 @@ class Team(models.Model):
     last_updated = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.name} ({self.company.name})"
+        return self.name
 
     class Meta:
         verbose_name = "Team"
         verbose_name_plural = "Teams"
         db_table = "teams"
-        ordering = ['company_id', 'name']
-        constraints = [
-            models.UniqueConstraint(
-                fields=['company', 'name'], name='unique_team_name_per_company'
-            )
-        ]
+        ordering = ['name']
 
 
 class CustomUser(AbstractUser):
     first_name = models.CharField(max_length=100, null=False, blank=False)
     last_name = models.CharField(max_length=100, null=False, blank=False)
-    company = models.ForeignKey(Company, on_delete=models.CASCADE, null=True, blank=True)
     department = models.ForeignKey(Department, on_delete=models.CASCADE, null=True, blank=True)
     team = models.ForeignKey(
         Team, on_delete=models.SET_NULL, null=True, blank=True, related_name='members'
@@ -119,7 +123,6 @@ class PasswordReset(models.Model):
 
 class UserInvite(models.Model):
     username = models.CharField(max_length=150)
-    company = models.ForeignKey('Company', on_delete=models.CASCADE)
     department = models.ForeignKey('Department', on_delete=models.CASCADE)
     invited_by = models.ForeignKey(
         get_user_model(),
@@ -134,7 +137,7 @@ class UserInvite(models.Model):
     expires_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
-        return f"{self.username} - {self.company.name}"
+        return self.username
 
 
 class Page(models.Model):

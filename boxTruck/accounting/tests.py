@@ -24,12 +24,12 @@ class AccountingBase(TestCase):
         mgmt = Department.objects.create(name='Management')
         billing = Department.objects.create(name='Billing')
         dispatch = Department.objects.create(name='Dispatch')
-        self.boss = CustomUser.objects.create_user(username='boss', password='x', company=self.company, department=mgmt, first_name='Big', last_name='Boss')
-        self.acct = CustomUser.objects.create_user(username='elena', password='x', company=self.company, department=billing, first_name='Elena', last_name='Varga')
-        self.disp = CustomUser.objects.create_user(username='dana', password='x', company=self.company, department=dispatch, first_name='Dana', last_name='Ortiz')
+        self.boss = CustomUser.objects.create_user(username='boss', password='x', department=mgmt, first_name='Big', last_name='Boss')
+        self.acct = CustomUser.objects.create_user(username='elena', password='x', department=billing, first_name='Elena', last_name='Varga')
+        self.disp = CustomUser.objects.create_user(username='dana', password='x', department=dispatch, first_name='Dana', last_name='Ortiz')
         active = DriverStatus.objects.create(name='Active')
-        self.driver = Driver.objects.create(full_name='Kwame Osei', unit_number='19', status=active, company=self.company)
-        self.other = Driver.objects.create(full_name='Jin Park', unit_number='26', status=active, company=self.company)
+        self.driver = Driver.objects.create(full_name='Kwame Osei', unit_number='19', status=active)
+        self.other = Driver.objects.create(full_name='Jin Park', unit_number='26', status=active)
         self.broker = Broker.objects.create(name='Northline Logistics', mc='784512')
         self.dispatched = LoadStatus.objects.create(name='Dispatched')
         self.delivered = LoadStatus.objects.create(name='Delivered')
@@ -37,12 +37,12 @@ class AccountingBase(TestCase):
         self.fuel = DeductionType.objects.create(name='Fuel advance')
 
     def load(self, shipment, driver=None, driver_pay='874', carrier_pay='1300', pay='Quick Pay', days_ago=1, status=None):
-        l = Load.objects.create(company=self.company, driver=driver or self.driver, broker=self.broker, load_number=str(100000 + shipment),
+        l = Load.objects.create(driver=driver or self.driver, broker=self.broker, load_number=str(100000 + shipment),
                                 driver_pay=D(driver_pay), carrier_pay=D(carrier_pay), payment_type=pay, status=status or self.dispatched,
                                 pickup_date=timezone.now() - timezone.timedelta(days=days_ago), created_by=self.disp)
         # the model numbers shipments itself; the tests want to name them
         Load.objects.filter(pk=l.pk).update(shipment=shipment)
-        return Load.objects.select_related('status', 'driver', 'broker', 'company').get(pk=l.pk)
+        return Load.objects.select_related('status', 'driver', 'broker').get(pk=l.pk)
 
     def expense(self, amount, driver=None, days_ago=3, note='', paid=False):
         return Deduction.objects.create(driver=driver or self.driver, amount=D(amount), type=self.fuel, date=timezone.localdate() - timezone.timedelta(days=days_ago), note=note, created_by=self.acct, paid=paid)

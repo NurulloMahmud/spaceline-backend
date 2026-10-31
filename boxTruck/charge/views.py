@@ -4,8 +4,8 @@ Every view: authenticate the JWT user -> resolve the paying company -> call the 
 service with our API key -> return its JSON. The frontend never calls billing directly and
 never sees ``BILLING_API_KEY``.
 
-Payer identity (``external_user_id`` in billing) = the company id. All users of a company
-share one payment method and one transaction history.
+Payer identity (``external_user_id`` in billing) = the company id. All users share one
+payment method and one transaction history.
 """
 import logging
 
@@ -15,6 +15,8 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from users.models import Company
+
 from .client import BillingError, client
 from .permissions import CanManageBilling
 from .serializers import CardSetupRequestSerializer, TransactionQuerySerializer
@@ -23,10 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def _company(request):
-    company = getattr(request.user, "company", None)
-    if company is None:
-        raise ValidationError("Your account is not linked to a company.")
-    return company
+    return Company.current()
 
 
 def _external_id(request):

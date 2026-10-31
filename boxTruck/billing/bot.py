@@ -1,5 +1,6 @@
 import requests
 from config import settings
+from users.models import Company
 
 TELEGRAM_BOT_TOKEN = settings.BOT_TOKEN
 TELEGRAM_CHAT_ID = settings.DEVELOPER_CHAT_ID
@@ -50,7 +51,7 @@ def send_rate_con_message(file_data, load):
         f"*File Name: {file_data['name']}*\n"
         f"*Shipment:* {load.shipment}\n"
         f"*Load #:* {load.load_number}\n"
-        f"*Carrier:* {load.company.name}"
+        f"*Carrier:* {Company.current().name}"
     )
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
     files = {'document': (file_obj.name, file_content, 'application/octet-stream')}

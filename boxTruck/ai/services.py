@@ -92,11 +92,10 @@ def build_chart_from_result(chart_config: dict, rows: list[dict]) -> dict | None
 
 def ask_ai_analyst(
     question: str,
-    company_id: int,
     conversation_history: list[dict]
 ) -> dict:
     client = OpenAI(api_key=settings.AI_ACCESS_TOKEN)
-    system_prompt = get_schema_prompt(company_id)
+    system_prompt = get_schema_prompt()
     today = date.today()
     system_prompt += f"\n\n=== CURRENT DATE ===\nToday is {today.strftime('%Y-%m-%d')}. Current year is {today.year}. Current month is {today.month}. ALWAYS use this date as reference. NEVER hardcode years from conversation history."
     messages = [{"role": "system", "content": system_prompt}]

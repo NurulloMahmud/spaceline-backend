@@ -13,15 +13,12 @@ class ChargeProxyTests(TestCase):
         self.company = Company.objects.create(name="Bob Hauling LLC", email="ap@bobhauling.com")
         self.mgmt = Department.objects.create(name="Management")
         self.user = CustomUser.objects.create_user(
-            username="owner", password="x", company=self.company,
+            username="owner", password="x",
             first_name="Bo", last_name="Boss", department=self.mgmt, is_active=True,
         )
         self.plain = CustomUser.objects.create_user(
-            username="dispatcher", password="x", company=self.company,
+            username="dispatcher", password="x",
             first_name="Di", last_name="Spatch", is_active=True,
-        )
-        self.nocompany = CustomUser.objects.create_user(
-            username="orphan", password="x", first_name="Or", last_name="Phan", is_active=True,
         )
         self.client = APIClient()
 
@@ -46,11 +43,6 @@ class ChargeProxyTests(TestCase):
         # even if the caller tries to pass an external_user_id, the view ignores the body
         self.client.get(reverse("charge-cards"), {"external_user_id": "999"})
         m.list_cards.assert_called_once_with(str(self.company.id))
-
-    def test_user_without_company_is_400(self):
-        self._as(self.nocompany)
-        r = self.client.get(reverse("charge-summary"))
-        self.assertEqual(r.status_code, 400)
 
     def test_unauthenticated_is_401(self):
         r = self.client.get(reverse("charge-summary"))
