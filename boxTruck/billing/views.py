@@ -91,7 +91,7 @@ class BrokerListView(generics.ListAPIView):
 class LoadsViewSet(viewsets.ModelViewSet):
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['company', 'broker', 'booked_by', 'status', 'driver', 'payment_type', 'updated_by']
+    filterset_fields = ['broker', 'booked_by', 'status', 'driver', 'payment_type', 'updated_by']
     search_fields = ['load_number', 'shipment', 'loadstop__trailer_info', 'load__driver__full_name']
 
     def get_queryset(self):
@@ -904,7 +904,6 @@ class DailyReportByDispatchersAPIView(views.APIView):
             'booked_by__first_name',
             'booked_by__last_name',
             'booked_by__username',
-            'booked_by__company__name',
         ).annotate(
             total_loads=Count('id'),
             total_driver_pay=Sum('driver_pay'),
@@ -920,8 +919,7 @@ class DriversReportAPIView(views.APIView):
     Same shape and rules as the dispatcher report, grouped by driver.
 
     Query: start_date, end_date (YYYY-MM-DD, default today), date_type
-    (pickup_date | drop_date | delivered_at, default pickup_date), and company,
-    which only management, billing and payroll may use.
+    (pickup_date | drop_date | delivered_at, default pickup_date).
     """
     permission_classes = [IsAuthenticated]
     DATE_FIELDS = ('pickup_date', 'drop_date', 'delivered_at')

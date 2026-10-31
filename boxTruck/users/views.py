@@ -13,7 +13,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .permissions import IsAdminUser, IsDispatchManager, IsDispatch, IsInternalService, IsUpdater
 from .models import PasswordReset, Company, CustomUser, Department, Team, UserInvite, Page, UserPageAccess
 from .serializers import (
-    InviteUserSerializer, PasswordResetRequestSerializer, PasswordResetSerializer, CompanySerializer, RegisterWithInviteSerializer, UserRegisterSerializer, CustomTokenObtainPairSerializer,
+    InviteUserSerializer, PasswordResetRequestSerializer, PasswordResetSerializer, CompanySerializer, UserProfileSerializer, RegisterWithInviteSerializer, UserRegisterSerializer, CustomTokenObtainPairSerializer,
     UserProfileUpdateSerializer, UserUpdateSerializer, UserListSerializer, DepartmentSerializer, UpdaterUsersSerializer,
     PageSerializer, UserPageAccessSerializer, MyPageAccessSerializer,
     TeamSerializer, TeamAssignUsersSerializer, TeamMemberSerializer
@@ -76,7 +76,7 @@ class UserListAPIView(generics.ListAPIView):
 
 
 class UserRetrieveAPIView(generics.ListAPIView):
-    serializer_class = UserListSerializer
+    serializer_class = UserProfileSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):

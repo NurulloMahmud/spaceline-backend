@@ -1,10 +1,15 @@
+import re
+
 from django.core.exceptions import ValidationError
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TestCase, TransactionTestCase
+from django.urls import URLResolver, get_resolver
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken
 
+from billing.models import Load, LoadStatus
+from hiring.models import Driver, DriverStatus
 from users.models import Company, CustomUser, Department
 from users.serializers import CustomTokenObtainPairSerializer
 
@@ -66,6 +71,14 @@ class OneCompanyTests(TestCase):
         self.client.force_authenticate(self.boss)
         self.assertEqual(self.client.get('/api/users/companies/').status_code, 404)
 
+    def test_the_profile_carries_the_company_for_the_letterhead(self):
+        self.client.force_authenticate(self.dispatcher)
+        response = self.client.get('/api/users/user-profile/')
+        self.assertEqual(response.status_code, 200)
+        rows = response.data['results'] if isinstance(response.data, dict) else response.data
+        self.assertEqual(rows[0]['company']['name'], 'Space Line LLC')
+        self.assertEqual(rows[0]['company']['mc'], '123')
+
     def test_every_user_is_listed_whatever_the_department(self):
         self.client.force_authenticate(self.dispatcher)
         response = self.client.get('/api/users/list/')
@@ -73,6 +86,44 @@ class OneCompanyTests(TestCase):
         rows = response.data['results'] if isinstance(response.data, dict) else response.data
         self.assertEqual({row['username'] for row in rows}, {'boss', 'dana'})
         self.assertNotIn('company', rows[0])
+
+
+class EveryReadRouteAnswersTests(TestCase):
+    """A leftover `company` in a filter or a report only blows up when the route is called."""
+
+    # charge needs the billing service, and mobile/driver needs a driver token.
+    SKIP = ('api/charge/', 'api/mobile/driver/')
+
+    def _routes(self, patterns, prefix=''):
+        for p in patterns:
+            if isinstance(p, URLResolver):
+                yield from self._routes(p.url_patterns, prefix + str(p.pattern))
+            else:
+                yield prefix + str(p.pattern)
+
+    def test_no_route_crashes(self):
+        Company.objects.create(name='Space Line LLC', shipment_number='10001')
+        boss = CustomUser.objects.create_user(
+            username='boss', password='x', is_active=True,
+            department=Department.objects.create(name='Management'),
+        )
+        driver = Driver.objects.create(full_name='Jin', status=DriverStatus.objects.create(name='Active'))
+        load = Load.objects.create(driver=driver, load_number='L-1', status=LoadStatus.objects.create(name='Booked'))
+        client = APIClient(raise_request_exception=False)
+        client.force_authenticate(boss)
+        params = {'start_date': '2026-10-01', 'end_date': '2026-10-31', 'driver': driver.id, 'page_size': 5}
+
+        crashed = []
+        for route in set(self._routes(get_resolver().url_patterns)):
+            path = route.replace('^', '').replace('$', '').replace('\\Z', '')
+            if not path.startswith('api/') or 'internal' in path or path.startswith(self.SKIP):
+                continue
+            path = re.sub(r'\(\?P<pk>[^)]*\)|<int:\w+>|<pk>', str(load.id), path)
+            if '(?P' in path or '<' in path:
+                continue
+            if client.get('/' + path, params).status_code >= 500:
+                crashed.append(path)
+        self.assertEqual(crashed, [])
 
 
 class ConsolidateMigrationTests(TransactionTestCase):

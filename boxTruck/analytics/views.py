@@ -34,7 +34,7 @@ class LoadAnalyticsAPIView(APIView):
             monthly_totals["monthly_driver_pay"][month_name] += driver_pay
             monthly_totals["monthly_carrier_pay"][month_name] += carrier_pay
             monthly_totals["monthly_profit"][month_name] += carrier_pay - driver_pay
-        return Response(monthly_totals)
+        return Response([{"company_id": None, "company_name": "Total", **monthly_totals}])
 
 
 class LoadStatusAnalyticsAPIView(APIView):

@@ -218,6 +218,17 @@ class UserListSerializer(serializers.ModelSerializer):
         fields = ['id', 'username', 'first_name', 'last_name', 'department', 'team', 'is_active', 'started_working_date', 'page_access']
 
 
+class UserProfileSerializer(UserListSerializer):
+    """The signed-in user. The bid email letterhead and the sidebar read `company` from here."""
+    company = serializers.SerializerMethodField()
+
+    class Meta(UserListSerializer.Meta):
+        fields = UserListSerializer.Meta.fields + ['company']
+
+    def get_company(self, obj):
+        return CompanySerializer(Company.current(), context=self.context).data
+
+
 class DepartmentSerializer(serializers.ModelSerializer):
 
     class Meta:
