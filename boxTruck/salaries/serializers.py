@@ -11,6 +11,7 @@ class SalaryItemSerializer(serializers.Serializer):
     user = serializers.PrimaryKeyRelatedField(queryset=CustomUser.objects.all())
     fixed_salary = serializers.DecimalField(max_digits=20, decimal_places=2, min_value=Decimal('0'), required=False, allow_null=True)
     profit_percentage = serializers.DecimalField(max_digits=5, decimal_places=2, min_value=Decimal('0'), max_value=Decimal('100'), required=False, allow_null=True)
+    bonus_override = serializers.DecimalField(max_digits=20, decimal_places=2, min_value=Decimal('0'), required=False, allow_null=True)
 
     def validate(self, attrs):
         attrs['user'] = attrs['user'].id

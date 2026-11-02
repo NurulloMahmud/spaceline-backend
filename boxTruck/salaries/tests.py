@@ -13,7 +13,7 @@ from billing.models import Broker, Load, LoadStatus, LoadStop
 from hiring.models import Driver, DriverStatus
 from users.models import Company, CustomUser, Department
 
-from .models import BonusRule, EmployeeSalary
+from .models import BonusOverride, BonusRule, EmployeeSalary
 from .services import month_report, parse_month
 
 D = Decimal
@@ -202,6 +202,31 @@ class TheApi(SalariesBase):
         self.assertEqual((months['2026-10']['profit'], months['2026-10']['commission']), (D('426.00'), D('42.60')))
         self.assertIsNone(months['2026-08']['fixed_salary'])
         self.assertEqual(r.data['history'][-1]['month'], '2026-03')
+
+    def test_a_bonus_set_by_hand_replaces_the_calculation_for_that_month_only(self):
+        BonusRule.objects.create(effective_from=date(2026, 7, 1), profit_step=D('500'), bonus_amount=D('50'))
+        EmployeeSalary.objects.create(user=self.dana, month=OCT, fixed_salary=D('1000'), profit_percentage=D('0'))
+        self.load(self.dana, central(2026, 11, 6), carrier='2000', driver='750')   # 1250 booked that day: 100
+        self.load(self.dana, central(2026, 10, 6), carrier='2000', driver='750')   # October: 100 as well
+        c = self.api(self.boss)
+        r = c.put(reverse('salaries-report') + '?month=2026-11', {'items': [{'user': self.dana.id, 'bonus_override': '240'}]}, format='json')
+        self.assertEqual(r.status_code, 200)
+        dana = self.row(r.data, self.dana)
+        self.assertEqual((dana['bonus'], dana['bonus_calculated'], dana['bonus_override'], dana['total']), (D('240.00'), D('100.00'), D('240.00'), D('1240.00')))
+        # the salary row was not touched by an item that only carried the bonus
+        self.assertEqual((dana['set_for'], dana['fixed_salary']), ('2026-10', D('1000.00')))
+        self.assertEqual(BonusOverride.objects.get(user=self.dana, month=NOV).updated_by, self.boss)
+        # October keeps its own calculation
+        self.assertEqual(self.row(month_report(OCT, today=date(2026, 11, 20)), self.dana)['bonus'], D('100.00'))
+        hist = {h['month']: h for h in c.get(reverse('salaries-employee', args=[self.dana.id]), {'month': '2026-11'}).data['history']}
+        self.assertEqual((hist['2026-11']['bonus'], hist['2026-11']['bonus_override'], hist['2026-10']['bonus'], hist['2026-10']['bonus_override']), (D('240.00'), D('240.00'), D('100.00'), None))
+        # null puts the calculation back
+        r = c.put(reverse('salaries-report') + '?month=2026-11', {'items': [{'user': self.dana.id, 'bonus_override': None}]}, format='json')
+        dana = self.row(r.data, self.dana)
+        self.assertEqual((dana['bonus'], dana['bonus_override']), (D('100.00'), None))
+        self.assertFalse(BonusOverride.objects.filter(user=self.dana).exists())
+        r = c.put(reverse('salaries-report') + '?month=2026-11', {'items': [{'user': self.dana.id, 'bonus_override': '-1'}]}, format='json')
+        self.assertEqual(r.status_code, 400)
 
     def test_parse_month(self):
         self.assertEqual(parse_month('2026-02'), date(2026, 2, 1))

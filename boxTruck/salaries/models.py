@@ -51,3 +51,25 @@ class BonusRule(models.Model):
 
     def __str__(self):
         return f'from {self.effective_from}: {self.bonus_amount} per {self.profit_step}'
+
+
+class BonusOverride(models.Model):
+    """A daily bonus total set by hand for one employee and one month. It replaces the calculated
+    total for that month only; the calculation still runs and is shown beside it."""
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name='bonus_overrides')
+    month = models.DateField(help_text='The first day of the month it applies to')
+    amount = models.DecimalField(max_digits=20, decimal_places=2, validators=[MinValueValidator(ZERO)])
+    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    updated_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'bonus_overrides'
+        verbose_name = 'Bonus override'
+        verbose_name_plural = 'Bonus overrides'
+        unique_together = [('user', 'month')]
+        ordering = ['-month', 'user_id']
+
+    def __str__(self):
+        return f'{self.user} {self.month:%Y-%m}: bonus {self.amount}'

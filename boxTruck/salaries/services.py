@@ -11,7 +11,9 @@ the Quick Pay fee, the same rule dispatcher pay has always used):
   time, the bonus rule in force that day applied to that day's profit.
 
 Salary and percentage carry forward from the last month they were set. A bonus rule applies from
-its date on, so changing it later never changes a month that is already paid.
+its date on, so changing it later never changes a month that is already paid. Management can also
+set an employee's bonus total for one month by hand (BonusOverride); the calculation still runs and
+is shown beside it, and the override never carries into the next month.
 """
 from calendar import monthrange
 from collections import defaultdict
@@ -25,7 +27,7 @@ from billing.models import Load, LoadStop
 from dispatchers.utils import driver_pay_before_fee
 from users.models import CustomUser
 
-from .models import BonusRule, EmployeeSalary
+from .models import BonusOverride, BonusRule, EmployeeSalary
 
 ZERO = Decimal('0')
 CENT = Decimal('0.01')
@@ -156,6 +158,12 @@ def bonus_lines(days, rules):
     return sorted(lines, key=lambda d: d['date'], reverse=True)
 
 
+def overrides_for(first, last=None):
+    """(user id, month) -> amount set by hand, for one month or a run of months."""
+    qs = BonusOverride.objects.filter(month__gte=first, month__lte=last or first)
+    return {(o.user_id, o.month): o.amount for o in qs}
+
+
 def pay_for(setting, profit, bonus):
     fixed = setting.fixed_salary if setting else ZERO
     pct = setting.profit_percentage if setting else ZERO
@@ -200,7 +208,8 @@ def month_report(first, today=None):
             if line['bonus'] > ZERO:
                 bonus_days[uid] += 1
 
-    touched = set(profit) | set(bonus) | {uid for uid, s in settings.items() if s.month == first}
+    overrides = overrides_for(first)
+    touched = set(profit) | set(bonus) | {uid for uid, s in settings.items() if s.month == first} | {uid for uid, _ in overrides}
     users = (
         CustomUser.objects.select_related('department')
         .filter(Q(is_active=True) | Q(id__in=touched))
@@ -210,7 +219,9 @@ def month_report(first, today=None):
     rows = []
     for user in users:
         setting = settings.get(user.id)
-        fixed, commission, total = pay_for(setting, profit[user.id], bonus[user.id])
+        override = overrides.get((user.id, first))
+        paid_bonus = override if override is not None else bonus[user.id]
+        fixed, commission, total = pay_for(setting, profit[user.id], paid_bonus)
         rows.append({
             'user': user_dict(user),
             'fixed_salary': fixed if setting else None,
@@ -219,7 +230,9 @@ def month_report(first, today=None):
             'profit': money(profit[user.id]),
             'loads_count': count[user.id],
             'commission': commission,
-            'bonus': money(bonus[user.id]),
+            'bonus': money(paid_bonus),
+            'bonus_calculated': money(bonus[user.id]),
+            'bonus_override': money(override) if override is not None else None,
             'bonus_days': bonus_days[user.id],
             'total': total,
         })
@@ -266,7 +279,7 @@ def employee_detail(user, first, today=None):
             'user': user_dict(user), 'fixed_salary': fixed if setting else None,
             'profit_percentage': setting.profit_percentage if setting else None,
             'set_for': month_key(setting.month) if setting else None,
-            'profit': ZERO, 'loads_count': 0, 'commission': commission, 'bonus': ZERO, 'bonus_days': 0, 'total': total,
+            'profit': ZERO, 'loads_count': 0, 'commission': commission, 'bonus': ZERO, 'bonus_calculated': ZERO, 'bonus_override': None, 'bonus_days': 0, 'total': total,
         }
 
     loads = list(commission_loads(first).filter(booked_by=user).order_by('-pickup_date'))
@@ -322,6 +335,7 @@ def pay_history(user, first, rules):
     booked = defaultdict(list)
     for (_, day), d in days_of(booked_loads(earliest, first).filter(booked_by=user)).items():
         booked[day.replace(day=1)].append(d)
+    overrides = overrides_for(earliest, first)
 
     months = []
     cursor = first
@@ -330,7 +344,9 @@ def pay_history(user, first, rules):
         for row in settings_rows:
             if row.month <= cursor:
                 setting = row
-        bonus = sum((line['bonus'] for line in bonus_lines(booked.get(cursor, []), rules)), ZERO)
+        calculated = sum((line['bonus'] for line in bonus_lines(booked.get(cursor, []), rules)), ZERO)
+        override = overrides.get((user.id, cursor))
+        bonus = override if override is not None else calculated
         fixed, commission, total = pay_for(setting, pickup[cursor], bonus)
         months.append({
             'month': month_key(cursor),
@@ -340,6 +356,8 @@ def pay_history(user, first, rules):
             'loads_count': pickup_count[cursor],
             'commission': commission,
             'bonus': money(bonus),
+            'bonus_calculated': money(calculated),
+            'bonus_override': money(override) if override is not None else None,
             'total': total if (setting or bonus) else None,
         })
         cursor = add_months(cursor, -1)
@@ -347,10 +365,22 @@ def pay_history(user, first, rules):
 
 
 def save_salaries(first, items, by_user):
-    """Upsert the month's rows. An item with neither amount removes the row for that month, so
-    the employee goes back to whatever the earlier months said."""
+    """Upsert the month's rows. An item with neither salary amount removes the salary row for that
+    month, so the employee goes back to whatever the earlier months said. An item that carries
+    `bonus_override` sets the month's bonus by hand, or clears it back to the calculation when
+    null; an item without the key leaves the bonus alone."""
     for item in items:
         user_id = item['user']
+        if 'bonus_override' in item:
+            if item['bonus_override'] is None:
+                BonusOverride.objects.filter(user_id=user_id, month=first).delete()
+            else:
+                BonusOverride.objects.update_or_create(
+                    user_id=user_id, month=first,
+                    defaults={'amount': item['bonus_override'], 'updated_by': by_user, 'created_by': by_user},
+                )
+        if 'fixed_salary' not in item and 'profit_percentage' not in item:
+            continue
         fixed = item.get('fixed_salary')
         pct = item.get('profit_percentage')
         if fixed is None and pct is None:
