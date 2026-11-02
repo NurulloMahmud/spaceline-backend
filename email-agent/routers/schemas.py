@@ -17,6 +17,11 @@ class CreateNegotiationRequest(BaseModel):
     again: bool = Field(
         False, description="send another bid although a negotiation is already open on this load"
     )
+    body_html: Optional[str] = Field(
+        None,
+        max_length=100_000,
+        description="the email as the dispatcher sees it; omit to use the fixed template",
+    )
 
 
 class SendSuggestionRequest(BaseModel):

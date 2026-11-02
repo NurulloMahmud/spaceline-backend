@@ -158,7 +158,7 @@ POST {email-agent}/api/v1/negotiations
 
 Only `load_uuid` and `bid_amount` are required, but pass `driver_id`,
 `driver_amount` and `driver_bid_id` from the bid row whenever you have them —
-they populate the truck's dimensions and equipment in the email, and the
+they populate the truck's dimensions and type in the email, and the
 driver's pay when the load is eventually booked.
 
 **`201`** returns the negotiation (see §3.1). The bid email is already sent.
@@ -178,35 +178,31 @@ driver's pay when the load is eventually booked.
 
 ## The email that gets sent
 
-Fixed template, not AI-written. Rendered from the company profile, the
-dispatcher, the driver's vehicle, and the price the dispatcher typed:
+Not AI-written. Pass `body_html` with the email as the dispatcher sees it and
+that exact HTML is sent. Without it, the fixed template renders the same layout
+from the company profile, the dispatcher, the driver's vehicle, and the price
+the dispatcher typed. Either way it goes out as a reply to the load's Sylectus
+posting when the mailbox still has that email:
 
 ```
-RATE: $3,200
-
-DIMENSIONS: 288" x 96" x 96" / 12,000 lbs
-
-MILES OUT: 4
-
+All in: $3,200
+Miles out: 4
+ETA: 9mins
+Dimensions: 288 x 96 x 96 in
+Type: Large straight
 MC: 846834
-
-VEHICLE: Large Straight
-
-Truck equipment: Liftgate, Pallet Jack, Ramps: Yes
-
-ALL BIDS ARE VALID 15 MINUTES!
+ALL BIDS ARE VALID 15 MINS
 
 [company logo]
-
-SHIPLUXE LLC
-MC 846834
-Address: 10921 Reed Hartman Highway STE 323, Cincinnati, OH 45242
-Phone: 630-426-3362
+ShipLuxe LLC
+MC: 846834
+10921 Reed Hartman Highway STE 323, Cincinnati, OH 45242
++1 (630) 426-3362
 operation@shipluxellc.com
 
 Jane Dispatcher
-✉: operation@shipluxellc.com
-☎: 630-426-3362
+Dispatcher
+jane@shipluxellc.com
 ```
 
 The letterhead, logo and bid validity come from the **Company** record in the

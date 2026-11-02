@@ -125,6 +125,7 @@ async def create_negotiation(
     broker_email: Optional[str] = None,
     note: str = "",
     again: bool = False,
+    body_html: Optional[str] = None,
 ) -> models.Negotiation:
     account = (
         session.query(models.EmailAccount)
@@ -206,20 +207,16 @@ async def create_negotiation(
     else:
         reply_to_message_id = None
         subject = bid_email.build_subject(load_detail)
-    body = bid_email.build_html_body(
+    # The email the dispatcher was looking at when they pressed Send, edits and
+    # all. Callers with no composer get the same layout from the template.
+    body = (body_html or "").strip() or bid_email.build_html_body(
         bid_amount=bid_amount,
         load=load_detail,
         driver=driver,
         company=company,
         dispatcher=dispatcher,
     )
-    plain_body = bid_email.build_body(
-        bid_amount=bid_amount,
-        load=load_detail,
-        driver=driver,
-        company=company,
-        dispatcher=dispatcher,
-    )
+    plain_body = bid_email.html_to_text(body)
 
     negotiation = models.Negotiation(
         company_id=company_id,

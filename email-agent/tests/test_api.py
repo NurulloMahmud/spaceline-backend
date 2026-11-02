@@ -87,7 +87,7 @@ def test_bid_sends_the_email_and_opens_the_thread(
     assert len(stub_peers) == 1
     email = stub_peers[0]
     assert email["to_email"] == "broker@acme-logistics.com"
-    assert "RATE: $3,200" in email["body"]
+    assert '<span style="color: #15803d; font-weight: 700">$3,200</span>' in email["body"]
     assert "2,400" not in email["body"], "the driver's bid must not reach the broker"
 
     stored = session.query(models.EmailMessage).one()
