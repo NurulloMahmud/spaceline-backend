@@ -124,6 +124,17 @@ class DailyBonus(SalariesBase):
         october = self.row(month_report(OCT, today=date(2026, 11, 20)), self.dana)
         self.assertEqual(october['bonus'], D('0.00'))
 
+    def test_a_zero_amount_turns_the_bonus_off_from_its_date(self):
+        self.load(self.dana, central(2026, 11, 5), carrier='2000', driver='750')   # 1250 under the old rule: 100
+        self.load(self.dana, central(2026, 11, 12), carrier='2000', driver='750')  # after the switch-off: nothing
+        r = self.api(self.boss).post(reverse('salaries-bonus-rules'), {'effective_from': '2026-11-10', 'profit_step': '500', 'bonus_amount': '0'}, format='json')
+        self.assertEqual(r.status_code, 201)
+        report = month_report(NOV, today=date(2026, 11, 20))
+        self.assertEqual((self.row(report, self.dana)['bonus'], self.row(report, self.dana)['bonus_days']), (D('100.00'), 1))
+        self.assertEqual(report['rule']['bonus_amount'], D('0.00'))
+        december = month_report(date(2026, 12, 1), today=date(2026, 12, 5))
+        self.assertEqual(december['rule']['bonus_amount'], D('0.00'))
+
     def test_no_rule_means_no_bonus(self):
         BonusRule.objects.all().delete()
         self.load(self.dana, central(2026, 11, 6), carrier='2000', driver='750')
