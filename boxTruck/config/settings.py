@@ -54,6 +54,7 @@ MY_APPS = [
     'dispatchers',
     'charge',
     'accounting',
+    'salaries',
 ]
 
 INSTALLED_APPS = DJANGO_DEFAULT_APPS + THIRD_APPS + MY_APPS
