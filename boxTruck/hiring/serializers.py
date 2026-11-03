@@ -43,7 +43,7 @@ class DriverWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Driver
         fields = '__all__'
-        read_only_fields = ['current_location_updated_at']
+        read_only_fields = ['current_location_updated_at', 'hub_driver_id', 'hub_invite_id', 'hub_invite_status', 'hub_invited_at']
 
     def validate_phone_number(self, value):
         if not value:
@@ -67,6 +67,7 @@ class DriverViewSerializer(serializers.ModelSerializer):
     team = serializers.SerializerMethodField()
     dispatcher = serializers.SerializerMethodField()
     deposit = serializers.SerializerMethodField()
+    hub_status = serializers.ReadOnlyField()
 
     class Meta:
         model = Driver
@@ -356,6 +357,7 @@ class DriverListSerializer(serializers.ModelSerializer):
     status = DriverStatusSerializer()
     manager = serializers.SerializerMethodField()
     docs_count = serializers.SerializerMethodField()
+    hub_status = serializers.ReadOnlyField()
 
     class Meta:
         model = Driver
@@ -368,7 +370,11 @@ class DriverListSerializer(serializers.ModelSerializer):
             'created_at',
             'status',
             'manager',
-            'docs_count'
+            'docs_count',
+            'hub_status',
+            'hub_driver_id',
+            'hub_invite_status',
+            'hub_invited_at',
         ]
 
     def get_manager(self, obj):
@@ -827,6 +833,7 @@ class TrackingDriverSerializer(serializers.ModelSerializer):
     status = DriverStatusSerializer()
     dispatcher = serializers.SerializerMethodField()
     vehicle = serializers.SerializerMethodField()
+    hub_status = serializers.ReadOnlyField()
 
     class Meta:
         model = Driver
@@ -837,6 +844,7 @@ class TrackingDriverSerializer(serializers.ModelSerializer):
             'current_zip', 'current_city', 'current_state', 'current_address',
             'current_latitude', 'current_longitude', 'current_location_updated_at',
             'available_at', 'availability_note',
+            'hub_status', 'hub_driver_id', 'hub_invite_status', 'hub_invited_at',
             'updated_at',
         ]
 

@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from config.settings import config
 from database import models
 from database.connection import get_session
+from services.boxtruck import boxtruck
 from services import events, suggestions
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,8 @@ async def sweep_forever() -> None:
                 answered = close_answered_drafts(session)
                 if closed or answered:
                     session.commit()
+                for negotiation in closed:
+                    await boxtruck.report_bid_status(negotiation, "lost", note=negotiation.failure_reason)
         except asyncio.CancelledError:
             logger.info("stale-bid sweeper stopping")
             raise

@@ -61,6 +61,28 @@ def no_outbound_network(monkeypatch):
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", blocked)
 
 
+@pytest.fixture(autouse=True)
+def bid_status_reports(monkeypatch):
+    """
+    Every bid status relayed to the TMS for the driver hub, as (load, status).
+    Stubbed for every test so no suite call reaches the TMS; tests that care
+    read the list.
+    """
+    reports = []
+
+    async def record(negotiation, status, note=None):
+        reports.append((negotiation.load_uuid, status))
+        return True
+
+    def record_sync(negotiation, status, note=None):
+        reports.append((negotiation.load_uuid, status))
+        return True
+
+    monkeypatch.setattr(boxtruck, "report_bid_status", record)
+    monkeypatch.setattr(boxtruck, "report_bid_status_sync", record_sync)
+    return reports
+
+
 @pytest.fixture(scope="session", autouse=True)
 def schema():
     models.Base.metadata.drop_all(engine)

@@ -93,6 +93,44 @@ async def test_the_dispatcher_bid_is_recorded_on_the_board(
     assert bid["driver_amount"] == 2400
 
 
+async def test_a_placed_bid_is_relayed_to_the_driver_hub(
+    session, account, stubs, monkeypatch, bid_status_reports
+):
+    monkeypatch.setattr(
+        nylas, "send_message",
+        lambda **k: _async({"id": "msg-1", "thread_id": "thread-9"}),
+    )
+
+    await create_negotiation(
+        session=session,
+        company_id=1,
+        dispatcher_user_id=7,
+        load_uuid="load-uuid-1",
+        bid_amount=3200,
+        driver_id=42,
+        driver_amount=2400,
+    )
+    session.commit()
+
+    assert bid_status_reports == [("load-uuid-1", "placed")]
+
+
+def test_the_bid_status_payload_carries_what_the_hub_needs(load_snapshot):
+    negotiation = models.Negotiation(
+        company_id=1, load_uuid="load-uuid-1", load_snapshot=load_snapshot,
+        driver_id=42, driver_amount=2400, dispatcher_user_id=7, bid_amount=3200,
+        broker_email="broker@example.com", subject="Bid", status=models.BID_SENT,
+    )
+    payload = boxtruck._bid_status_payload(negotiation, "won", note="Booked")
+    assert payload["load_id"] == "load-uuid-1"
+    assert payload["status"] == "won"
+    assert payload["carrier_amount"] == 3200
+    assert payload["driver_amount"] == 2400
+    assert payload["driver_id"] == 42
+    assert payload["placed_by_user_id"] == 7
+    assert payload["note"] == "Booked"
+
+
 async def test_a_board_failure_does_not_undo_a_sent_email(
     session, account, stubs, monkeypatch
 ):

@@ -352,6 +352,10 @@ class StatementViewSet(viewsets.ModelViewSet):
             if previous_status in ["Approved", "Closed"] and 'status' not in updated_fields:
                 statement.status = StatementStatus.objects.get(name="Waiting Approval")
                 statement.save(update_fields=["status"])
+            # Approved means scheduled, Closed means paid: both reach the driver app.
+            if statement.status and statement.status.name in ("Approved", "Closed"):
+                from hub.payouts import sync_statement_payout
+                transaction.on_commit(lambda: sync_statement_payout(statement))
         return
 
 

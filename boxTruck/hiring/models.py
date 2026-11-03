@@ -77,8 +77,30 @@ class Driver(models.Model):
     # the location when the driver is on a load, off duty, or says "after X".
     available_at = models.DateTimeField(null=True, blank=True)
     availability_note = models.CharField(max_length=200, blank=True, default='')
+    # Driver Hub (the shared driver app). hub_driver_id is set once the driver
+    # accepted this carrier's invite and the hub pushed the profile here; the
+    # invite fields track the invite the Drivers page sent before that.
+    hub_driver_id = models.PositiveIntegerField(null=True, blank=True, unique=True)
+    hub_invite_id = models.PositiveIntegerField(null=True, blank=True)
+    hub_invite_status = models.CharField(max_length=20, null=True, blank=True)
+    hub_invited_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    HUB_CONNECTED = 'connected'
+    HUB_INVITED = 'invited'
+    HUB_DECLINED = 'declined'
+    HUB_NOT_INVITED = 'not_invited'
+
+    @property
+    def hub_status(self):
+        if self.hub_driver_id:
+            return self.HUB_CONNECTED
+        if self.hub_invite_status == 'declined':
+            return self.HUB_DECLINED
+        if self.hub_invite_id or self.hub_invite_status in ('pending', 'accepted', 'active'):
+            return self.HUB_INVITED
+        return self.HUB_NOT_INVITED
 
     def __str__(self):
         return self.full_name

@@ -145,4 +145,66 @@ class BoxTruckService:
         return resp.json()
 
 
+    # -- driver hub relay ---------------------------------------------------
+
+    @staticmethod
+    def _bid_status_payload(negotiation, status: str, note: Optional[str] = None) -> dict:
+        return {
+            "load_id": negotiation.load_uuid,
+            "status": status,
+            "carrier_amount": negotiation.effective_amount(),
+            "driver_amount": negotiation.driver_amount,
+            "driver_id": negotiation.driver_id,
+            "placed_by_user_id": negotiation.dispatcher_user_id,
+            "tenant_bid_id": str(negotiation.id),
+            "note": note or "",
+        }
+
+    async def report_bid_status(self, negotiation, status: str, note: Optional[str] = None) -> bool:
+        """
+        Tell the TMS what happened to a dispatcher bid, so a driver who bid on
+        the same load from the driver app hears about it. Best effort: the
+        negotiation already changed, and a hub outage must not undo that.
+        """
+        if not self.base_url:
+            return False
+        payload = self._bid_status_payload(negotiation, status, note)
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    f"{self.base_url}/api/hub/bid-status/",
+                    json=payload,
+                    headers=self._json_headers(),
+                )
+        except httpx.HTTPError as e:
+            logger.warning(f"bid status {status} for load {negotiation.load_uuid} not relayed: {e}")
+            return False
+        if resp.status_code != 200:
+            logger.warning(
+                f"bid status {status} for load {negotiation.load_uuid} -> {resp.status_code}: {resp.text[:200]}"
+            )
+        return resp.status_code == 200
+
+    def report_bid_status_sync(self, negotiation, status: str, note: Optional[str] = None) -> bool:
+        """Same as report_bid_status for callers that are not async (the close route)."""
+        if not self.base_url:
+            return False
+        payload = self._bid_status_payload(negotiation, status, note)
+        try:
+            with httpx.Client(timeout=10) as client:
+                resp = client.post(
+                    f"{self.base_url}/api/hub/bid-status/",
+                    json=payload,
+                    headers=self._json_headers(),
+                )
+        except httpx.HTTPError as e:
+            logger.warning(f"bid status {status} for load {negotiation.load_uuid} not relayed: {e}")
+            return False
+        if resp.status_code != 200:
+            logger.warning(
+                f"bid status {status} for load {negotiation.load_uuid} -> {resp.status_code}: {resp.text[:200]}"
+            )
+        return resp.status_code == 200
+
+
 boxtruck = BoxTruckService()

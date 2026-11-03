@@ -13,6 +13,7 @@ from rest_framework.exceptions import ValidationError
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework import status, viewsets, views, generics, parsers
+from rest_framework.decorators import action
 from django.db.models import Count, F, Q
 from django.http import Http404, QueryDict
 from hiring.google_maps import geocode_zip
@@ -128,6 +129,61 @@ class DriverViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             driver.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['post'], url_path='invite-app', permission_classes=[IsAuthenticated])
+    def invite_app(self, request, pk=None):
+        """
+        Invite the driver to the driver app through the Driver Hub.
+
+        Body may carry `email` to correct the address first. The hub answers
+        with the invite id and whether the driver already works with us
+        (`status: active`), both kept on the driver so the Drivers page can
+        show Connected / Invited / Declined.
+        """
+        from hub.services import driver_hub
+
+        driver = self.get_object()
+        email = (request.data.get('email') or driver.email or '').strip()
+        if not email:
+            return Response({'error': 'The driver has no email address.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not driver_hub.configured():
+            return Response({'error': 'The driver app is not configured on this server.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        user = request.user
+        invited_by = f'{user.first_name} {user.last_name}'.strip() or user.username
+        try:
+            result = driver_hub.invite(email, invited_by) or {}
+        except driver_hub.DriverHubError as exc:
+            code = status.HTTP_502_BAD_GATEWAY if exc.status_code >= 500 else status.HTTP_400_BAD_REQUEST
+            return Response({'error': f'The driver app did not accept the invite: {exc.detail}'}, status=code)
+
+        driver.email = email
+        driver.hub_invite_id = result.get('invite_id') or driver.hub_invite_id
+        driver.hub_invite_status = result.get('status') or 'pending'
+        driver.hub_invited_at = timezone.now()
+        hub_driver_id = result.get('hub_driver_id')
+        if driver.hub_invite_status == 'active' and hub_driver_id:
+            if not Driver.objects.filter(hub_driver_id=hub_driver_id).exclude(pk=driver.pk).exists():
+                driver.hub_driver_id = hub_driver_id
+                try:
+                    driver_hub.link_driver(hub_driver_id, driver.id)
+                except driver_hub.DriverHubError:
+                    pass
+        driver.save(update_fields=['email', 'hub_invite_id', 'hub_invite_status', 'hub_invited_at', 'hub_driver_id'])
+        DriverHistory.objects.create(
+            driver=driver,
+            changed_by=user,
+            description=f'Invited to the driver app at {email}',
+        )
+        return Response({
+            **result,
+            'driver_id': driver.id,
+            'email': email,
+            'hub_status': driver.hub_status,
+            'hub_invite_status': driver.hub_invite_status,
+            'hub_invited_at': driver.hub_invited_at,
+            'hub_driver_id': driver.hub_driver_id,
+        })
 
 
 class DriverDropdownAPIView(generics.ListAPIView):

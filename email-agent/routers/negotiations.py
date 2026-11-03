@@ -288,4 +288,5 @@ def close_negotiation(
         session, negotiation.id, suggestion_service.NEGOTIATION_CLOSED
     )
     session.flush()
+    boxtruck.report_bid_status_sync(negotiation, "lost", note="Closed by the dispatcher")
     return schemas.negotiation_to_out(negotiation)

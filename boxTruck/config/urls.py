@@ -44,6 +44,7 @@ urlpatterns = [
     path('api/mobile/', include('mobile.urls')),
     path('api/dispatchers/', include('dispatchers.urls')),
     path('api/salaries/', include('salaries.urls')),
+    path('api/hub/', include('hub.urls')),
     path('api/swagger<format>/', schema_view.without_ui(cache_timeout=0), name='schema-json'),
     path('api/swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),

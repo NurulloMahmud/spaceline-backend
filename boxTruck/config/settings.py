@@ -55,6 +55,7 @@ MY_APPS = [
     'charge',
     'accounting',
     'salaries',
+    'hub',
 ]
 
 INSTALLED_APPS = DJANGO_DEFAULT_APPS + THIRD_APPS + MY_APPS
@@ -318,6 +319,12 @@ INTERNAL_SERVICE_SECRET = config('INTERNAL_SERVICE_SECRET')
 # after a broker is created/updated here, instead of it finding out on its
 # own next 30s poll.
 ATREK_BASE_URL = config('ATREK_BASE_URL', default='https://spaceline.boxtruckmanage.com/api/v1')
+
+# Driver Hub (btm-driver-app): one shared driver app for every deployment.
+# DRIVER_HUB_TOKEN is the service token the hub issued to this deployment; it
+# is sent to the hub as a bearer token and expected back as X-Hub-Token.
+DRIVER_HUB_URL = config('DRIVER_HUB_URL', default='https://drivers.boxtruckmanage.com')
+DRIVER_HUB_TOKEN = config('DRIVER_HUB_TOKEN', default='')
 
 # billing service (FastAPI + Stripe) — the `charge` app proxies the frontend's
 # card / transaction / recurring calls to it, authenticated with our project API key.

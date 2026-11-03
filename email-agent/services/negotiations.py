@@ -289,6 +289,9 @@ async def create_negotiation(
     if not recorded:
         logger.error(f"negotiation {negotiation.id}: failed to record dispatcher bid in atrek")
 
+    # A driver who bid on this load from the driver app is told the carrier placed it.
+    await boxtruck.report_bid_status(negotiation, "placed", note=note or "Bid emailed to broker")
+
     events.publish(
         events.NEGOTIATION_UPDATED,
         company_id=company_id,

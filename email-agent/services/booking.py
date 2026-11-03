@@ -113,6 +113,7 @@ async def book_verified_load(
     )
 
     await notify_driver(negotiation, parsed)
+    await boxtruck.report_bid_status(negotiation, "won", note=f"Booked as load {negotiation.tms_load_id}")
 
     events.publish(
         events.LOAD_BOOKED,
