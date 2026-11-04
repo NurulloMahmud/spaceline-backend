@@ -104,8 +104,13 @@ class CustomAlertsView(views.APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        email = (getattr(request.user, 'email', '') or '').strip().lower()
-        if email not in settings.CUSTOM_ALERTS_EMAILS:
+        # Accounts sign in with their email as the username, and the email
+        # field itself is often empty, so either one may carry it.
+        identities = {
+            (getattr(request.user, field, '') or '').strip().lower()
+            for field in ('email', 'username')
+        }
+        if not identities & set(settings.CUSTOM_ALERTS_EMAILS):
             return Response({'error': 'Custom Alerts is not available for this account.'}, status=status.HTTP_403_FORBIDDEN)
         params = {k: v for k, v in request.query_params.items() if k in ('limit', 'hours')}
         try:
