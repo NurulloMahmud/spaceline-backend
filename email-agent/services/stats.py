@@ -25,22 +25,28 @@ def broker_response_stats(
     """
     Bids are the negotiations created in [start, end]. A bid counts as replied
     when it has an inbound email that is neither the Sylectus posting nor sent
-    from the company's own mailbox. Automatic replies count: they cannot be
-    told apart reliably.
+    from one of the company's own mailboxes. Automatic replies count: they
+    cannot be told apart reliably.
     """
-    own_address = (
-        session.query(models.EmailAccount.email_address)
+    # The company mailbox plus every dispatcher's own: mail from any of them
+    # is ours, not a broker answering.
+    own_addresses = [
+        address.lower()
+        for (address,) in session.query(models.EmailAccount.email_address)
         .filter(models.EmailAccount.company_id == company_id)
-        .scalar()
-    ) or ""
+        .all()
+        if address
+    ]
 
     sender = func.lower(func.coalesce(models.EmailMessage.from_email, ""))
-    replied = exists().where(
+    from_broker = [
         models.EmailMessage.negotiation_id == models.Negotiation.id,
         models.EmailMessage.direction == "inbound",
         sender.notlike(f"%{POSTING_SENDER_DOMAIN}"),
-        sender != own_address.lower(),
-    )
+    ]
+    if own_addresses:
+        from_broker.append(sender.notin_(own_addresses))
+    replied = exists().where(*from_broker)
 
     rows = (
         session.query(

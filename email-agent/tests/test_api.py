@@ -556,6 +556,23 @@ def test_stats_count_only_real_broker_replies(client, auth_headers, session, acc
     assert by_id[8]["bids_sent"] == 1 and by_id[8]["broker_replied"] == 0
 
 
+def test_stats_ignore_mail_from_every_company_mailbox(client, auth_headers, session, account, negotiation):
+    # A dispatcher's own mailbox sits next to the company one; mail from
+    # either is ours, and two accounts must not break the query.
+    session.add(models.EmailAccount(
+        company_id=1, user_id=7, nylas_grant_id="grant-7",
+        email_address="dispatcher@gmail.com",
+    ))
+    session.flush()
+    _msg(session, negotiation, "inbound", "Dispatcher@gmail.com")
+    session.commit()
+
+    data = client.get("/api/v1/negotiations/stats", headers=auth_headers).json()
+
+    assert data["bids_sent"] == 1
+    assert data["broker_replied"] == 0
+
+
 def test_stats_respect_the_period_and_company(client, auth_headers, session, negotiation):
     other = {"Authorization": f"Bearer {make_token(company='Smart Fleet LLC', company_id=2)}"}
 
