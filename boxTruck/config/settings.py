@@ -335,3 +335,11 @@ BILLING_CARD_RETURN_URL = config(
     'BILLING_CARD_RETURN_URL',
     default=config('FRONTEND_URL', default='http://localhost:5173/').rstrip('/') + '/billing/cards',
 )
+
+
+# Custom Alerts experiment: the sylectus service's HTTP API (local only) and
+# the accounts allowed to look at the comparison page.
+SYLECTUS_API_URL = config('SYLECTUS_API_URL', default='http://127.0.0.1:8002')
+CUSTOM_ALERTS_EMAILS = tuple(
+    e.strip().lower() for e in config('CUSTOM_ALERTS_EMAILS', default='nurullomahmud@gmail.com').split(',') if e.strip()
+)
