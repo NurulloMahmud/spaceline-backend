@@ -191,26 +191,59 @@ async def _bid(session, user_id=7):
 async def test_a_bid_leaves_from_the_dispatchers_own_mailbox_as_an_alert_reply(
     session, account, own_account, stubs, monkeypatch, load_snapshot  # noqa: F811
 ):
+    # The dispatcher's mailbox did not get the alert (or not yet): the bid
+    # still replies to it, by Message-ID.
     load_snapshot.update(POSTING)
     sent = []
+    searched = []
 
-    async def never_search(grant_id, rfc_id):
-        raise AssertionError("the personal mailbox never got the alert")
+    async def not_there(grant_id, rfc_id):
+        searched.append((grant_id, rfc_id))
+        return None
 
     async def fake_send(**kwargs):
         sent.append(kwargs)
         return {"id": "msg-out-1", "thread_id": "thread-own"}
 
-    monkeypatch.setattr(nylas, "find_message_by_rfc_id", never_search)
+    monkeypatch.setattr(nylas, "find_message_by_rfc_id", not_there)
     monkeypatch.setattr(nylas, "send_message", fake_send)
 
     negotiation = await _bid(session)
 
+    assert searched == [("grant-own-7", POSTING["email_message_id"])]
     assert sent[0]["grant_id"] == "grant-own-7"
     assert sent[0]["reply_to_message_id"] is None
     assert sent[0]["in_reply_to"] == POSTING["email_message_id"]
     assert sent[0]["subject"] == "Re: " + POSTING["email_subject"]
     assert negotiation.email_account_id == own_account.id
+
+
+async def test_a_bid_from_a_mailbox_that_holds_the_alert_replies_to_that_copy(
+    session, account, own_account, stubs, monkeypatch, load_snapshot  # noqa: F811
+):
+    # The dispatcher is on the Sylectus alert list, so their mailbox has the
+    # posting: the bid replies to it by Nylas id, which is what makes Gmail
+    # show posting and bid as one conversation on their side.
+    load_snapshot.update(POSTING)
+    sent = []
+
+    async def found(grant_id, rfc_id):
+        assert grant_id == "grant-own-7"
+        return {"id": "nylas-own-posting", "subject": POSTING["email_subject"]}
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+        return {"id": "msg-out-1", "thread_id": "thread-own-posting"}
+
+    monkeypatch.setattr(nylas, "find_message_by_rfc_id", found)
+    monkeypatch.setattr(nylas, "send_message", fake_send)
+
+    negotiation = await _bid(session)
+
+    assert sent[0]["reply_to_message_id"] == "nylas-own-posting"
+    assert sent[0]["in_reply_to"] is None
+    assert sent[0]["subject"] == "Re: " + POSTING["email_subject"]
+    assert negotiation.nylas_thread_id == "thread-own-posting"
 
 
 async def test_a_dispatcher_without_their_own_mailbox_uses_the_shared_one(

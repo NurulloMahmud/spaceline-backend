@@ -266,15 +266,16 @@ async def create_negotiation(
         )
 
     # Reply to the broker's posting email when we can, so the bid sits in the
-    # conversation they started instead of opening a second one. The alert is
-    # read from a separate listening mailbox, so the sending mailbox usually
-    # never received it: the reply then goes by the alert's Message-ID, which
-    # Sylectus gives every recipient alike. When the shared mailbox does hold
-    # the alert, replying to that copy also threads it on our side.
+    # conversation they started instead of opening a second one. When the
+    # sending mailbox holds the alert itself (it is on the Sylectus alert
+    # list), the bid replies to that copy: Nylas then hands Gmail the thread,
+    # and the dispatcher sees posting and bid together in their own mailbox.
+    # Otherwise the reply goes by the alert's Message-ID, which Sylectus gives
+    # every recipient alike; the broker threads it just the same.
     in_reply_to = (load_detail.get("email_message_id") or "").strip() or None
     posting_subject = load_detail.get("email_subject") if in_reply_to else None
     reply_to_message_id = None
-    if account.user_id is None and in_reply_to:
+    if in_reply_to:
         reply_to_message_id, found_subject = await find_posting_email(account, load_detail)
         if reply_to_message_id:
             in_reply_to = None
