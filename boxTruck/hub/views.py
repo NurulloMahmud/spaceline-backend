@@ -1,8 +1,5 @@
 import logging
 
-import requests
-from django.conf import settings
-
 from rest_framework import status, views
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -92,34 +89,3 @@ class HubBidStatusView(views.APIView):
             target_ids=target_ids,
         )
         return Response({'targets': reached})
-
-
-class CustomAlertsView(views.APIView):
-    """
-    The Custom Alerts experiment (sylectus/app/smtp_source.py): Sylectus
-    alerts received by our own mail server, with how far ahead of the Gmail
-    path each one was. Proxied from the sylectus API, which only listens on
-    this machine. Who may look is settings.CUSTOM_ALERTS_EMAILS.
-    """
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        # Accounts sign in with their email as the username, and the email
-        # field itself is often empty, so either one may carry it.
-        identities = {
-            (getattr(request.user, field, '') or '').strip().lower()
-            for field in ('email', 'username')
-        }
-        if not identities & set(settings.CUSTOM_ALERTS_EMAILS):
-            return Response({'error': 'Custom Alerts is not available for this account.'}, status=status.HTTP_403_FORBIDDEN)
-        params = {k: v for k, v in request.query_params.items() if k in ('limit', 'hours')}
-        try:
-            resp = requests.get(f"{settings.SYLECTUS_API_URL.rstrip('/')}/custom-alerts", params=params, timeout=15)
-        except requests.RequestException as exc:
-            logger.error('custom alerts: sylectus API unreachable: %s', exc)
-            return Response({'error': 'The custom alerts service is not reachable right now.'}, status=status.HTTP_502_BAD_GATEWAY)
-        try:
-            body = resp.json()
-        except ValueError:
-            body = {'error': resp.text[:300]}
-        return Response(body, status=resp.status_code)
