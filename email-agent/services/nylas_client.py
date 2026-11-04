@@ -2,6 +2,7 @@
 Nylas v3 wrapper. Uses the REST API over httpx rather than the SDK so every
 call stays async and the failure surface is a single place.
 """
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -16,6 +17,22 @@ logger = logging.getLogger(__name__)
 
 class NylasError(Exception):
     pass
+
+
+class NylasRateLimited(NylasError):
+    """
+    The provider (Gmail, mostly) refused the call for this mailbox because its
+    per-user quota is used up. It is not the request's fault: the same call
+    works again once the minute's window moves on. Gmail spends that quota on
+    everything touching the mailbox, and the first minutes after a grant is
+    connected, when Nylas back-fills a mailbox that takes thousands of Sylectus
+    alerts a day, are when it runs out.
+    """
+
+
+# Pauses before a throttled send is tried again. Short on purpose: the
+# dispatcher is waiting on the button.
+SEND_RETRY_DELAYS = (2, 5)
 
 
 class NylasService:
@@ -127,14 +144,25 @@ class NylasService:
 
         # Ask for the threading headers Nylas actually wrote, so the log shows
         # whether a reply really went out as one. This is a synchronous send,
-        # the only kind the option works on.
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{self.base_url}/v3/grants/{grant_id}/messages/send",
-                params={"fields": "include_basic_headers"},
-                json=payload,
-                headers=self.headers,
+        # the only kind the option works on. A 429 means nothing left the
+        # mailbox, so trying again cannot send the bid twice.
+        for attempt, delay in enumerate(SEND_RETRY_DELAYS + (None,)):
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{self.base_url}/v3/grants/{grant_id}/messages/send",
+                    params={"fields": "include_basic_headers"},
+                    json=payload,
+                    headers=self.headers,
+                )
+            if resp.status_code != 429 or delay is None:
+                break
+            logger.warning(
+                f"send of '{subject}' from grant {grant_id} was rate-limited "
+                f"(attempt {attempt + 1}); trying again in {delay}s"
             )
+            await asyncio.sleep(delay)
+        if resp.status_code == 429:
+            raise NylasRateLimited(f"send failed (429): {resp.text[:400]}")
         if resp.status_code not in (200, 201):
             raise NylasError(f"send failed ({resp.status_code}): {resp.text[:400]}")
         data = resp.json().get("data", {})
@@ -230,6 +258,8 @@ class NylasService:
                     "on its body", grant_id, resp.text[:200],
                 )
                 resp = await client.get(url, headers=self.headers)
+        if resp.status_code == 429:
+            raise NylasRateLimited(f"get message failed (429): {resp.text[:400]}")
         if resp.status_code != 200:
             raise NylasError(f"get message failed ({resp.status_code}): {resp.text[:400]}")
         return resp.json().get("data", {})

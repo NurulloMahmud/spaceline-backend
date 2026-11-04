@@ -14,7 +14,7 @@ import pytest
 
 from database import models
 from services import inbound
-from services.nylas_client import NylasError, nylas
+from services.nylas_client import NylasError, NylasRateLimited, nylas
 from tests.test_auth import make_token
 
 SECRET = b"test-webhook-secret"
@@ -217,6 +217,74 @@ def test_a_failed_fetch_leaves_the_message_for_nylas_to_retry(
     assert post(client, message_created, sign(message_created)).status_code == 200
     assert capture["inbound"] == ["msg-1"]
     assert session.query(models.ProcessedWebhook).count() == 1
+
+
+def test_a_sylectus_alert_is_dropped_without_a_fetch(client, account, capture, session):
+    """Every mailbox on the alert list gets the posting; only the listening
+    mailbox needs it, and each fetch spends the mailbox's Gmail quota."""
+    body = delivery(
+        "message.created",
+        {
+            "id": "alert-1", "grant_id": "grant-1", "thread_id": "t-alert",
+            "subject": "CARGO VAN from Atlanta, GA to Nashville, TN - Alliance Posted Load",
+            "from": [{"name": "Posted Loads", "email": "postedloads@sylectus.com"}],
+        },
+    )
+    resp = post(client, body, sign(body))
+    assert resp.status_code == 200
+    assert resp.json()["ignored"] == "sylectus-alert"
+    assert capture["fetched"] == []
+    assert session.query(models.ProcessedWebhook).count() == 0
+
+
+def test_a_rate_limited_fetch_is_retried_after_a_pause(
+    client, account, message_created, capture, session, monkeypatch
+):
+    """Nylas does not redeliver after our 200, so a fetch Gmail throttled is
+    retried here; the pauses are skipped in the test."""
+    from routers import webhooks
+
+    working = nylas.get_message
+    attempts = {"n": 0}
+    slept = []
+
+    async def throttled_twice(grant_id, message_id):
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise NylasRateLimited("429 quota exceeded")
+        return await working(grant_id, message_id)
+
+    async def no_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(nylas, "get_message", throttled_twice)
+    monkeypatch.setattr(webhooks.asyncio, "sleep", no_sleep)
+
+    assert post(client, message_created, sign(message_created)).status_code == 200
+    assert slept == [5, 15]
+    assert capture["inbound"] == ["msg-1"]
+    assert session.query(models.ProcessedWebhook).count() == 1
+
+
+def test_a_fetch_still_throttled_after_the_retries_is_given_up(
+    client, account, message_created, capture, session, monkeypatch, caplog
+):
+    from routers import webhooks
+
+    async def always(grant_id, message_id):
+        raise NylasRateLimited("429 quota exceeded")
+
+    async def no_sleep(seconds):
+        pass
+
+    monkeypatch.setattr(nylas, "get_message", always)
+    monkeypatch.setattr(webhooks.asyncio, "sleep", no_sleep)
+
+    with caplog.at_level("ERROR"):
+        assert post(client, message_created, sign(message_created)).status_code == 200
+    assert capture["inbound"] == []
+    assert session.query(models.ProcessedWebhook).count() == 0
+    assert "giving up" in caplog.text
 
 
 def test_a_failure_inside_the_pipeline_also_stays_retryable(

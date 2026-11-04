@@ -14,7 +14,7 @@ from database import models
 from routers.accounts import _sign, _sign_personal
 from services import inbound
 from services.negotiations import NegotiationError, create_negotiation
-from services.nylas_client import nylas
+from services.nylas_client import nylas, NylasRateLimited
 from tests.test_auth import make_token
 from tests.test_negotiation_service import POSTING, stubs  # noqa: F401
 
@@ -416,6 +416,56 @@ class _Response:
 
     def json(self):
         return {"data": {"id": "out-1"}}
+
+
+async def test_a_throttled_send_is_tried_again_then_reported(monkeypatch):
+    from services import nylas_client
+
+    posts = []
+    slept = []
+
+    class _Throttled(_Response):
+        status_code = 429
+        text = '{"error":{"type":"quota_exceeded_error","message":"Activity limit reached"}}'
+
+    async def post(self, url, **kwargs):
+        posts.append(kwargs["json"])
+        return _Throttled()
+
+    async def no_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    monkeypatch.setattr(nylas_client.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(NylasRateLimited):
+        await nylas.send_message(grant_id="g", to_email="b@x.com", subject="s", body="b")
+
+    assert len(posts) == 3
+    assert slept == [2, 5]
+
+
+async def test_a_rate_limited_mailbox_tells_the_dispatcher_to_wait(
+    session, account, own_account, stubs, monkeypatch, load_snapshot  # noqa: F811
+):
+    load_snapshot.update(POSTING)
+
+    async def not_there(grant_id, rfc_id):
+        return None
+
+    async def throttled(**kwargs):
+        raise NylasRateLimited("send failed (429): quota exceeded")
+
+    monkeypatch.setattr(nylas, "find_message_by_rfc_id", not_there)
+    monkeypatch.setattr(nylas, "send_message", throttled)
+
+    with pytest.raises(NegotiationError) as err:
+        await _bid(session)
+
+    assert err.value.status_code == 429
+    assert err.value.code == "mailbox_rate_limited"
+    assert own_account.email_address in err.value.message
+    assert "Wait a minute" in err.value.message
 
 
 async def test_the_alert_reply_headers_reach_nylas(monkeypatch):

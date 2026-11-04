@@ -10,6 +10,7 @@ is rejected.
 Answers fast and processes in the background: Nylas retries on a slow or
 failed response, and the AI + parse pipeline takes far longer than its timeout.
 """
+import asyncio
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
@@ -18,13 +19,24 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from database import models
 from database.connection import get_session
 from services import inbound
-from services.nylas_client import NylasError, nylas
+from services.nylas_client import NylasError, NylasRateLimited, nylas
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/internal/v1/webhooks", tags=["webhooks"])
 
 MESSAGE_TRIGGERS = ("message.created",)
+
+# Sylectus "Posted loads" alerts. The listening mailbox turns them into loads;
+# every other mailbox on the alert list gets a copy that is of no use here, and
+# fetching each one costs the mailbox's Gmail quota, which is what the bid
+# send runs on. Recognised from the delivery itself, so no fetch at all.
+ALERT_SENDER_DOMAIN = "sylectus.com"
+
+# Pauses before a throttled fetch is tried again. Nylas does not redeliver a
+# message once we have answered 200, so a fetch the provider refused has to be
+# retried here or the broker's reply is gone.
+FETCH_RETRY_DELAYS = (5, 15, 45)
 
 # A grant dies when the mailbox owner revokes access or their provider
 # password changes. Nothing arrives after that and every send fails, so the
@@ -72,8 +84,23 @@ async def nylas_webhook(
         logger.warning(f"webhook {trigger} missing grant or message id")
         return JSONResponse({"ok": True, "ignored": "incomplete"})
 
+    if is_sylectus_alert(obj):
+        logger.debug(f"webhook message {message_id}: Sylectus alert, not fetched")
+        return JSONResponse({"ok": True, "ignored": "sylectus-alert"})
+
     background.add_task(process_message, grant_id, message_id)
     return JSONResponse({"ok": True})
+
+
+def is_sylectus_alert(obj: dict) -> bool:
+    """A posting alert, told by its sender in the delivery payload. A payload
+    without sender fields is simply processed as before."""
+    for field in ("from", "reply_to"):
+        for entry in obj.get(field) or []:
+            email = (entry.get("email") or "").lower() if isinstance(entry, dict) else ""
+            if email.endswith("@" + ALERT_SENDER_DOMAIN):
+                return True
+    return False
 
 
 def mark_grant_dead(grant_id: str, status: str) -> None:
@@ -101,6 +128,29 @@ async def process_message(grant_id: str, message_id: str) -> None:
     """
     Runs after the webhook response.
 
+    A fetch the provider throttled is tried again after a pause, a few times;
+    the claim rolled back with the failed attempt, so the retry starts clean.
+    """
+    for delay in FETCH_RETRY_DELAYS + (None,):
+        try:
+            await _process_once(grant_id, message_id)
+            return
+        except NylasRateLimited as e:
+            if delay is None:
+                logger.error(
+                    f"message {message_id} on grant {grant_id}: the provider kept "
+                    f"rate-limiting the fetch, giving up on it: {e}"
+                )
+                return
+            logger.warning(
+                f"message {message_id} on grant {grant_id}: fetch rate-limited by "
+                f"the provider, trying again in {delay}s"
+            )
+            await asyncio.sleep(delay)
+
+
+async def _process_once(grant_id: str, message_id: str) -> None:
+    """
     The whole body is one transaction. Anything that goes wrong rolls it back,
     including the processed-webhook claim, so the message is genuinely retried
     when Nylas redelivers it instead of being marked done and dropped.
@@ -143,6 +193,8 @@ async def process_message(grant_id: str, message_id: str) -> None:
                 return
 
             await inbound.handle_inbound_message(session, account, message)
+    except NylasRateLimited:
+        raise
     except NylasError as e:
         logger.error(f"could not fetch message {message_id}, leaving it for retry: {e}")
     except Exception:
