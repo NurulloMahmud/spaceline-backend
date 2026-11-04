@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 from database.connection import init_db  # noqa: E402
 from routers import accounts, conversations, events, negotiations, suggestions, webhooks  # noqa: E402
-from services import maintenance  # noqa: E402
+from services import maintenance, shared_inbox  # noqa: E402
 
 
 @asynccontextmanager
@@ -27,13 +27,15 @@ async def lifespan(app: FastAPI):
     init_db()
 
     sweeper = asyncio.create_task(maintenance.sweep_forever())
+    reader = asyncio.create_task(shared_inbox.poll_forever())
     logger.info("email-agent ready on port %s", config.PORT)
     try:
         yield
     finally:
-        sweeper.cancel()
-        with suppress(asyncio.CancelledError):
-            await sweeper
+        for task in (reader, sweeper):
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 app = FastAPI(

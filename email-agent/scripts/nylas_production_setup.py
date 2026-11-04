@@ -29,7 +29,13 @@ import time
 
 import httpx
 
-TRIGGERS = ["message.created", "grant.expired", "grant.deleted"]
+# Grant events only. `message.created` is deliberately absent: it makes Nylas
+# read every new message in every connected mailbox, which Gmail charges to
+# each mailbox's own API quota, and a mailbox on the Sylectus alert list runs
+# out of it. Broker replies reach the service through the shared mailbox,
+# read over IMAP (services.shared_inbox). scripts.nylas_webhook_triggers
+# changes an existing webhook without replacing it.
+TRIGGERS = ["grant.expired", "grant.deleted"]
 
 
 def read_env(path: str) -> list[str]:

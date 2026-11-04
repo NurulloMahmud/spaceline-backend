@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from database import models
 from services import events
+from services.mailboxes import catcher_headers
 from services.negotiations import NegotiationError, reply_subject, thread_mailbox
 from services.nylas_client import NylasError, nylas
 
@@ -114,14 +115,21 @@ async def send(
             code="mailbox_not_connected",
         )
 
+    # The broker's message this answers. Its Nylas id threads the reply
+    # inside the mailbox that holds it; a message read from the shared
+    # mailbox over IMAP has no Nylas id, and the RFC Message-ID threads it on
+    # the broker's side just the same.
     reply_to = None
+    in_reply_to = None
     if suggestion.in_reply_to_message_id:
         source = (
             session.query(models.EmailMessage)
             .filter(models.EmailMessage.id == suggestion.in_reply_to_message_id)
             .first()
         )
-        reply_to = source.nylas_message_id if source else None
+        if source:
+            reply_to = source.nylas_message_id
+            in_reply_to = source.rfc_message_id
 
     try:
         sent = await nylas.send_message(
@@ -130,6 +138,8 @@ async def send(
             subject=final_subject,
             body=final_body.replace("\n", "<br>"),
             reply_to_message_id=reply_to,
+            in_reply_to=in_reply_to,
+            **catcher_headers(session, account),
         )
     except NylasError as e:
         logger.error(f"suggestion {suggestion_id} send failed: {e}")
@@ -148,6 +158,7 @@ async def send(
         models.EmailMessage(
             negotiation_id=negotiation.id,
             nylas_message_id=sent.get("id"),
+            rfc_message_id=nylas.sent_rfc_id(sent),
             direction="outbound",
             from_email=account.email_address,
             to_email=negotiation.broker_email,

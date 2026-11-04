@@ -112,12 +112,17 @@ class NylasService:
         reply_to_message_id: Optional[str] = None,
         thread_id: Optional[str] = None,
         in_reply_to: Optional[str] = None,
+        reply_to: Optional[list[str]] = None,
+        cc: Optional[list[str]] = None,
     ) -> dict:
         """
         `reply_to_message_id` replies to a message inside this mailbox.
         `in_reply_to` replies to one that never reached it, by RFC Message-ID:
         a dispatcher's own mailbox never got the Sylectus alert, but the
         broker's mail client threads on these headers all the same.
+        `reply_to` and `cc` bring the broker's answer to a mailbox that is
+        read (see services.mailboxes); the Cc is dropped on a test server
+        that redirects mail, so nothing but the redirect address gets it.
         """
         if config.EMAIL_REDIRECT_TO:
             logger.warning(
@@ -132,6 +137,10 @@ class NylasService:
             "subject": subject,
             "body": body,
         }
+        if reply_to:
+            payload["reply_to"] = [{"email": e} for e in reply_to if e]
+        if cc and not config.EMAIL_REDIRECT_TO:
+            payload["cc"] = [{"email": e} for e in cc if e]
         if reply_to_message_id:
             payload["reply_to_message_id"] = reply_to_message_id
         elif in_reply_to:
@@ -168,6 +177,21 @@ class NylasService:
         data = resp.json().get("data", {})
         self._log_threading(data, subject, reply_to_message_id, in_reply_to)
         return data
+
+    @staticmethod
+    def sent_rfc_id(data: dict) -> Optional[str]:
+        """
+        The RFC Message-ID Nylas wrote on a message it just sent, from the
+        headers `fields=include_basic_headers` adds to the send response.
+        None when the provider returned none. Stored on the outbound row so
+        the broker's answer, which quotes it in In-Reply-To, finds the
+        negotiation whichever mailbox it lands in.
+        """
+        for h in data.get("headers") or []:
+            if isinstance(h, dict) and str(h.get("name", "")).lower() == "message-id":
+                value = str(h.get("value") or "").strip().strip("<>").strip()
+                return value or None
+        return None
 
     @staticmethod
     def _log_threading(

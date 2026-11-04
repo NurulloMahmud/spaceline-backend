@@ -98,7 +98,8 @@ def is_sylectus_alert(obj: dict) -> bool:
     for field in ("from", "reply_to"):
         for entry in obj.get(field) or []:
             email = (entry.get("email") or "").lower() if isinstance(entry, dict) else ""
-            if email.endswith("@" + ALERT_SENDER_DOMAIN):
+            domain = email.rsplit("@", 1)[-1] if "@" in email else ""
+            if domain == ALERT_SENDER_DOMAIN or domain.endswith("." + ALERT_SENDER_DOMAIN):
                 return True
     return False
 

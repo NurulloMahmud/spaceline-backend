@@ -106,6 +106,22 @@ class Config:
             return True
         return str(user_id) in {part.strip() for part in allowed.split(",") if part.strip()}
 
+    # The shared mailbox that catches broker replies. An email sent from a
+    # dispatcher's own mailbox names it as Reply-To (next to the dispatcher)
+    # and Cc, and this service reads it over IMAP with an app password. Nylas
+    # no longer watches any mailbox: Gmail charges every read it makes against
+    # the mailbox's own API quota, and a mailbox on the Sylectus alert list
+    # spends that quota on alerts, so bids sent from it were refused. Both
+    # values empty leaves the reader off.
+    SHARED_INBOX_ADDRESS: str = os.getenv("SHARED_INBOX_ADDRESS", "").strip().lower()
+    SHARED_INBOX_APP_PASSWORD: str = os.getenv("SHARED_INBOX_APP_PASSWORD", "")
+    SHARED_INBOX_IMAP_HOST: str = os.getenv("SHARED_INBOX_IMAP_HOST", "imap.gmail.com")
+    SHARED_INBOX_FOLDER: str = os.getenv("SHARED_INBOX_FOLDER", "INBOX")
+    SHARED_INBOX_POLL_SECONDS: int = _int("SHARED_INBOX_POLL_SECONDS", 15)
+
+    def shared_inbox_enabled(self) -> bool:
+        return bool(self.SHARED_INBOX_ADDRESS and self.SHARED_INBOX_APP_PASSWORD)
+
     # openai
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")

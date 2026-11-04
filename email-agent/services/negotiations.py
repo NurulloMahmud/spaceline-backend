@@ -16,6 +16,7 @@ from database import models
 from services import bid_email, events
 from services.atrek import atrek
 from services.boxtruck import boxtruck
+from services.mailboxes import catcher_headers
 from services.nylas_client import NylasError, NylasRateLimited, nylas
 
 logger = logging.getLogger(__name__)
@@ -324,13 +325,13 @@ async def create_negotiation(
             body=body,
             reply_to_message_id=reply_to_message_id,
             in_reply_to=in_reply_to,
+            **catcher_headers(session, account),
         )
     except NylasRateLimited as e:
         logger.error(f"bid email for load {load_uuid} was rate-limited by the provider: {e}")
         raise NegotiationError(
             f"Gmail is rate-limiting {account.email_address} right now, so the bid "
-            f"was not sent. This is normal for a few minutes after connecting the "
-            f"mailbox. Wait a minute and send it again.",
+            f"was not sent. Wait a minute and send it again.",
             status_code=429,
             code="mailbox_rate_limited",
         )
@@ -355,6 +356,7 @@ async def create_negotiation(
         models.EmailMessage(
             negotiation_id=negotiation.id,
             nylas_message_id=sent.get("id"),
+            rfc_message_id=nylas.sent_rfc_id(sent),
             direction="outbound",
             from_email=account.email_address,
             to_email=resolved_email,

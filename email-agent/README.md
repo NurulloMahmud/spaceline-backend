@@ -29,9 +29,13 @@ atrek (Go)          load feed + bid board          driver bids, dispatcher bids
 
 1. A dispatcher clicks **Bid** on the bid board and names a price.
    `POST /api/v1/negotiations` renders the fixed bid-email template and sends it
-   to the broker from the company's shared dispatch mailbox (Nylas).
-2. The broker replies. The Nylas webhook fires, the agent classifies the message
-   and drafts a reply. The dispatcher can **ignore**, **send**, or **edit & send**.
+   to the broker from the dispatcher's own mailbox (Nylas), or from the
+   company's shared dispatch mailbox for dispatchers without one. A bid from
+   a dispatcher's mailbox names the shared mailbox as Reply-To and Cc.
+2. The broker replies. The answer lands in the shared mailbox, which the
+   service reads over IMAP (`services/shared_inbox.py`); the agent classifies
+   the message and drafts a reply. The dispatcher can **ignore**, **send**, or
+   **edit & send**.
    *Nothing is ever auto-sent to a broker except that first bid email.*
 3. The broker sends a rate confirmation. The agent parses it through the TMS's
    existing parser and verifies it:
@@ -111,14 +115,45 @@ curl -X POST https://api.us.nylas.com/v3/applications/callback-uris \
 
 curl -X POST https://api.us.nylas.com/v3/webhooks \
   -H "Authorization: Bearer $NYLAS_API_KEY" -H "Content-Type: application/json" \
-  -d '{"trigger_types":["message.created","grant.expired","grant.deleted"],
+  -d '{"trigger_types":["grant.expired","grant.deleted"],
        "webhook_url":"https://spaceline.boxtruckmanage.com/email-agent/internal/v1/webhooks/nylas",
        "description":"email-agent inbound broker mail"}'
 ```
 
 The webhook response carries `webhook_secret` **once**. Put it in
 `NYLAS_WEBHOOK_SECRET` before the service handles traffic; until it matches,
-every delivery is rejected with a 401 and the broker replies are lost.
+every delivery is rejected with a 401.
+
+The webhook carries grant events only. `message.created` used to be on it,
+and it made Nylas read every new message in every connected mailbox. Gmail
+charges those reads to each mailbox's own API quota (6,000 units a minute per
+user on this project), and a dispatcher mailbox on the Sylectus alert list
+spends that on alerts, so bids sent from it were refused with 429. Broker
+replies now reach the service through the shared mailbox instead: see
+*Shared mailbox over IMAP* below. `python -m scripts.nylas_webhook_triggers
+--webhook-url ...` takes `message.created` off an existing webhook without
+replacing it.
+
+### Shared mailbox over IMAP
+
+Every email a dispatcher's own mailbox sends names the company's shared
+mailbox as Reply-To (next to the dispatcher) and Cc, so the broker's answer
+reaches both. The service polls the shared mailbox with an app password:
+
+| Env | Meaning |
+|---|---|
+| `SHARED_INBOX_ADDRESS` | the shared mailbox, which must also be connected as the company's shared `EmailAccount` |
+| `SHARED_INBOX_APP_PASSWORD` | its Gmail app password |
+| `SHARED_INBOX_IMAP_HOST` | default `imap.gmail.com` |
+| `SHARED_INBOX_FOLDER` | default `INBOX` |
+| `SHARED_INBOX_POLL_SECONDS` | default 15 |
+
+Both of the first two empty leaves the reader off. It keeps its place in
+`shared_inbox_cursors` and starts at the folder's end the first time it sees
+it. Messages from any of the company's own mailboxes (the Cc copy of a bid)
+and Sylectus alerts are skipped. A reply matches its negotiation by the
+Message-IDs it quotes in In-Reply-To and References, which every outbound
+row now records, before the subject-and-broker fallback.
 
 `grant.expired` and `grant.deleted` set the company's mailbox `status` to
 `expired`/`revoked`, which `GET /api/v1/accounts` reports so a dispatcher is
@@ -176,7 +211,9 @@ database/connection.py   engine, session factory, FastAPI dependency
 services/
   auth.py                Django JWT validation, company scoping
   negotiations.py        starting a bid (the only auto-sent email)
-  inbound.py             webhook → classify → suggest or verify
+  inbound.py             broker message → classify → suggest or verify
+  shared_inbox.py        the shared mailbox over IMAP, feeding inbound.py
+  mailboxes.py           Reply-To and Cc that route answers to the shared mailbox
   booking.py             verified ratecon → TMS load → driver notice
   suggestions.py         ignore / send / edit & send
   ai.py                  every model call, all schema-constrained JSON

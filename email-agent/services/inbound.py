@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from html import unescape
 from typing import Optional
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, true
 from sqlalchemy.orm import Session
 
 from database import models
@@ -183,6 +183,7 @@ def match_negotiation(
     account: models.EmailAccount,
     message: dict,
     counterparties: set[str],
+    across_accounts: bool = False,
 ) -> Optional[models.Negotiation]:
     """
     Find the negotiation a mailbox message belongs to.
@@ -202,9 +203,19 @@ def match_negotiation(
     Only negotiations this mailbox sent are candidates: a dispatcher's own
     inbox must never adopt a thread the shared mailbox is carrying, or the
     reverse. Negotiations from before personal mailboxes carry no account and
-    belong to the shared one.
+    belong to the shared one. The exception is `across_accounts`: the shared
+    mailbox read over IMAP catches the answers to every mailbox's bids, so
+    there every negotiation of the company is a candidate.
+
+    Between the thread and the subject comes the answer's own evidence: the
+    Message-IDs it quotes in In-Reply-To and References. An outbound row that
+    recorded its Message-ID is found by it whichever mailbox the answer
+    reached, which is how a reply to a bid sent from a dispatcher's mailbox
+    is recognised in the shared one.
     """
-    if account.user_id is None:
+    if across_accounts:
+        owned = true()
+    elif account.user_id is None:
         owned = or_(
             models.Negotiation.email_account_id == account.id,
             models.Negotiation.email_account_id.is_(None),
@@ -224,6 +235,29 @@ def match_negotiation(
             .first()
         )
         if negotiation:
+            return negotiation
+
+    referenced = referenced_ids(message)
+    if referenced:
+        row = (
+            session.query(models.EmailMessage)
+            .join(models.Negotiation, models.EmailMessage.negotiation_id == models.Negotiation.id)
+            .filter(
+                models.Negotiation.company_id == account.company_id,
+                owned,
+                models.EmailMessage.rfc_message_id.in_(sorted(referenced)),
+            )
+            .order_by(models.EmailMessage.created_at.desc())
+            .first()
+        )
+        if row:
+            negotiation = row.negotiation
+            if not negotiation.nylas_thread_id and thread_id:
+                negotiation.nylas_thread_id = thread_id
+            logger.info(
+                f"negotiation {negotiation.id}: matched message on the Message-ID it "
+                f"answers ({row.rfc_message_id})"
+            )
             return negotiation
 
     if not counterparties:
@@ -305,6 +339,22 @@ def match_negotiation(
 DUPLICATE_WINDOW_MINUTES = 15
 
 
+def header_pairs(message: dict) -> list[tuple[str, str]]:
+    """(name, value) for every header the message carries, whichever shape
+    the source gave them: Nylas returns a list of {name, value}, the IMAP
+    reader a dict."""
+    headers = message.get("headers")
+    if isinstance(headers, dict):
+        return [(str(k), str(v)) for k, v in headers.items() if v]
+    if isinstance(headers, list):
+        return [
+            (str(h.get("name") or ""), str(h.get("value") or ""))
+            for h in headers
+            if isinstance(h, dict) and h.get("value")
+        ]
+    return []
+
+
 def rfc_message_id(message: dict) -> str:
     """
     The RFC 5322 Message-Id the sending client wrote, without its angle
@@ -316,20 +366,23 @@ def rfc_message_id(message: dict) -> str:
     provider saves another for the same message on submission. Both arrive as
     `message.created`, with different Nylas ids and identical Message-Ids.
     """
-    headers = message.get("headers")
-    if isinstance(headers, dict):
-        pairs = list(headers.items())
-    elif isinstance(headers, list):
-        pairs = [
-            (h.get("name"), h.get("value")) for h in headers if isinstance(h, dict)
-        ]
-    else:
-        return ""
-
-    for name, value in pairs:
-        if (name or "").strip().lower() == "message-id" and value:
+    for name, value in header_pairs(message):
+        if name.strip().lower() == "message-id":
             return value.strip().strip("<>").strip()
     return ""
+
+
+def referenced_ids(message: dict) -> set[str]:
+    """The Message-IDs this message answers, from In-Reply-To and
+    References, without their angle brackets."""
+    out: set[str] = set()
+    for name, value in header_pairs(message):
+        if name.strip().lower() in ("in-reply-to", "references"):
+            for token in value.split():
+                token = token.strip().strip("<>").strip()
+                if token:
+                    out.add(token)
+    return out
 
 
 def body_fingerprint(text: Optional[str]) -> str:
@@ -430,13 +483,20 @@ async def handle_inbound_message(
     session: Session,
     account: models.EmailAccount,
     message: dict,
+    across_accounts: bool = False,
 ) -> None:
-    """Entry point from the Nylas webhook, after grant/thread resolution."""
+    """
+    Entry point for a broker's message: from the Nylas webhook after grant
+    resolution, or from the shared mailbox read over IMAP, which answers for
+    every mailbox's bids (`across_accounts`).
+    """
     nylas_message_id = message.get("id")
     thread_id = message.get("thread_id")
 
     senders = message_participants(message, "from", "reply_to")
-    negotiation = match_negotiation(session, account, message, senders)
+    negotiation = match_negotiation(
+        session, account, message, senders, across_accounts=across_accounts
+    )
     if not negotiation:
         logger.info(
             f"inbound message {nylas_message_id}: no negotiation for thread "
@@ -729,15 +789,19 @@ async def handle_ratecon(
     attachment = attachments[0]
     filename = attachment.get("filename") or "ratecon.pdf"
 
-    try:
-        content = await nylas.download_attachment(
-            grant_id=account.nylas_grant_id,
-            attachment_id=attachment.get("id"),
-            message_id=nylas_message_id,
-        )
-    except NylasError as e:
-        record_parse_failure(session, negotiation, message_row, filename, f"Could not download the attachment: {e}")
-        return
+    # A message read over IMAP arrives with its attachments; one Nylas
+    # delivered has to be fetched.
+    content = attachment.get("content")
+    if content is None:
+        try:
+            content = await nylas.download_attachment(
+                grant_id=account.nylas_grant_id,
+                attachment_id=attachment.get("id"),
+                message_id=nylas_message_id,
+            )
+        except NylasError as e:
+            record_parse_failure(session, negotiation, message_row, filename, f"Could not download the attachment: {e}")
+            return
 
     broker = await boxtruck.resolve_broker(
         name=negotiation.broker_name or "",

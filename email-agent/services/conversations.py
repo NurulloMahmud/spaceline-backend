@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from database import models
 from services import events
+from services.mailboxes import catcher_headers
 from services.negotiations import NegotiationError, reply_subject, thread_mailbox
 from services.nylas_client import NylasError, nylas
 from services.suggestions import REPLIED_IN_APP, supersede_pending
@@ -214,6 +215,7 @@ async def write(
                 body=html_body,
                 reply_to_message_id=nylas_id,
                 in_reply_to=rfc_id,
+                **catcher_headers(session, account),
             )
         except NylasError as e:
             if not nylas_id:
@@ -230,6 +232,7 @@ async def write(
                 subject=subject,
                 body=html_body,
                 in_reply_to=rfc_id,
+                **catcher_headers(session, account),
             )
     except NylasError as e:
         logger.error(f"conversation {negotiation.id}: send failed: {e}")
@@ -241,6 +244,7 @@ async def write(
     message = models.EmailMessage(
         negotiation_id=negotiation.id,
         nylas_message_id=sent.get("id"),
+        rfc_message_id=nylas.sent_rfc_id(sent),
         direction="outbound",
         from_email=account.email_address,
         to_email=negotiation.broker_email,

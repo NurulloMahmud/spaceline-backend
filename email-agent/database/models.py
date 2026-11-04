@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -277,3 +278,18 @@ class ProcessedWebhook(Base):
     id = _uuid_pk()
     nylas_message_id = Column(String, nullable=False, unique=True, index=True)
     created_at = Column(DateTime(timezone=True), default=_now, nullable=False)
+
+
+class SharedInboxCursor(Base):
+    """
+    How far the IMAP reader has got in the shared mailbox: the last UID it
+    handled, valid for one UIDVALIDITY of the folder. A cursor whose
+    UIDVALIDITY no longer matches is started again from the folder's end,
+    since the old UIDs mean nothing any more.
+    """
+    __tablename__ = "shared_inbox_cursors"
+
+    mailbox = Column(String, primary_key=True)
+    uidvalidity = Column(BigInteger, nullable=False)
+    last_uid = Column(BigInteger, nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
