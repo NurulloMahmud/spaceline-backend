@@ -11,6 +11,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from config.settings import config
 from database import models
 from services import bid_email, events
 from services.atrek import atrek
@@ -128,9 +129,13 @@ def sending_mailbox(
     session: Session, company_id: int, user_id: Optional[int]
 ) -> Optional[models.EmailAccount]:
     """
-    The mailbox a new bid leaves from: the dispatcher's own when they have
-    connected a working one, otherwise the company's shared mailbox. A dead
-    personal grant falls back rather than failing the bid.
+    The mailbox a new bid leaves from.
+
+    Where personal mailboxes are rolled out, a bid leaves from the
+    dispatcher's own mailbox and from nowhere else: the broker's reply has to
+    reach the person who bid, and the shared mailbox is going away. No
+    mailbox, or a dead one, stops the bid with a message that says what to
+    do. Outside the rollout the company's shared mailbox sends as before.
     """
     if user_id:
         own = (
@@ -138,12 +143,25 @@ def sending_mailbox(
             .filter(
                 models.EmailAccount.user_id == user_id,
                 models.EmailAccount.company_id == company_id,
-                models.EmailAccount.status == "active",
             )
             .first()
         )
-        if own:
+        if own and own.status == "active":
             return own
+        if not config.personal_mailbox_allowed(user_id):
+            return shared_mailbox(session, company_id)
+        if own and own.status != "revoked":
+            raise NegotiationError(
+                f"Your email {own.email_address} is no longer connected. "
+                "Reconnect it from your profile to bid.",
+                status_code=409,
+                code="mailbox_not_connected",
+            )
+        raise NegotiationError(
+            "Connect your email from your profile before bidding.",
+            status_code=409,
+            code="mailbox_not_connected",
+        )
     return shared_mailbox(session, company_id)
 
 

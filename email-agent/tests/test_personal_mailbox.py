@@ -13,7 +13,7 @@ from config.settings import config
 from database import models
 from routers.accounts import _sign, _sign_personal
 from services import inbound
-from services.negotiations import create_negotiation
+from services.negotiations import NegotiationError, create_negotiation
 from services.nylas_client import nylas
 from tests.test_auth import make_token
 from tests.test_negotiation_service import POSTING, stubs  # noqa: F401
@@ -231,7 +231,7 @@ async def test_a_dispatcher_without_their_own_mailbox_uses_the_shared_one(
     assert negotiation.email_account_id == account.id
 
 
-async def test_a_dead_personal_mailbox_falls_back_to_the_shared_one(
+async def test_a_dead_personal_mailbox_falls_back_to_the_shared_one_outside_the_rollout(
     session, account, own_account, stubs, monkeypatch  # noqa: F811
 ):
     own_account.status = "expired"
@@ -247,6 +247,55 @@ async def test_a_dead_personal_mailbox_falls_back_to_the_shared_one(
     await _bid(session)
 
     assert sent[0]["grant_id"] == "grant-1"
+
+
+async def test_a_rolled_out_dispatcher_without_a_mailbox_cannot_bid(
+    session, account, stubs, monkeypatch, rolled_out  # noqa: F811
+):
+    """The shared mailbox is going away: once a dispatcher may connect their
+    own, a bid waits until they have."""
+    async def never_send(**kwargs):
+        raise AssertionError("nothing may be sent without the dispatcher's mailbox")
+
+    monkeypatch.setattr(nylas, "send_message", never_send)
+
+    with pytest.raises(NegotiationError) as err:
+        await _bid(session)
+
+    assert err.value.code == "mailbox_not_connected"
+    assert err.value.status_code == 409
+    assert "profile" in err.value.message
+    assert session.query(models.Negotiation).count() == 0
+
+
+async def test_a_rolled_out_dispatcher_with_a_dead_mailbox_is_told_to_reconnect(
+    session, account, own_account, stubs, monkeypatch, rolled_out  # noqa: F811
+):
+    own_account.status = "expired"
+    session.commit()
+
+    async def never_send(**kwargs):
+        raise AssertionError("nothing may be sent from the shared mailbox")
+
+    monkeypatch.setattr(nylas, "send_message", never_send)
+
+    with pytest.raises(NegotiationError) as err:
+        await _bid(session)
+
+    assert err.value.code == "mailbox_not_connected"
+    assert own_account.email_address in err.value.message
+
+
+async def test_a_rolled_out_dispatcher_who_disconnected_is_asked_to_connect_again(
+    session, account, own_account, stubs, monkeypatch, rolled_out  # noqa: F811
+):
+    own_account.status = "revoked"
+    session.commit()
+
+    with pytest.raises(NegotiationError) as err:
+        await _bid(session)
+
+    assert err.value.message.startswith("Connect your email")
 
 
 def _pending_suggestion(session, negotiation):
