@@ -209,9 +209,11 @@ async def test_bid_replies_to_the_posting_email(
     assert negotiation.nylas_thread_id == "thread-posting"
 
 
-async def test_bid_starts_a_new_email_when_the_posting_is_not_in_the_mailbox(
+async def test_bid_replies_by_message_id_when_the_posting_is_not_in_the_mailbox(
     session, account, stubs, monkeypatch, load_snapshot
 ):
+    """The alerts are read from a separate listening mailbox, so the shared
+    mailbox usually never got the one being bid on. The bid must still thread."""
     load_snapshot.update(POSTING)
     sent = []
 
@@ -225,6 +227,27 @@ async def test_bid_starts_a_new_email_when_the_posting_is_not_in_the_mailbox(
     await _bid(session)
 
     assert sent[0]["reply_to_message_id"] is None
+    assert sent[0]["in_reply_to"] == POSTING["email_message_id"]
+    assert sent[0]["subject"] == "Re: " + POSTING["email_subject"]
+
+
+async def test_a_posting_without_a_subject_still_starts_a_new_email(
+    session, account, stubs, monkeypatch, load_snapshot
+):
+    load_snapshot.update({**POSTING, "email_subject": ""})
+    sent = []
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+        return {"id": "msg-out-1", "thread_id": "thread-new"}
+
+    monkeypatch.setattr(nylas, "find_message_by_rfc_id", lambda g, r: _async(None))
+    monkeypatch.setattr(nylas, "send_message", fake_send)
+
+    await _bid(session)
+
+    assert sent[0]["reply_to_message_id"] is None
+    assert sent[0]["in_reply_to"] is None
     assert sent[0]["subject"] == "Ref 55012 \u00b7 Chicago, IL \u2192 Detroit, MI"
 
 

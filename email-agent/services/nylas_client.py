@@ -125,15 +125,52 @@ class NylasService:
                     {"name": "References", "value": f"<{bare}>"},
                 ]
 
+        # Ask for the threading headers Nylas actually wrote, so the log shows
+        # whether a reply really went out as one. This is a synchronous send,
+        # the only kind the option works on.
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 f"{self.base_url}/v3/grants/{grant_id}/messages/send",
+                params={"fields": "include_basic_headers"},
                 json=payload,
                 headers=self.headers,
             )
         if resp.status_code not in (200, 201):
             raise NylasError(f"send failed ({resp.status_code}): {resp.text[:400]}")
-        return resp.json().get("data", {})
+        data = resp.json().get("data", {})
+        self._log_threading(data, subject, reply_to_message_id, in_reply_to)
+        return data
+
+    @staticmethod
+    def _log_threading(
+        data: dict, subject: str, reply_to_message_id: Optional[str], in_reply_to: Optional[str]
+    ) -> None:
+        """
+        A reply that leaves without In-Reply-To lands in the broker's inbox as
+        a new conversation, which is the one thing a bid must not do. The
+        header on the sent message is the proof, not the request we made.
+        """
+        wanted = bool(reply_to_message_id or in_reply_to)
+        headers = {
+            str(h.get("name", "")).lower(): h.get("value")
+            for h in (data.get("headers") or [])
+            if isinstance(h, dict)
+        }
+        got = headers.get("in-reply-to")
+        if not wanted:
+            return
+        if got:
+            logger.info(f"sent '{subject}' as a reply: In-Reply-To {got}")
+        elif headers:
+            logger.error(
+                f"sent '{subject}' without In-Reply-To although a reply was asked for "
+                f"(reply_to_message_id={reply_to_message_id!r}, in_reply_to={in_reply_to!r}); "
+                f"the broker sees a new conversation"
+            )
+        else:
+            logger.warning(
+                f"sent '{subject}' as a reply, but Nylas returned no headers to confirm it"
+            )
 
     async def find_message_by_rfc_id(self, grant_id: str, rfc_message_id: str) -> Optional[dict]:
         """

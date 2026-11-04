@@ -103,9 +103,9 @@ async def find_posting_email(
         return None, None
     message = await nylas.find_message_by_rfc_id(account.nylas_grant_id, rfc_id)
     if not message or not message.get("id"):
-        logger.warning(
-            f"load {load_detail.get('id')}: posting email {rfc_id} not found in the "
-            f"mailbox; the bid goes out as a new email"
+        logger.info(
+            f"load {load_detail.get('id')}: posting email {rfc_id} is not in the "
+            f"mailbox; the bid replies to it by Message-ID instead"
         )
         return None, None
     subject = message.get("subject") or load_detail.get("email_subject")
@@ -248,17 +248,19 @@ async def create_negotiation(
         )
 
     # Reply to the broker's posting email when we can, so the bid sits in the
-    # conversation they started instead of opening a second one. The shared
-    # mailbox holds the alert and replies to it there. A dispatcher's own
-    # mailbox never received it, so it replies by the alert's Message-ID,
-    # which Sylectus gives every recipient alike.
-    in_reply_to = None
-    if account.user_id is None:
-        reply_to_message_id, posting_subject = await find_posting_email(account, load_detail)
-    else:
-        reply_to_message_id = None
-        in_reply_to = (load_detail.get("email_message_id") or "").strip() or None
-        posting_subject = load_detail.get("email_subject") if in_reply_to else None
+    # conversation they started instead of opening a second one. The alert is
+    # read from a separate listening mailbox, so the sending mailbox usually
+    # never received it: the reply then goes by the alert's Message-ID, which
+    # Sylectus gives every recipient alike. When the shared mailbox does hold
+    # the alert, replying to that copy also threads it on our side.
+    in_reply_to = (load_detail.get("email_message_id") or "").strip() or None
+    posting_subject = load_detail.get("email_subject") if in_reply_to else None
+    reply_to_message_id = None
+    if account.user_id is None and in_reply_to:
+        reply_to_message_id, found_subject = await find_posting_email(account, load_detail)
+        if reply_to_message_id:
+            in_reply_to = None
+            posting_subject = found_subject or posting_subject
     if (reply_to_message_id or in_reply_to) and posting_subject:
         subject = f"Re: {RE_PREFIX.sub('', posting_subject.strip())}"
     else:

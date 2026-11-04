@@ -357,6 +357,50 @@ async def test_the_alert_reply_headers_reach_nylas(monkeypatch):
     assert "reply_to_message_id" not in posted[0]
 
 
+async def test_the_send_asks_nylas_for_the_headers_it_wrote(monkeypatch, caplog):
+    calls = []
+
+    async def post(self, url, **kwargs):
+        calls.append(kwargs)
+        r = _Response()
+        r.json = lambda: {"data": {"id": "out-1", "headers": [
+            {"name": "Message-Id", "value": "<out-1@mail.gmail.com>"},
+            {"name": "In-Reply-To", "value": "<87764f$oi77l@out07.sylectus.com>"},
+            {"name": "References", "value": "<87764f$oi77l@out07.sylectus.com>"},
+        ]}}
+        return r
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+
+    with caplog.at_level("INFO"):
+        await nylas.send_message(
+            grant_id="g", to_email="b@x.com", subject="Re: s", body="b",
+            in_reply_to="87764f$oi77l@out07.sylectus.com",
+        )
+
+    assert calls[0]["params"] == {"fields": "include_basic_headers"}
+    assert "as a reply: In-Reply-To <87764f$oi77l@out07.sylectus.com>" in caplog.text
+
+
+async def test_a_reply_that_lost_its_headers_is_logged_as_an_error(monkeypatch, caplog):
+    async def post(self, url, **kwargs):
+        r = _Response()
+        r.json = lambda: {"data": {"id": "out-1", "headers": [
+            {"name": "Message-Id", "value": "<out-1@mail.gmail.com>"},
+        ]}}
+        return r
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+
+    with caplog.at_level("ERROR"):
+        await nylas.send_message(
+            grant_id="g", to_email="b@x.com", subject="Re: s", body="b",
+            in_reply_to="<x@y>",
+        )
+
+    assert "without In-Reply-To" in caplog.text
+
+
 async def test_a_reply_inside_the_mailbox_needs_no_custom_headers(monkeypatch):
     posted = []
 
