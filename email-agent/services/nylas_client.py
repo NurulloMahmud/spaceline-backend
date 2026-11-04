@@ -94,7 +94,14 @@ class NylasService:
         body: str,
         reply_to_message_id: Optional[str] = None,
         thread_id: Optional[str] = None,
+        in_reply_to: Optional[str] = None,
     ) -> dict:
+        """
+        `reply_to_message_id` replies to a message inside this mailbox.
+        `in_reply_to` replies to one that never reached it, by RFC Message-ID:
+        a dispatcher's own mailbox never got the Sylectus alert, but the
+        broker's mail client threads on these headers all the same.
+        """
         if config.EMAIL_REDIRECT_TO:
             logger.warning(
                 f"EMAIL_REDIRECT_TO is set: '{subject}' meant for {to_email} "
@@ -110,6 +117,13 @@ class NylasService:
         }
         if reply_to_message_id:
             payload["reply_to_message_id"] = reply_to_message_id
+        elif in_reply_to:
+            bare = in_reply_to.strip().strip("<>").strip()
+            if bare:
+                payload["custom_headers"] = [
+                    {"name": "In-Reply-To", "value": f"<{bare}>"},
+                    {"name": "References", "value": f"<{bare}>"},
+                ]
 
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(

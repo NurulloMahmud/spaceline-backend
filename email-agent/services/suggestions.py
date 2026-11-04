@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from database import models
 from services import events
-from services.negotiations import NegotiationError, reply_subject
+from services.negotiations import NegotiationError, reply_subject, thread_mailbox
 from services.nylas_client import NylasError, nylas
 
 logger = logging.getLogger(__name__)
@@ -88,14 +88,20 @@ async def send(
             code="empty_body",
         )
 
-    account = (
-        session.query(models.EmailAccount)
-        .filter(models.EmailAccount.company_id == company_id)
-        .first()
-    )
+    account = thread_mailbox(session, negotiation)
     if not account:
         raise NegotiationError(
             "No dispatch mailbox is connected for this company.",
+            status_code=409,
+            code="mailbox_not_connected",
+        )
+    if account.user_id is not None and account.status != "active":
+        # The broker is talking to this address. Answering from another one
+        # would look like a stranger cutting in, so the reply waits for a
+        # reconnect instead.
+        raise NegotiationError(
+            f"{account.email_address} sent this bid and is no longer connected. "
+            "Reconnect it from your profile to reply.",
             status_code=409,
             code="mailbox_not_connected",
         )

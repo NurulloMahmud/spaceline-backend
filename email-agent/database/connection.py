@@ -63,6 +63,29 @@ ADDITIVE_COLUMNS = (
     "ALTER TABLE email_messages ADD COLUMN IF NOT EXISTS rfc_message_id VARCHAR",
     "CREATE INDEX IF NOT EXISTS ix_email_messages_rfc_message_id "
     "ON email_messages (rfc_message_id)",
+    # Personal mailboxes: a company keeps one shared mailbox but may now have
+    # many accounts, so the old unique index on company_id gives way to two
+    # partial ones. The swap only fires while the index is still unique.
+    "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS user_id INTEGER",
+    "CREATE INDEX IF NOT EXISTS ix_email_accounts_user_id ON email_accounts (user_id)",
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE indexname = 'ix_email_accounts_company_id'
+              AND indexdef LIKE 'CREATE UNIQUE INDEX%'
+        ) THEN
+            DROP INDEX ix_email_accounts_company_id;
+            CREATE INDEX ix_email_accounts_company_id ON email_accounts (company_id);
+        END IF;
+    END $$
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_email_accounts_company_shared "
+    "ON email_accounts (company_id) WHERE user_id IS NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_email_accounts_user "
+    "ON email_accounts (user_id) WHERE user_id IS NOT NULL",
+    "ALTER TABLE negotiations ADD COLUMN IF NOT EXISTS email_account_id UUID",
 )
 
 

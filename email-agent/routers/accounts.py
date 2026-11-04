@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,7 @@ from database import models
 from database.connection import session_dependency
 from routers.schemas import ConnectAccountRequest
 from services.auth import Principal, current_user, scoped_company
+from services.negotiations import shared_mailbox
 from services.nylas_client import NylasError, nylas
 
 logger = logging.getLogger(__name__)
@@ -84,11 +86,7 @@ def get_account(
     company_id: int = Depends(scoped_company),
     session: Session = Depends(session_dependency),
 ):
-    account = (
-        session.query(models.EmailAccount)
-        .filter(models.EmailAccount.company_id == company_id)
-        .first()
-    )
+    account = shared_mailbox(session, company_id)
     if not account:
         return {"connected": False}
     return {
@@ -97,6 +95,182 @@ def get_account(
         "status": account.status,
         "connected_at": account.created_at,
     }
+
+
+def _personal_redirect(status: str, **params) -> RedirectResponse:
+    """Where a dispatcher lands after connecting their own mailbox."""
+    target = config.FRONTEND_PERSONAL_MAILBOX_URL or "/profile"
+    query = urlencode({"mailbox": status, **params})
+    return RedirectResponse(url=f"{target}?{query}", status_code=302)
+
+
+def _sign_personal(user_id: int, company_id: int) -> str:
+    """
+    A personal connect carries the user, not just the company, so the
+    callback attaches the grant to the person who asked for it. The leading
+    `u` keeps it apart from a company state, which starts with a digit.
+    """
+    payload = f"u{user_id}-{company_id}"
+    mac = hmac.new(
+        config.INTERNAL_SECRET_KEY.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()[:32]
+    return f"{payload}.{mac}"
+
+
+def _verify_personal(state: str) -> tuple[int, int]:
+    try:
+        payload, _ = state.rsplit(".", 1)
+        user_part, company_part = payload[1:].split("-", 1)
+        user_id, company_id = int(user_part), int(company_part)
+    except (ValueError, AttributeError):
+        raise HTTPException(400, "malformed state")
+    if not hmac.compare_digest(_sign_personal(user_id, company_id), state):
+        raise HTTPException(400, "state signature mismatch")
+    return user_id, company_id
+
+
+def _own_mailbox(session: Session, user_id: int) -> models.EmailAccount | None:
+    return (
+        session.query(models.EmailAccount)
+        .filter(models.EmailAccount.user_id == user_id)
+        .first()
+    )
+
+
+@router.get("/me")
+def get_my_account(
+    principal: Principal = Depends(current_user),
+    session: Session = Depends(session_dependency),
+):
+    """
+    The caller's own mailbox. `enabled` says whether they may connect one at
+    all, so the frontend shows the card only to the people it is rolled out to.
+    """
+    enabled = config.personal_mailbox_allowed(principal.user_id)
+    account = _own_mailbox(session, principal.user_id)
+    if not account or account.status == "revoked":
+        return {"enabled": enabled, "connected": False}
+    return {
+        "enabled": enabled,
+        "connected": True,
+        "email_address": account.email_address,
+        "status": account.status,
+        "connected_at": account.created_at,
+    }
+
+
+@router.post("/me/connect")
+def connect_my_account(principal: Principal = Depends(current_user)):
+    """The URL to authorise the caller's own mailbox, for bidding from it."""
+    if not config.personal_mailbox_allowed(principal.user_id):
+        raise HTTPException(403, "connecting your own mailbox is not enabled for you")
+    if not principal.company_id:
+        raise HTTPException(403, "token carries no company")
+    if not config.NYLAS_CLIENT_ID or not config.NYLAS_CALLBACK_URI:
+        raise HTTPException(500, "Nylas hosted auth is not configured")
+    return {
+        "auth_url": nylas.hosted_auth_url(
+            state=_sign_personal(principal.user_id, principal.company_id)
+        )
+    }
+
+
+@router.delete("/me")
+async def disconnect_my_account(
+    principal: Principal = Depends(current_user),
+    session: Session = Depends(session_dependency),
+):
+    """
+    Stops bidding from the caller's own mailbox and hands the access back.
+    Their open threads keep the address they started with; replies on them
+    wait until the mailbox is connected again.
+    """
+    account = _own_mailbox(session, principal.user_id)
+    if not account:
+        return {"connected": False}
+    try:
+        await nylas.revoke_grant(account.nylas_grant_id)
+    except NylasError as e:
+        # Dropping our record still stops every send from it; a grant that
+        # outlives that is worth a log line, not a failed disconnect.
+        logger.error(f"could not revoke grant for user {principal.user_id}: {e}")
+    account.status = "revoked"
+    account.nylas_grant_id = f"revoked:{account.id}"
+    session.flush()
+    return {"connected": False}
+
+
+async def _personal_callback(
+    session: Session, code: str, state: str, error: str
+) -> RedirectResponse:
+    if error:
+        logger.warning(f"nylas hosted auth returned an error on a personal connect: {error}")
+        return _personal_redirect("error", reason="declined")
+    if not code:
+        return _personal_redirect("error", reason="missing_params")
+    try:
+        user_id, company_id = _verify_personal(state)
+    except HTTPException as e:
+        logger.warning(f"personal mailbox callback rejected: {e.detail}")
+        return _personal_redirect("error", reason="invalid_state")
+
+    try:
+        grant = await nylas.exchange_code(code)
+    except NylasError as e:
+        logger.error(f"nylas code exchange failed for user {user_id}: {e}")
+        return _personal_redirect("error", reason="exchange_failed")
+
+    grant_id = grant.get("grant_id")
+    email_address = grant.get("email") or grant.get("email_address") or ""
+    if not grant_id:
+        logger.error(f"nylas returned no grant_id for user {user_id}")
+        return _personal_redirect("error", reason="no_grant")
+
+    # A mailbox that already backs the shared inbox or another person stays
+    # where it is. Not revoked: that account is sending on it right now.
+    clash = (
+        session.query(models.EmailAccount)
+        .filter(
+            models.EmailAccount.nylas_grant_id == grant_id,
+            or_(
+                models.EmailAccount.user_id.is_(None),
+                models.EmailAccount.user_id != user_id,
+            ),
+        )
+        .first()
+    )
+    if clash:
+        logger.error(
+            f"mailbox {email_address or '<unknown>'} is already connected elsewhere; "
+            f"refusing to attach it to user {user_id}"
+        )
+        return _personal_redirect("error", reason="mailbox_in_use")
+
+    account = _own_mailbox(session, user_id)
+    if account:
+        account.nylas_grant_id = grant_id
+        account.email_address = email_address or account.email_address
+        account.company_id = company_id
+        account.status = "active"
+    else:
+        session.add(
+            models.EmailAccount(
+                company_id=company_id,
+                user_id=user_id,
+                nylas_grant_id=grant_id,
+                email_address=email_address,
+                status="active",
+            )
+        )
+    try:
+        session.flush()
+    except IntegrityError:
+        session.rollback()
+        logger.error(f"mailbox {email_address or '<unknown>'} was claimed concurrently")
+        return _personal_redirect("error", reason="mailbox_in_use")
+
+    logger.info(f"user {user_id} connected their own mailbox {email_address}")
+    return _personal_redirect("connected")
 
 
 @router.post("/connect")
@@ -145,6 +319,9 @@ async def callback(
     the body of, so every branch redirects back into the app rather than
     returning JSON or raising an HTTP error the user would see raw.
     """
+    if state.startswith("u"):
+        return await _personal_callback(session, code, state, error)
+
     if error:
         logger.warning(f"nylas hosted auth returned an error: {error}")
         return _settings_redirect("error", reason="declined")
@@ -198,23 +375,23 @@ async def callback(
         session.query(models.EmailAccount)
         .filter(
             models.EmailAccount.nylas_grant_id == grant_id,
-            models.EmailAccount.company_id != company_id,
+            or_(
+                models.EmailAccount.company_id != company_id,
+                models.EmailAccount.user_id.isnot(None),
+            ),
         )
         .first()
     )
     if clash:
         logger.error(
             f"mailbox {email_address or '<unknown>'} is already connected to "
-            f"company {clash.company_id}; refusing to attach it to company "
-            f"{company_id}"
+            f"company {clash.company_id}"
+            f"{f' as user {clash.user_id}' if clash.user_id else ''}; "
+            f"refusing to attach it to company {company_id}"
         )
         return _settings_redirect("error", reason="mailbox_in_use")
 
-    account = (
-        session.query(models.EmailAccount)
-        .filter(models.EmailAccount.company_id == company_id)
-        .first()
-    )
+    account = shared_mailbox(session, company_id)
     if account:
         account.nylas_grant_id = grant_id
         account.email_address = email_address or account.email_address

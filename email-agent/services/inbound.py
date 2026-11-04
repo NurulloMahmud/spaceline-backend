@@ -198,13 +198,27 @@ def match_negotiation(
     negotiation: who is on the other end, and what the subject is once reply
     prefixes are stripped. A negotiation still missing a thread id adopts the
     one that matched, so this only has to happen once per thread.
+
+    Only negotiations this mailbox sent are candidates: a dispatcher's own
+    inbox must never adopt a thread the shared mailbox is carrying, or the
+    reverse. Negotiations from before personal mailboxes carry no account and
+    belong to the shared one.
     """
+    if account.user_id is None:
+        owned = or_(
+            models.Negotiation.email_account_id == account.id,
+            models.Negotiation.email_account_id.is_(None),
+        )
+    else:
+        owned = models.Negotiation.email_account_id == account.id
+
     thread_id = message.get("thread_id")
     if thread_id:
         negotiation = (
             session.query(models.Negotiation)
             .filter(
                 models.Negotiation.company_id == account.company_id,
+                owned,
                 models.Negotiation.nylas_thread_id == thread_id,
             )
             .first()
@@ -238,6 +252,7 @@ def match_negotiation(
         session.query(models.Negotiation)
         .filter(
             models.Negotiation.company_id == account.company_id,
+            owned,
             models.Negotiation.created_at >= cutoff,
             or_(*addresses),
         )

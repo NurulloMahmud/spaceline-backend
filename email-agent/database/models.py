@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, text,
+    Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -58,11 +58,27 @@ OUTCOME_PARSE_FAILED = "parse_failed"
 
 
 class EmailAccount(Base):
-    """One shared dispatch mailbox per company, connected through Nylas."""
+    """
+    A mailbox connected through Nylas: either the company's shared dispatch
+    mailbox (`user_id` is null, one per company) or one dispatcher's own
+    mailbox (`user_id` set, one per user). A dispatcher with their own
+    mailbox bids from it; everyone else bids from the shared one.
+    """
     __tablename__ = "email_accounts"
+    __table_args__ = (
+        Index(
+            "uq_email_accounts_company_shared", "company_id",
+            unique=True, postgresql_where=text("user_id IS NULL"),
+        ),
+        Index(
+            "uq_email_accounts_user", "user_id",
+            unique=True, postgresql_where=text("user_id IS NOT NULL"),
+        ),
+    )
 
     id = _uuid_pk()
-    company_id = Column(Integer, nullable=False, unique=True, index=True)
+    company_id = Column(Integer, nullable=False, index=True)
+    user_id = Column(Integer, nullable=True, index=True)
     nylas_grant_id = Column(String, nullable=False, unique=True, index=True)
     email_address = Column(String, nullable=False)
     # The mailbox management named when it generated the auth URL. The
@@ -75,7 +91,7 @@ class EmailAccount(Base):
     updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
 
     def __repr__(self):
-        return f"<EmailAccount company={self.company_id} email={self.email_address}>"
+        return f"<EmailAccount company={self.company_id} user={self.user_id} email={self.email_address}>"
 
 
 class Negotiation(Base):
@@ -105,6 +121,11 @@ class Negotiation(Base):
 
     nylas_thread_id = Column(String, nullable=True, index=True)
     subject = Column(String, nullable=True)
+    # The mailbox the bid went out from. Every later reply on the thread has
+    # to leave from the same one, or the broker sees a stranger answer. Null
+    # on negotiations opened before personal mailboxes, which all used the
+    # company's shared mailbox.
+    email_account_id = Column(UUID(as_uuid=True), nullable=True)
 
     status = Column(String, default=BID_SENT, nullable=False, index=True)
     tms_load_id = Column(Integer, nullable=True)

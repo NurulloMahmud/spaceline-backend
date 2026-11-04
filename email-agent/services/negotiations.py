@@ -112,6 +112,58 @@ async def find_posting_email(
     return message["id"], subject
 
 
+def shared_mailbox(session: Session, company_id: int) -> Optional[models.EmailAccount]:
+    """The company's shared dispatch mailbox, never a dispatcher's own."""
+    return (
+        session.query(models.EmailAccount)
+        .filter(
+            models.EmailAccount.company_id == company_id,
+            models.EmailAccount.user_id.is_(None),
+        )
+        .first()
+    )
+
+
+def sending_mailbox(
+    session: Session, company_id: int, user_id: Optional[int]
+) -> Optional[models.EmailAccount]:
+    """
+    The mailbox a new bid leaves from: the dispatcher's own when they have
+    connected a working one, otherwise the company's shared mailbox. A dead
+    personal grant falls back rather than failing the bid.
+    """
+    if user_id:
+        own = (
+            session.query(models.EmailAccount)
+            .filter(
+                models.EmailAccount.user_id == user_id,
+                models.EmailAccount.company_id == company_id,
+                models.EmailAccount.status == "active",
+            )
+            .first()
+        )
+        if own:
+            return own
+    return shared_mailbox(session, company_id)
+
+
+def thread_mailbox(
+    session: Session, negotiation: models.Negotiation
+) -> Optional[models.EmailAccount]:
+    """
+    The mailbox a reply on an existing negotiation leaves from: the one that
+    sent the bid. Negotiations from before personal mailboxes carry no
+    account and used the shared mailbox.
+    """
+    if negotiation.email_account_id:
+        return (
+            session.query(models.EmailAccount)
+            .filter(models.EmailAccount.id == negotiation.email_account_id)
+            .first()
+        )
+    return shared_mailbox(session, negotiation.company_id)
+
+
 async def create_negotiation(
     session: Session,
     *,
@@ -127,11 +179,7 @@ async def create_negotiation(
     again: bool = False,
     body_html: Optional[str] = None,
 ) -> models.Negotiation:
-    account = (
-        session.query(models.EmailAccount)
-        .filter(models.EmailAccount.company_id == company_id)
-        .first()
-    )
+    account = sending_mailbox(session, company_id, dispatcher_user_id)
     if not account:
         raise NegotiationError(
             "No dispatch mailbox is connected for this company. "
@@ -200,12 +248,22 @@ async def create_negotiation(
         )
 
     # Reply to the broker's posting email when we can, so the bid sits in the
-    # conversation they started instead of opening a second one.
-    reply_to_message_id, posting_subject = await find_posting_email(account, load_detail)
-    if reply_to_message_id and posting_subject:
+    # conversation they started instead of opening a second one. The shared
+    # mailbox holds the alert and replies to it there. A dispatcher's own
+    # mailbox never received it, so it replies by the alert's Message-ID,
+    # which Sylectus gives every recipient alike.
+    in_reply_to = None
+    if account.user_id is None:
+        reply_to_message_id, posting_subject = await find_posting_email(account, load_detail)
+    else:
+        reply_to_message_id = None
+        in_reply_to = (load_detail.get("email_message_id") or "").strip() or None
+        posting_subject = load_detail.get("email_subject") if in_reply_to else None
+    if (reply_to_message_id or in_reply_to) and posting_subject:
         subject = f"Re: {RE_PREFIX.sub('', posting_subject.strip())}"
     else:
         reply_to_message_id = None
+        in_reply_to = None
         subject = bid_email.build_subject(load_detail)
     # The email the dispatcher was looking at when they pressed Send, edits and
     # all. Callers with no composer get the same layout from the template.
@@ -231,6 +289,7 @@ async def create_negotiation(
         broker_email=resolved_email,
         broker_name=load_detail.get("contact_name"),
         subject=subject,
+        email_account_id=account.id,
         status=models.BID_SENT,
     )
     session.add(negotiation)
@@ -243,6 +302,7 @@ async def create_negotiation(
             subject=subject,
             body=body,
             reply_to_message_id=reply_to_message_id,
+            in_reply_to=in_reply_to,
         )
     except NylasError as e:
         logger.error(f"bid email failed for load {load_uuid}: {e}")

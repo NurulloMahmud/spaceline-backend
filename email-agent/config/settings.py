@@ -91,6 +91,20 @@ class Config:
     FRONTEND_MAILBOX_SETTINGS_URL: str = os.getenv(
         "FRONTEND_MAILBOX_SETTINGS_URL", ""
     ).rstrip("/")
+    # Same, for a dispatcher connecting their own mailbox from their profile.
+    FRONTEND_PERSONAL_MAILBOX_URL: str = os.getenv(
+        "FRONTEND_PERSONAL_MAILBOX_URL", ""
+    ).rstrip("/")
+
+    # Who may connect their own mailbox and bid from it: comma-separated BTM
+    # user ids, or "*" for everyone. Empty keeps the feature off.
+    PERSONAL_MAILBOX_USERS: str = os.getenv("PERSONAL_MAILBOX_USERS", "").strip()
+
+    def personal_mailbox_allowed(self, user_id: int) -> bool:
+        allowed = self.PERSONAL_MAILBOX_USERS
+        if allowed == "*":
+            return True
+        return str(user_id) in {part.strip() for part in allowed.split(",") if part.strip()}
 
     # openai
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
