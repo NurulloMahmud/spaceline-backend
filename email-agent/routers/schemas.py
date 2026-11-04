@@ -29,6 +29,10 @@ class SendSuggestionRequest(BaseModel):
     subject: Optional[str] = None
 
 
+class WriteMessageRequest(BaseModel):
+    body: str = Field(..., max_length=20_000, description="plain text; line breaks are kept")
+
+
 class ConnectAccountRequest(BaseModel):
     company_id: Optional[int] = Field(
         None, description="management only; defaults to the caller's company"

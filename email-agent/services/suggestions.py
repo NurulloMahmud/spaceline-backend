@@ -76,6 +76,14 @@ async def send(
         )
 
     negotiation = suggestion.negotiation
+    if negotiation.dispatcher_user_id is not None and negotiation.dispatcher_user_id != user_id:
+        # The broker is talking to the dispatcher who bid. Anyone else can
+        # read the conversation but not answer in their name.
+        raise NegotiationError(
+            "Only the dispatcher who sent this bid can reply in this conversation.",
+            status_code=403,
+            code="not_your_conversation",
+        )
     final_body = (body if body is not None else suggestion.draft_body) or ""
     # The subject is the thread's, never the model's and never the caller's:
     # changing it makes the broker's mail client show a brand new chain.

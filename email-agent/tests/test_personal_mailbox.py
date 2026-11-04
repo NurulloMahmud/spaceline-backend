@@ -373,3 +373,27 @@ async def test_a_reply_inside_the_mailbox_needs_no_custom_headers(monkeypatch):
 
     assert posted[0]["reply_to_message_id"] == "nylas-1"
     assert "custom_headers" not in posted[0]
+
+
+async def test_a_reply_sent_from_the_dispatchers_own_gmail_lands_in_their_conversation(
+    session, own_account, negotiation, monkeypatch
+):
+    from services import events
+
+    negotiation.email_account_id = own_account.id
+    session.commit()
+    monkeypatch.setattr(events.hub, "publish", lambda e: None)
+    message = {
+        "id": "gmail-sent-1",
+        "thread_id": "thread-1",
+        "subject": "Re: Bid — Chicago, IL to Detroit, MI",
+        "from": [{"email": "jane@gmail.com"}],
+        "to": [{"email": "broker@acme-logistics.com"}],
+        "body": "We can go 3100.",
+    }
+    await inbound.handle_own_send(session, own_account, message)
+    session.commit()
+    session.refresh(negotiation)
+    (m,) = negotiation.messages
+    assert (m.direction, m.from_email, m.body_text) == ("outbound", "jane@gmail.com", "We can go 3100.")
+    assert m.sent_by_user_id is None  # shown as sent from a mail client

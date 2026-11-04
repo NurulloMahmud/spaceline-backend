@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from database.connection import init_db  # noqa: E402
-from routers import accounts, events, negotiations, suggestions, webhooks  # noqa: E402
+from routers import accounts, conversations, events, negotiations, suggestions, webhooks  # noqa: E402
 from services import maintenance  # noqa: E402
 
 
@@ -59,6 +59,7 @@ if config.CORS_ORIGINS:
 app.include_router(negotiations.router)
 app.include_router(negotiations.internal_router)
 app.include_router(suggestions.router)
+app.include_router(conversations.router)
 app.include_router(accounts.router)
 app.include_router(events.router)
 app.include_router(webhooks.router)

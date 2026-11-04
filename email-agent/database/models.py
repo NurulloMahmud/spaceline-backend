@@ -253,6 +253,23 @@ class RateconCheck(Base):
         return f"<RateconCheck {self.id} outcome={self.outcome}>"
 
 
+class ConversationRead(Base):
+    """
+    When a user last opened a conversation. Messages after it, other than the
+    ones they sent, are new to them. One row per user and conversation, so a
+    manager reading a dispatcher's thread does not mark it read for the
+    dispatcher.
+    """
+    __tablename__ = "conversation_reads"
+
+    negotiation_id = Column(
+        UUID(as_uuid=True), ForeignKey("negotiations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id = Column(Integer, primary_key=True)
+    read_at = Column(DateTime(timezone=True), default=_now, nullable=False)
+
+
 class ProcessedWebhook(Base):
     """Nylas retries webhooks; this keeps message handling idempotent."""
     __tablename__ = "processed_webhooks"
