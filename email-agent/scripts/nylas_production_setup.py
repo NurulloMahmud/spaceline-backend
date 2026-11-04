@@ -52,6 +52,12 @@ def set_values(lines: list[str], values: dict[str, str]) -> list[str]:
     return out
 
 
+def webhooks_at(payload: dict, url: str) -> list[dict]:
+    """The application's webhooks pointing at `url`. Nylas answers an
+    application with none as `"data": null`, not an empty list."""
+    return [w for w in (payload.get("data") or []) if w.get("webhook_url") == url]
+
+
 def current(lines: list[str], key: str) -> str:
     for line in lines:
         if line.startswith(f"{key}="):
@@ -88,8 +94,7 @@ def main() -> int:
             print(f"Nylas refused the key ({probe.status_code}); nothing changed", file=sys.stderr)
             return 1
 
-        existing = [w for w in probe.json().get("data", []) if w.get("webhook_url") == args.webhook_url]
-        for hook in existing:
+        for hook in webhooks_at(probe.json(), args.webhook_url):
             client.delete(f"{base}/v3/webhooks/{hook['id']}", headers=headers)
 
         # Nylas checks the URL with a challenge before it answers, so the

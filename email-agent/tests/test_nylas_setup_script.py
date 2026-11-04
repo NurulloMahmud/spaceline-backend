@@ -1,5 +1,14 @@
 """The .env rewrite in scripts/nylas_production_setup must touch only its own keys."""
-from scripts.nylas_production_setup import set_values
+from scripts.nylas_production_setup import set_values, webhooks_at
+
+
+def test_an_application_with_no_webhooks_answers_null():
+    assert webhooks_at({"data": None}, "https://x/hook") == []
+
+
+def test_only_webhooks_for_the_url_are_picked():
+    payload = {"data": [{"id": "a", "webhook_url": "https://x/hook"}, {"id": "b", "webhook_url": "https://y"}]}
+    assert [w["id"] for w in webhooks_at(payload, "https://x/hook")] == ["a"]
 
 
 def test_existing_keys_are_replaced_in_place_and_the_rest_kept():
