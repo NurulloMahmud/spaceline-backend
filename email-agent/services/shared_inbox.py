@@ -11,17 +11,24 @@ every negotiation of the company as a candidate.
 Nothing here touches the Gmail API, so nothing here spends the quota that
 was refusing bids: IMAP has no per-minute unit budget.
 
-The reader keeps its place as (UIDVALIDITY, last UID) in the database, so a
-restart carries on where it left off, and a mailbox seen for the first time
-starts at its end rather than replaying history. A message the pipeline
-fails on is tried on a few passes, then skipped with an error, so one bad
-email cannot stop every one behind it.
+The same reader covers every mailbox connected with an app password
+(EmailAccount.transport "imap"): a dispatcher's own inbox, read for the
+answers to their own bids. The shared mailbox is the catch-all for every
+negotiation of the company; a dispatcher's mailbox answers only for its own.
+
+The reader keeps its place per mailbox as (UIDVALIDITY, last UID) in the
+database, so a restart carries on where it left off, and a mailbox seen for
+the first time starts at its end rather than replaying history. A message
+the pipeline fails on is tried on a few passes, then skipped with an error,
+so one bad email cannot stop every one behind it.
 """
 import asyncio
 import email
 import imaplib
 import logging
 import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from email import policy
 from email.message import EmailMessage as MimeMessage
 from email.utils import getaddresses, parsedate_to_datetime
@@ -32,7 +39,7 @@ from sqlalchemy.exc import IntegrityError
 from config.settings import config
 from database import models
 from database.connection import get_session
-from services import inbound
+from services import inbound, secrets
 
 logger = logging.getLogger(__name__)
 
@@ -47,18 +54,85 @@ _THRID = re.compile(rb"X-GM-THRID (\d+)")
 _UID = re.compile(rb"UID (\d+)")
 
 
+@dataclass
+class Source:
+    """One mailbox to read: where it is, how to sign in, and whose it is."""
+    address: str
+    host: str
+    port: int
+    password: str
+    folder: str
+    account_id: Optional[object]   # the EmailAccount row; None for the shared mailbox from .env
+    across_accounts: bool          # the catch-all answers for every mailbox's bids
+
+    @property
+    def key(self) -> str:
+        return self.address.strip().lower()
+
+
+def shared_source() -> Optional[Source]:
+    if not config.shared_inbox_enabled():
+        return None
+    return Source(
+        address=config.SHARED_INBOX_ADDRESS,
+        host=config.SHARED_INBOX_IMAP_HOST,
+        port=993,
+        password=config.SHARED_INBOX_APP_PASSWORD,
+        folder=config.SHARED_INBOX_FOLDER,
+        account_id=None,
+        across_accounts=True,
+    )
+
+
+def sources(session) -> list[Source]:
+    """The shared mailbox, then every app-password mailbox that is live or
+    only failing (a failing one is retried; a revoked one is left alone)."""
+    out = []
+    shared = shared_source()
+    if shared:
+        out.append(shared)
+    rows = (
+        session.query(models.EmailAccount)
+        .filter(
+            models.EmailAccount.transport == models.TRANSPORT_IMAP,
+            models.EmailAccount.status.in_(("active", "failing")),
+            models.EmailAccount.secret.isnot(None),
+        )
+        .order_by(models.EmailAccount.created_at)
+        .all()
+    )
+    for row in rows:
+        if shared and (row.email_address or "").strip().lower() == shared.key:
+            continue
+        try:
+            password = secrets.decrypt(row.secret)
+        except secrets.SecretError as e:
+            logger.error(f"mailbox {row.email_address}: {e}")
+            continue
+        out.append(Source(
+            address=row.email_address,
+            host=row.imap_host or "imap.gmail.com",
+            port=int(row.imap_port or 993),
+            password=password,
+            folder="INBOX",
+            account_id=row.id,
+            across_accounts=False,
+        ))
+    return out
+
+
 class Mailbox:
     """One IMAP session on the shared folder, read-only. Synchronous: the
     caller runs it in a thread."""
 
-    def __init__(self, host: str, user: str, password: str, folder: str):
-        self.host, self.user, self.password, self.folder = host, user, password, folder
+    def __init__(self, host: str, user: str, password: str, folder: str, port: int = 993):
+        self.host, self.user, self.password, self.folder, self.port = host, user, password, folder, int(port or 993)
         self.conn: Optional[imaplib.IMAP4_SSL] = None
         self.uidvalidity = 0
         self.gmail = "gmail" in host.lower()
 
     def __enter__(self) -> "Mailbox":
-        self.conn = imaplib.IMAP4_SSL(self.host)
+        self.conn = imaplib.IMAP4_SSL(self.host, self.port, timeout=30)
         self.conn.login(self.user, self.password)
         typ, _ = self.conn.select(_quote(self.folder), readonly=True)
         if typ != "OK":
@@ -182,17 +256,25 @@ def parse_message(raw: bytes, message_id: Optional[str], thread_id: Optional[str
     }
 
 
-def catcher_account(session) -> Optional[models.EmailAccount]:
-    """The shared EmailAccount the folder belongs to. Messages are stored
-    against it, and its company bounds the negotiations they can match."""
+def account_for(session, source: Source) -> Optional[models.EmailAccount]:
+    """The EmailAccount the folder belongs to. Messages are stored against
+    it, and its company bounds the negotiations they can match. The shared
+    mailbox from .env is matched by address; a dispatcher's by its row."""
+    if source.account_id is not None:
+        return session.get(models.EmailAccount, source.account_id)
     return (
         session.query(models.EmailAccount)
         .filter(
             models.EmailAccount.user_id.is_(None),
-            models.EmailAccount.email_address.ilike(config.SHARED_INBOX_ADDRESS),
+            models.EmailAccount.email_address.ilike(source.address),
         )
         .first()
     )
+
+
+def catcher_account(session) -> Optional[models.EmailAccount]:
+    shared = shared_source()
+    return account_for(session, shared) if shared else None
 
 
 def own_addresses(session, company_id: int) -> set[str]:
@@ -222,18 +304,13 @@ def is_alert(message: dict) -> bool:
     return False
 
 
-def _read_batch(last_uid: Optional[int]) -> tuple[int, int, list[tuple[int, bytes, Optional[str]]]]:
+def _read_batch(last_uid: Optional[int], source: Source) -> tuple[int, int, list[tuple[int, bytes, Optional[str]]]]:
     """
     One IMAP session: (uidvalidity, folder's last uid, [(uid, raw, thread_id)]).
     With no cursor yet (`last_uid` None) nothing is fetched; the caller records
     the folder's end and starts from there.
     """
-    with Mailbox(
-        config.SHARED_INBOX_IMAP_HOST,
-        config.SHARED_INBOX_ADDRESS,
-        config.SHARED_INBOX_APP_PASSWORD,
-        config.SHARED_INBOX_FOLDER,
-    ) as box:
+    with Mailbox(source.host, source.address, source.password, source.folder, source.port) as box:
         end = box.last_uid()
         if last_uid is None:
             return box.uidvalidity, end, []
@@ -244,42 +321,51 @@ def _read_batch(last_uid: Optional[int]) -> tuple[int, int, list[tuple[int, byte
         return box.uidvalidity, end, fetched
 
 
-def _cursor(session, uidvalidity: int) -> Optional[models.SharedInboxCursor]:
-    row = session.get(models.SharedInboxCursor, config.SHARED_INBOX_ADDRESS)
-    if row and row.uidvalidity == uidvalidity:
-        return row
-    return None
-
-
-def _advance(session, uidvalidity: int, uid: int) -> None:
-    row = session.get(models.SharedInboxCursor, config.SHARED_INBOX_ADDRESS)
+def _advance(session, source: Source, uidvalidity: int, uid: int) -> None:
+    row = session.get(models.SharedInboxCursor, source.key)
     if row is None:
-        session.add(models.SharedInboxCursor(
-            mailbox=config.SHARED_INBOX_ADDRESS, uidvalidity=uidvalidity, last_uid=uid,
-        ))
+        session.add(models.SharedInboxCursor(mailbox=source.key, uidvalidity=uidvalidity, last_uid=uid))
     else:
         row.uidvalidity = uidvalidity
         row.last_uid = uid
 
 
-async def handle(uid: int, raw: bytes, thread_id: Optional[str], uidvalidity: int) -> None:
+def _mark(session, source: Source, error: Optional[str]) -> None:
+    """A dispatcher's mailbox remembers whether its last pass signed in."""
+    if source.account_id is None:
+        return
+    account = session.get(models.EmailAccount, source.account_id)
+    if account is None:
+        return
+    account.last_checked_at = datetime.now(timezone.utc)
+    account.last_error = error
+    if error and account.status == "active":
+        account.status = "failing"
+    elif not error and account.status == "failing":
+        account.status = "active"
+
+
+async def handle(
+    uid: int, raw: bytes, thread_id: Optional[str], uidvalidity: int, source: Optional[Source] = None
+) -> None:
     """One message, one transaction: the claim, the pipeline and the cursor
     move together, so a failure leaves all three for the next pass."""
-    key = f"imap:{config.SHARED_INBOX_ADDRESS}:{uidvalidity}:{uid}"
+    source = source or shared_source()
+    key = f"imap:{source.key}:{uidvalidity}:{uid}"
     with get_session() as session:
-        account = catcher_account(session)
+        account = account_for(session, source)
         if account is None:
             raise RuntimeError(
-                f"no shared mailbox is connected for {config.SHARED_INBOX_ADDRESS}; "
-                "connect it from the company settings so its messages have a company"
+                f"no mailbox is connected for {source.address}; "
+                "connect it so its messages have a company"
             )
         session.add(models.ProcessedWebhook(nylas_message_id=key))
         try:
             session.flush()
         except IntegrityError:
             session.rollback()
-            logger.info(f"shared inbox UID {uid} was already handled")
-            _advance(session, uidvalidity, uid)
+            logger.info(f"{source.address} UID {uid} was already handled")
+            _advance(session, source, uidvalidity, uid)
             return
 
         # The Nylas id is left empty on purpose: a reply to this message
@@ -287,82 +373,111 @@ async def handle(uid: int, raw: bytes, thread_id: Optional[str], uidvalidity: in
         message = parse_message(raw, None, thread_id)
         senders = {e["email"] for e in message["from"]}
         if is_alert(message):
-            logger.debug(f"shared inbox UID {uid}: Sylectus alert, skipped")
+            logger.debug(f"{source.address} UID {uid}: Sylectus alert, skipped")
         elif senders & own_addresses(session, account.company_id):
             logger.info(
-                f"shared inbox UID {uid}: our own copy of a send from "
+                f"{source.address} UID {uid}: our own copy of a send from "
                 f"{sorted(senders)}, skipped"
             )
         else:
             await inbound.handle_inbound_message(
-                session, account, message, across_accounts=True
+                session, account, message, across_accounts=source.across_accounts
             )
-        _advance(session, uidvalidity, uid)
+        _advance(session, source, uidvalidity, uid)
 
 
-async def poll_once(attempts: dict[int, int]) -> int:
-    """One pass over the folder. Returns how many messages were handled."""
+async def poll_source(source: Source, attempts: dict) -> int:
+    """One pass over one mailbox. Returns how many messages were handled."""
     with get_session() as session:
-        row = session.get(models.SharedInboxCursor, config.SHARED_INBOX_ADDRESS)
+        row = session.get(models.SharedInboxCursor, source.key)
         known = (row.uidvalidity, row.last_uid) if row else None
 
-    uidvalidity, end, batch = await asyncio.to_thread(
-        _read_batch, known[1] if known else None
-    )
+    try:
+        uidvalidity, end, batch = await asyncio.to_thread(
+            _read_batch, known[1] if known else None, source
+        )
+    except Exception as e:  # noqa: BLE001 - the mailbox, not the service, is at fault
+        with get_session() as session:
+            _mark(session, source, f"IMAP: {str(e)[:300] or type(e).__name__}")
+        raise
+    with get_session() as session:
+        _mark(session, source, None)
+
     if known is None or known[0] != uidvalidity:
         # First sight of this folder, or its UIDs were renumbered: start at
         # the end. Nothing older is a reply to a bid this reader was meant to
         # catch, and a replay of the whole folder would be thousands of
         # messages through the AI.
         with get_session() as session:
-            _advance(session, uidvalidity, end)
+            _advance(session, source, uidvalidity, end)
         logger.info(
-            f"shared inbox {config.SHARED_INBOX_ADDRESS}: starting after UID {end} "
-            f"(UIDVALIDITY {uidvalidity})"
+            f"mailbox {source.address}: starting after UID {end} (UIDVALIDITY {uidvalidity})"
         )
-        attempts.clear()
+        for k in [k for k in attempts if k[0] == source.key]:
+            attempts.pop(k, None)
         return 0
     if not batch:
         return 0
 
     handled = 0
     for uid, raw, thread_id in batch:
+        key = (source.key, uid)
         try:
-            await handle(uid, raw, thread_id, uidvalidity)
-            attempts.pop(uid, None)
+            await handle(uid, raw, thread_id, uidvalidity, source)
+            attempts.pop(key, None)
             handled += 1
         except asyncio.CancelledError:
             raise
         except Exception:
-            attempts[uid] = attempts.get(uid, 0) + 1
-            if attempts[uid] >= MAX_ATTEMPTS:
+            attempts[key] = attempts.get(key, 0) + 1
+            if attempts[key] >= MAX_ATTEMPTS:
                 logger.exception(
-                    f"shared inbox UID {uid} failed {attempts[uid]} times; skipping it. "
+                    f"{source.address} UID {uid} failed {attempts[key]} times; skipping it. "
                     "The message is still in the mailbox."
                 )
                 with get_session() as session:
-                    _advance(session, uidvalidity, uid)
-                attempts.pop(uid, None)
+                    _advance(session, source, uidvalidity, uid)
+                attempts.pop(key, None)
                 continue
             logger.exception(
-                f"shared inbox UID {uid} failed (attempt {attempts[uid]}); "
+                f"{source.address} UID {uid} failed (attempt {attempts[key]}); "
                 "trying again on the next pass"
             )
             break
     return handled
 
 
+async def poll_once(attempts: dict) -> int:
+    """One pass over every mailbox. A mailbox that fails does not stop the
+    others; its error is kept on its account and logged once per pass."""
+    with get_session() as session:
+        todo = sources(session)
+    handled = 0
+    for source in todo:
+        try:
+            handled += await poll_source(source, attempts)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"mailbox {source.address}: pass failed: {str(e)[:300] or type(e).__name__}")
+    return handled
+
+
 async def poll_forever() -> None:
     """Runs for the life of the process when the reader is configured. A
     failed pass never stops the loop."""
-    if not config.shared_inbox_enabled():
-        logger.info("shared inbox reader off: SHARED_INBOX_ADDRESS or its app password is empty")
-        return
-    logger.info(
-        f"shared inbox reader polling {config.SHARED_INBOX_ADDRESS} "
-        f"({config.SHARED_INBOX_FOLDER}) every {config.SHARED_INBOX_POLL_SECONDS}s"
-    )
-    attempts: dict[int, int] = {}
+    if config.shared_inbox_enabled():
+        logger.info(
+            f"mailbox reader polling {config.SHARED_INBOX_ADDRESS} "
+            f"({config.SHARED_INBOX_FOLDER}) and every app-password mailbox every "
+            f"{config.SHARED_INBOX_POLL_SECONDS}s"
+        )
+    else:
+        logger.info(
+            "shared inbox reader off: SHARED_INBOX_ADDRESS or its app password is empty; "
+            "app-password mailboxes are still read"
+        )
+    attempts: dict[tuple, int] = {}
     while True:
         try:
             await asyncio.sleep(config.SHARED_INBOX_POLL_SECONDS)
@@ -371,4 +486,4 @@ async def poll_forever() -> None:
             logger.info("shared inbox reader stopping")
             raise
         except Exception:
-            logger.exception("shared inbox pass failed; continuing")
+            logger.exception("mailbox pass failed; continuing")

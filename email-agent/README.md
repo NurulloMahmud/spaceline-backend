@@ -148,12 +148,30 @@ reaches both. The service polls the shared mailbox with an app password:
 | `SHARED_INBOX_FOLDER` | default `INBOX` |
 | `SHARED_INBOX_POLL_SECONDS` | default 15 |
 
-Both of the first two empty leaves the reader off. It keeps its place in
+Both of the first two empty leaves the reader off for the shared mailbox. It keeps its place in
 `shared_inbox_cursors` and starts at the folder's end the first time it sees
 it. Messages from any of the company's own mailboxes (the Cc copy of a bid)
 and Sylectus alerts are skipped. A reply matches its negotiation by the
 Message-IDs it quotes in In-Reply-To and References, which every outbound
 row now records, before the subject-and-broker fallback.
+
+### Dispatcher mailboxes with an app password
+
+`Admin > Mailboxes` (frontend) lets an admin connect a dispatcher's mailbox
+without Nylas: email address, the provider's app password, and the IMAP and
+SMTP hosts, which the page prefills per provider. The service signs in both
+ways before storing anything (`POST /api/v1/mailboxes/test`,
+`PUT /api/v1/mailboxes/users/{id}`). Such a mailbox (`email_accounts.transport
+= 'imap'`) sends over SMTP from its own address, as a reply to the Sylectus
+alert by Message-ID, and is read over IMAP by the same reader as the shared
+mailbox, matching only its own negotiations. No Google API is involved, so
+the per-user quota cannot refuse a bid. Nylas mailboxes keep working
+unchanged; connecting a user here replaces and revokes their Nylas grant.
+
+| Env | Meaning |
+|---|---|
+| `MAILBOX_ADMIN_USERS` | comma-separated BTM user ids allowed on the page and its endpoints |
+| `MAILBOX_SECRET_KEY` | Fernet key the app passwords are encrypted with; generate once, never rotate without re-entering passwords |
 
 `grant.expired` and `grant.deleted` set the company's mailbox `status` to
 `expired`/`revoked`, which `GET /api/v1/accounts` reports so a dispatcher is
@@ -212,8 +230,11 @@ services/
   auth.py                Django JWT validation, company scoping
   negotiations.py        starting a bid (the only auto-sent email)
   inbound.py             broker message → classify → suggest or verify
-  shared_inbox.py        the shared mailbox over IMAP, feeding inbound.py
+  shared_inbox.py        the shared mailbox and every app-password mailbox over IMAP, feeding inbound.py
   mailboxes.py           Reply-To and Cc that route answers to the shared mailbox
+  outbound.py            one send door: Nylas for Nylas mailboxes, SMTP for app-password ones
+  imap_smtp.py           plain IMAP/SMTP sign-in check, message build and send
+  secrets.py             app passwords encrypted at rest (MAILBOX_SECRET_KEY)
   booking.py             verified ratecon → TMS load → driver notice
   suggestions.py         ignore / send / edit & send
   ai.py                  every model call, all schema-constrained JSON

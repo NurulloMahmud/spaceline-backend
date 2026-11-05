@@ -122,6 +122,17 @@ class Config:
     def shared_inbox_enabled(self) -> bool:
         return bool(self.SHARED_INBOX_ADDRESS and self.SHARED_INBOX_APP_PASSWORD)
 
+    # Mailboxes connected with an app password instead of Nylas: the admin
+    # page that enters them (routers/mailboxes.py) is open only to these BTM
+    # user ids, and the passwords rest encrypted with this Fernet key
+    # (services/secrets.py). Nylas keeps working for every mailbox connected
+    # through it; an app-password mailbox sends over SMTP and is read over IMAP.
+    MAILBOX_ADMIN_USERS: str = os.getenv("MAILBOX_ADMIN_USERS", "").strip()
+    MAILBOX_SECRET_KEY: str = os.getenv("MAILBOX_SECRET_KEY", "").strip()
+
+    def mailbox_admin(self, user_id: int) -> bool:
+        return str(user_id) in {p.strip() for p in self.MAILBOX_ADMIN_USERS.split(",") if p.strip()}
+
     # openai
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")

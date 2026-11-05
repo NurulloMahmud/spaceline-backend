@@ -24,6 +24,9 @@ def reply_catcher(session: Session, account: models.EmailAccount) -> Optional[st
     None when that is the account itself: the shared mailbox is the one
     being read, so its own mail needs no detour.
     """
+    if account.uses_imap:
+        # Read over IMAP itself, so the broker's answer is seen where it lands.
+        return None
     own = (account.email_address or "").strip().lower()
     address = config.SHARED_INBOX_ADDRESS
     if not address:

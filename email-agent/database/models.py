@@ -58,6 +58,10 @@ OUTCOME_MISMATCH = "mismatch"
 OUTCOME_PARSE_FAILED = "parse_failed"
 
 
+TRANSPORT_NYLAS = "nylas"
+TRANSPORT_IMAP = "imap"
+
+
 class EmailAccount(Base):
     """
     A mailbox connected through Nylas: either the company's shared dispatch
@@ -88,8 +92,26 @@ class EmailAccount(Base):
     # mail. Null on accounts connected before the check existed.
     expected_email_address = Column(String, nullable=True)
     status = Column(String, default="active", nullable=False)
+    # How mail moves for this mailbox. "nylas": through the grant above.
+    # "imap": with an app password, sent over SMTP and read over IMAP by
+    # services.shared_inbox; `nylas_grant_id` then holds a placeholder
+    # ("imap:<uuid>") because the column is required and unique.
+    transport = Column(String, default=TRANSPORT_NYLAS, nullable=False, server_default=TRANSPORT_NYLAS)
+    imap_host = Column(String, nullable=True)
+    imap_port = Column(Integer, nullable=True)
+    smtp_host = Column(String, nullable=True)
+    smtp_port = Column(Integer, nullable=True)
+    # The app password, encrypted with MAILBOX_SECRET_KEY (services.secrets).
+    secret = Column(Text, nullable=True)
+    last_checked_at = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(Text, nullable=True)
+    connected_by_user_id = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), default=_now, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
+
+    @property
+    def uses_imap(self) -> bool:
+        return self.transport == TRANSPORT_IMAP
 
     def __repr__(self):
         return f"<EmailAccount company={self.company_id} user={self.user_id} email={self.email_address}>"

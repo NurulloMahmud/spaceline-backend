@@ -48,6 +48,19 @@ class ConnectAccountRequest(BaseModel):
     )
 
 
+class MailboxCredentialsIn(BaseModel):
+    """A mailbox connected with an app password, as the admin page enters it."""
+    email_address: EmailStr
+    password: Optional[str] = Field(
+        None, max_length=200,
+        description="the provider's app password; omit on an edit to keep the stored one",
+    )
+    imap_host: str = Field(..., min_length=3, max_length=200)
+    imap_port: int = Field(993, ge=1, le=65535)
+    smtp_host: str = Field(..., min_length=3, max_length=200)
+    smtp_port: int = Field(465, ge=1, le=65535)
+
+
 class MessageOut(BaseModel):
     id: str
     direction: str

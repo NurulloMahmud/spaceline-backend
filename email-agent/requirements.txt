@@ -12,3 +12,4 @@ PyJWT==2.10.1
 python-multipart==0.0.20
 pytest==8.3.4
 pytest-asyncio==0.25.2
+cryptography==50.0.2

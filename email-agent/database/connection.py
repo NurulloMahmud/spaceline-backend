@@ -86,6 +86,16 @@ ADDITIVE_COLUMNS = (
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_email_accounts_user "
     "ON email_accounts (user_id) WHERE user_id IS NOT NULL",
     "ALTER TABLE negotiations ADD COLUMN IF NOT EXISTS email_account_id UUID",
+    # App-password mailboxes (SMTP out, IMAP in) next to the Nylas ones.
+    "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS transport VARCHAR NOT NULL DEFAULT 'nylas'",
+    "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS imap_host VARCHAR",
+    "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS imap_port INTEGER",
+    "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS smtp_host VARCHAR",
+    "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS smtp_port INTEGER",
+    "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS secret TEXT",
+    "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS last_checked_at TIMESTAMPTZ",
+    "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS last_error TEXT",
+    "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS connected_by_user_id INTEGER",
 )
 
 

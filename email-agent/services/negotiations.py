@@ -17,6 +17,7 @@ from services import bid_email, events
 from services.atrek import atrek
 from services.boxtruck import boxtruck
 from services.mailboxes import catcher_headers
+from services import outbound
 from services.nylas_client import NylasError, NylasRateLimited, nylas
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,10 @@ async def find_posting_email(
     rfc_id = (load_detail.get("email_message_id") or "").strip()
     if not rfc_id:
         return None, None
+    if account.uses_imap:
+        # No Nylas id to reply to; the SMTP send threads on the Message-ID,
+        # which Gmail honours for mail submitted over SMTP.
+        return None, load_detail.get("email_subject")
     message = await nylas.find_message_by_rfc_id(account.nylas_grant_id, rfc_id)
     if not message or not message.get("id"):
         logger.info(
@@ -318,8 +323,8 @@ async def create_negotiation(
     session.flush()
 
     try:
-        sent = await nylas.send_message(
-            grant_id=account.nylas_grant_id,
+        sent = await outbound.send(
+            account,
             to_email=resolved_email,
             subject=subject,
             body=body,

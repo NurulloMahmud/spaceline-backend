@@ -334,7 +334,7 @@ async def test_the_first_pass_starts_at_the_end_of_the_folder(
 ):
     reads = []
 
-    def read_batch(last_uid):
+    def read_batch(last_uid, source):
         reads.append(last_uid)
         return 42, 5776, [] if last_uid is None else [(5777, raw_email(), None)]
 
@@ -355,7 +355,7 @@ async def test_renumbered_uids_restart_the_cursor(session, account, reader_on, p
     session.add(models.SharedInboxCursor(mailbox=SHARED, uidvalidity=1, last_uid=100))
     session.commit()
 
-    monkeypatch.setattr(shared_inbox, "_read_batch", lambda last_uid: (2, 10, []))
+    monkeypatch.setattr(shared_inbox, "_read_batch", lambda last_uid, source: (2, 10, []))
     assert await shared_inbox.poll_once({}) == 0
     session.expire_all()
     cursor = session.get(models.SharedInboxCursor, SHARED)
@@ -369,7 +369,7 @@ async def test_a_message_that_keeps_failing_is_skipped_after_a_few_passes(
     session.commit()
     monkeypatch.setattr(
         shared_inbox, "_read_batch",
-        lambda last_uid: (1, 8, [(7, raw_email(), None), (8, raw_email(message_id="<r2@acme>"), None)]),
+        lambda last_uid, source: (1, 8, [(7, raw_email(), None), (8, raw_email(message_id="<r2@acme>"), None)]),
     )
     seen = []
 
@@ -396,9 +396,15 @@ async def test_a_message_that_keeps_failing_is_skipped_after_a_few_passes(
     assert "skipping it" in caplog.text
 
 
-async def test_the_reader_stays_off_without_credentials(monkeypatch, caplog):
+async def test_the_reader_says_when_the_shared_mailbox_is_off(monkeypatch, caplog):
     monkeypatch.setattr(config, "SHARED_INBOX_ADDRESS", "")
-    await shared_inbox.poll_forever()
+
+    async def stop(seconds):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(shared_inbox.asyncio, "sleep", stop)
+    with pytest.raises(asyncio.CancelledError):
+        await shared_inbox.poll_forever()
     assert "reader off" in caplog.text
 
 

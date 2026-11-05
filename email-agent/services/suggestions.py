@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from database import models
 from services import events
 from services.mailboxes import catcher_headers
+from services import outbound
 from services.negotiations import NegotiationError, reply_subject, thread_mailbox
 from services.nylas_client import NylasError, nylas
 
@@ -132,8 +133,8 @@ async def send(
             in_reply_to = source.rfc_message_id
 
     try:
-        sent = await nylas.send_message(
-            grant_id=account.nylas_grant_id,
+        sent = await outbound.send(
+            account,
             to_email=negotiation.broker_email,
             subject=final_subject,
             body=final_body.replace("\n", "<br>"),

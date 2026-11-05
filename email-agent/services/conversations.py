@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from database import models
 from services import events
 from services.mailboxes import catcher_headers
+from services import outbound
 from services.negotiations import NegotiationError, reply_subject, thread_mailbox
 from services.nylas_client import NylasError, nylas
 from services.suggestions import REPLIED_IN_APP, supersede_pending
@@ -208,8 +209,8 @@ async def write(
     nylas_id, rfc_id = _reply_targets(session, negotiation)
     try:
         try:
-            sent = await nylas.send_message(
-                grant_id=account.nylas_grant_id,
+            sent = await outbound.send(
+                account,
                 to_email=negotiation.broker_email,
                 subject=subject,
                 body=html_body,
@@ -226,8 +227,8 @@ async def write(
                 f"conversation {negotiation.id}: reply_to {nylas_id} refused ({e}), "
                 "sending on the Message-ID instead"
             )
-            sent = await nylas.send_message(
-                grant_id=account.nylas_grant_id,
+            sent = await outbound.send(
+                account,
                 to_email=negotiation.broker_email,
                 subject=subject,
                 body=html_body,
