@@ -11,7 +11,7 @@ from cryptography.fernet import Fernet
 
 from config.settings import config
 from database import models
-from services import imap_smtp, outbound, secrets, shared_inbox
+from services import imap_smtp, negotiations, outbound, secrets, shared_inbox
 from services import outbound
 from tests.test_auth import make_token
 from tests.test_negotiation_service import POSTING, stubs  # noqa: F401
@@ -390,6 +390,34 @@ async def test_an_imap_pass_that_cannot_sign_in_marks_the_mailbox_failing(sessio
     await shared_inbox.poll_source(source, {})
     session.expire_all()
     assert imap_account.status == "active"
+    assert imap_account.last_error is None
+
+
+async def test_a_slow_or_dropped_imap_pass_keeps_the_mailbox_sendable(session, imap_account, monkeypatch):
+    def slow(last_uid, source):
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(shared_inbox, "_read_batch", slow)
+    source = shared_inbox.sources(session)[0]
+    with pytest.raises(TimeoutError):
+        await shared_inbox.poll_source(source, {})
+    session.expire_all()
+    assert imap_account.status == "active"
+    assert "timed out" in imap_account.last_error
+    assert negotiations.sending_mailbox(session, imap_account.company_id, imap_account.user_id) is imap_account
+
+    def gone(last_uid, source):
+        raise imap_smtp.imaplib.IMAP4.error("socket error: EOF")
+
+    monkeypatch.setattr(shared_inbox, "_read_batch", gone)
+    with pytest.raises(imap_smtp.imaplib.IMAP4.error):
+        await shared_inbox.poll_source(source, {})
+    session.expire_all()
+    assert imap_account.status == "active"
+
+    monkeypatch.setattr(shared_inbox, "_read_batch", lambda last_uid, source: (1, 10, []))
+    await shared_inbox.poll_source(source, {})
+    session.expire_all()
     assert imap_account.last_error is None
 
 

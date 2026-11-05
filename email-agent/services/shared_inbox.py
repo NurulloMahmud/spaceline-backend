@@ -132,7 +132,7 @@ class Mailbox:
         self.gmail = "gmail" in host.lower()
 
     def __enter__(self) -> "Mailbox":
-        self.conn = imaplib.IMAP4_SSL(self.host, self.port, timeout=30)
+        self.conn = imaplib.IMAP4_SSL(self.host, self.port, timeout=60)
         self.conn.login(self.user, self.password)
         typ, _ = self.conn.select(_quote(self.folder), readonly=True)
         if typ != "OK":
@@ -330,8 +330,28 @@ def _advance(session, source: Source, uidvalidity: int, uid: int) -> None:
         row.last_uid = uid
 
 
-def _mark(session, source: Source, error: Optional[str]) -> None:
-    """A dispatcher's mailbox remembers whether its last pass signed in."""
+_SIGN_IN_WORDS = (
+    "authenticationfailed",
+    "invalid credentials",
+    "username and password not accepted",
+    "application-specific password",
+    "login failed",
+    "[auth]",
+)
+
+
+def sign_in_failed(e: Exception) -> bool:
+    """Whether the provider turned the credentials down. Anything else (a slow
+    read, a dropped connection, a busy server) is the network's fault and
+    passes on its own, so it must not take the dispatcher's mailbox away."""
+    text = str(e).lower()
+    return isinstance(e, imaplib.IMAP4.error) and any(w in text for w in _SIGN_IN_WORDS)
+
+
+def _mark(session, source: Source, error: Optional[str], fatal: bool = False) -> None:
+    """A dispatcher's mailbox remembers how its last pass went. Only a pass
+    that could not sign in marks it failing (which stops its bids); a passing
+    error is kept for the Mailboxes page and cleared by the next good pass."""
     if source.account_id is None:
         return
     account = session.get(models.EmailAccount, source.account_id)
@@ -339,7 +359,7 @@ def _mark(session, source: Source, error: Optional[str]) -> None:
         return
     account.last_checked_at = datetime.now(timezone.utc)
     account.last_error = error
-    if error and account.status == "active":
+    if error and fatal and account.status == "active":
         account.status = "failing"
     elif not error and account.status == "failing":
         account.status = "active"
@@ -397,8 +417,10 @@ async def poll_source(source: Source, attempts: dict) -> int:
             _read_batch, known[1] if known else None, source
         )
     except Exception as e:  # noqa: BLE001 - the mailbox, not the service, is at fault
+        fatal = sign_in_failed(e)
+        text = str(e)[:300] or type(e).__name__
         with get_session() as session:
-            _mark(session, source, f"IMAP: {str(e)[:300] or type(e).__name__}")
+            _mark(session, source, f"IMAP: {text}" if fatal else f"IMAP, last pass: {text}; trying again", fatal)
         raise
     with get_session() as session:
         _mark(session, source, None)
