@@ -116,6 +116,32 @@ the per-user quota cannot refuse a bid.
 | `MAILBOX_ADMIN_USERS` | comma-separated BTM user ids allowed on the page and its endpoints |
 | `MAILBOX_SECRET_KEY` | Fernet key the app passwords are encrypted with; generate once, never rotate without re-entering passwords |
 
+### Reliability and alerts
+
+Sending and reading are separate connections, and neither depends on the
+other. A bid opens its own SMTP connection; a busy server (421), a dropped
+or slow connection is tried again after 2, 5 and 10 seconds before the
+dispatcher sees an error (`services/outbound.py`). A refused password fails
+at once and marks the mailbox `failing`, which is the only way a mailbox
+loses its `active` status: the inbox reader's own errors (a read timeout, a
+dropped connection) are kept in `email_accounts.last_error` for the Mailboxes
+page but never stop bids.
+
+The reader holds one standing IMAP connection per mailbox
+(`services/shared_inbox.py`), opened on first use and replaced on the spot
+when the server drops it, instead of signing in afresh on every pass.
+
+`services/alerts.py` watches every minute and messages a Telegram chat when a
+mailbox's password is refused, a bid could not be sent after the retries, a
+mailbox's reads have failed for ten minutes, or the reader has not finished a
+pass for five. Each condition is said once, repeated hourly while it lasts,
+and once more when it clears.
+
+| Env | Meaning |
+|---|---|
+| `ALERT_BOT_TOKEN` | Telegram bot the alerts come from; defaults to `IP_ALERT_BOT_TOKEN` |
+| `ALERT_CHAT_ID` | chat they go to; defaults to `IP_ALERT_CHAT_ID`. Both empty: alerts only reach the log |
+
 `grant.expired` and `grant.deleted` set the company's mailbox `status` to
 `expired`/`revoked`, which `GET /api/v1/accounts` reports so a dispatcher is
 told to reconnect instead of watching a dead mailbox look healthy.
