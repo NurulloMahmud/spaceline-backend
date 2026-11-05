@@ -27,8 +27,13 @@ def money(v):
     return f'${v:,.2f}' if v >= 0 else f'-${-v:,.2f}'
 
 
+def normalise_payment_type(value):
+    """The accounting name for a payment type typed anywhere: blank and unknown mean Regular Pay."""
+    return PAY_TYPE_ALIASES.get(str(value or '').strip().lower(), 'Regular Pay')
+
+
 def payment_type_of(load):
-    return PAY_TYPE_ALIASES.get(str(load.payment_type or '').strip().lower(), 'Regular Pay')
+    return normalise_payment_type(load.payment_type)
 
 
 def shipment_of(load):
@@ -99,6 +104,25 @@ def drop_quick_pay_fee(payout, user):
     log_payout(payout, user, f'Quick Pay fee {money(fee)} back to the driver')
 
 
+def set_payment_type(payout, new_type, user, why='', write_load=True):
+    """Move an unpaid payout to another payment type, taking or returning the Quick Pay fee,
+    and keep the load's own field in step. The caller saves the payout."""
+    if new_type == payout.payment_type:
+        return False
+    log_payout(payout, user, f'Payment type {payout.payment_type} to {new_type}' + (f' ({why})' if why else ''))
+    payout.payment_type = new_type
+    if new_type == Payout.QUICK_PAY:
+        take_quick_pay_fee(payout, user)
+    else:
+        drop_quick_pay_fee(payout, user)
+    if write_load and payout.load.payment_type != new_type:
+        old = payout.load.payment_type or '-'
+        Load.objects.filter(pk=payout.load_id).update(payment_type=new_type, updated_by=user)
+        LoadHistory.objects.create(load=payout.load, changed_by=user, description=f'Load Updated | Payment Type: {old} -> {new_type}')
+        payout.load.payment_type = new_type
+    return True
+
+
 def take_open_expenses(payout, user=None, exclude=None):
     """Put the driver's open expenses on this payout, oldest first, up to what it can carry.
 
@@ -156,11 +180,15 @@ def take_expense_everywhere(deduction, user=None, exclude_payout=None):
 
 
 @transaction.atomic
-def create_for_load(load, user=None, take_expenses=True):
-    """Both records for a booked load. Safe to call twice: existing records are kept."""
+def create_for_load(load, user=None, take_expenses=True, take_fee=True):
+    """Both records for a booked load. Safe to call twice: existing records are kept.
+    A load booked as Quick Pay has its fee taken at once."""
     payout, made_p = Payout.objects.get_or_create(load=load, defaults={'gross': load.driver_pay or ZERO, 'payment_type': payment_type_of(load)})
     if made_p:
         log_payout(payout, user, f'Created from load {shipment_of(load)} with the driver pay {money(load.driver_pay)}')
+        if payout.payment_type == Payout.QUICK_PAY and take_fee:
+            take_quick_pay_fee(payout, user)
+            payout.save(update_fields=['gross', 'quick_pay_fee'])
         if take_expenses:
             take_open_expenses(payout, user)
     invoice, made_i = Invoice.objects.get_or_create(load=load, defaults={'original': load.carrier_pay or ZERO, 'amount': load.carrier_pay or ZERO})
@@ -179,7 +207,13 @@ def follow_load_change(load, old, user=None):
         kept = 100 - QUICK_PAY_PERCENT
         fee = (new_pay * QUICK_PAY_PERCENT / kept).quantize(CENT, ROUND_HALF_UP) if payout.quick_pay_fee > 0 else ZERO
         Payout.objects.filter(pk=payout.pk).update(gross=new_pay, quick_pay_fee=fee)
+        payout.gross, payout.quick_pay_fee = new_pay, fee
         log_payout(payout, user, f'Driver pay on the load {money(old.get("driver_pay"))} to {money(load.driver_pay)}; payout follows it')
+    if 'payment_type' in old and normalise_payment_type(old.get('payment_type')) != payment_type_of(load) and payout and payout.status != Payout.PAID:
+        # The fee moves the driver pay on the very instance being saved, so a later save of it cannot undo the move.
+        payout.load = load
+        if set_payment_type(payout, payment_type_of(load), user, 'changed on the load', write_load=False):
+            payout.save(update_fields=['gross', 'quick_pay_fee', 'payment_type'])
     if old.get('carrier_pay') != load.carrier_pay and invoice and invoice.status != Invoice.PAID and invoice.amount == invoice.original == (old.get('carrier_pay') or ZERO):
         Invoice.objects.filter(pk=invoice.pk).update(original=load.carrier_pay or ZERO, amount=load.carrier_pay or ZERO)
         log_invoice(invoice, user, f'Carrier pay on the load {money(old.get("carrier_pay"))} to {money(load.carrier_pay)}; invoice follows it')

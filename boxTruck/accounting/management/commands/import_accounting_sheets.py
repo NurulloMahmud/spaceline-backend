@@ -120,7 +120,7 @@ class Command(BaseCommand):
             Payout.objects.all().delete()
             Invoice.objects.all().delete()
             for l in loads:
-                payout, invoice = create_for_load(l, take_expenses=False)
+                payout, invoice = create_for_load(l, take_expenses=False, take_fee=False)
                 # Both records date from the load, not from today, so the first step on the
                 # detail panel reads as the booking day.
                 if l.created_at:

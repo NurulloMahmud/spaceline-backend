@@ -15,6 +15,7 @@ from rest_framework import status, views
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 
+from accounting.services import normalise_payment_type
 from users.models import Company, CustomUser
 from users.permissions import IsInternalService
 
@@ -236,6 +237,7 @@ class InternalBookLoadView(views.APIView):
                     drop_date=_parse_stop_datetime(payload.get('drop_date')),
                     note=payload.get('note'),
                     dispatcher_note=payload.get('dispatcher_note'),
+                    payment_type=normalise_payment_type(payload['payment_type']) if payload.get('payment_type') else None,
                 )
 
                 stops = payload.get('stops') or []

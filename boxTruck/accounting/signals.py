@@ -18,6 +18,7 @@ def remember_old_load(sender, instance, **kwargs):
     instance._accounting_old = {
         'driver_pay': old.driver_pay, 'carrier_pay': old.carrier_pay,
         'status_id': old.status_id, 'status_name': old.status.name if old.status else None,
+        'payment_type': old.payment_type,
     } if old else None
 
 

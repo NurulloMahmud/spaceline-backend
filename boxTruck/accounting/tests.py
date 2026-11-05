@@ -36,7 +36,7 @@ class AccountingBase(TestCase):
         self.invoiced_st = LoadStatus.objects.create(name='Invoiced')
         self.fuel = DeductionType.objects.create(name='Fuel advance')
 
-    def load(self, shipment, driver=None, driver_pay='874', carrier_pay='1300', pay='Quick Pay', days_ago=1, status=None):
+    def load(self, shipment, driver=None, driver_pay='874', carrier_pay='1300', pay='Regular Pay', days_ago=1, status=None):
         l = Load.objects.create(driver=driver or self.driver, broker=self.broker, load_number=str(100000 + shipment),
                                 driver_pay=D(driver_pay), carrier_pay=D(carrier_pay), payment_type=pay, status=status or self.dispatched,
                                 pickup_date=timezone.now() - timezone.timedelta(days=days_ago), created_by=self.disp)
@@ -60,7 +60,7 @@ class CreatedWithTheLoad(AccountingBase):
         load = self.load(10002)
         p = load.payout
         self.assertEqual(p.gross, D('874'))
-        self.assertEqual(p.payment_type, 'Quick Pay')
+        self.assertEqual(p.payment_type, 'Regular Pay')
         self.assertEqual(p.status, Payout.PENDING)
         self.assertEqual(p.applied_total, D('210'))
         self.assertEqual(p.amount, D('664'))
@@ -154,16 +154,78 @@ class QuickPayFee(AccountingBase):
         self.assertEqual(r.data['gross'], D('1000.00'))
         self.assertEqual(self.fresh().load.driver_pay, D('1000.00'))
 
-    def test_a_load_booked_as_quick_pay_takes_the_fee_only_when_asked(self):
+    def test_a_load_booked_as_quick_pay_takes_the_fee_at_once(self):
+        self.expense('30')
         l = self.load(10033, driver_pay='200', pay='Quick Pay')
-        url = reverse('accounting-payout', args=[l.payout.id])
-        r = self.c.get(url)
-        self.assertEqual((r.data['quick_pay_fee'], r.data['quick_pay_quote'], r.data['amount']), (D('0'), D('10.00'), D('200')))
+        p = Payout.objects.select_related('load').get(load=l)
+        self.assertEqual((p.payment_type, p.quick_pay_fee, p.gross, p.applied_total, p.amount), ('Quick Pay', D('10.00'), D('190.00'), D('30'), D('160.00')))
+        self.assertEqual(p.load.driver_pay, D('190.00'))
+        self.assertTrue(p.history.filter(description__contains='Quick Pay fee $10.00').exists())
+        url = reverse('accounting-payout', args=[p.id])
         r = self.c.patch(url, {'take_quick_pay_fee': True}, format='json')
-        self.assertEqual((r.data['quick_pay_fee'], r.data['amount']), (D('10.00'), D('190.00')))
-        r = self.c.patch(url, {'take_quick_pay_fee': True}, format='json')
-        self.assertEqual(r.data['amount'], D('190.00'))
+        self.assertEqual((r.data['quick_pay_fee'], r.data['amount']), (D('10.00'), D('160.00')))
         self.assertEqual(self.c.patch(self.url, {'take_quick_pay_fee': True}, format='json').status_code, 400)
+
+    def test_a_payment_type_changed_on_the_load_moves_the_payout(self):
+        load = Load.objects.get(pk=self.l.pk)
+        load.payment_type = 'Quick Pay'
+        load.save()
+        p = self.fresh()
+        self.assertEqual((p.payment_type, p.quick_pay_fee, p.gross, p.load.driver_pay), ('Quick Pay', D('43.70'), D('830.30'), D('830.30')))
+        self.assertTrue(p.history.filter(description='Payment type Regular Pay to Quick Pay (changed on the load)').exists())
+        load = Load.objects.get(pk=self.l.pk)
+        load.payment_type = 'regular pay'
+        load.save()
+        p = self.fresh()
+        self.assertEqual((p.payment_type, p.quick_pay_fee, p.gross, p.load.driver_pay), ('Regular Pay', D('0'), D('874'), D('874')))
+
+    def test_a_pay_and_type_change_in_one_save_takes_the_fee_from_the_new_pay(self):
+        load = Load.objects.get(pk=self.l.pk)
+        load.driver_pay = D('1000')
+        load.payment_type = 'Quick Pay'
+        load.save()
+        p = self.fresh()
+        self.assertEqual((p.quick_pay_fee, p.gross, p.load.driver_pay), (D('50.00'), D('950.00'), D('950.00')))
+
+    def test_a_paid_payout_ignores_a_type_change_on_the_load(self):
+        self.api(self.boss).patch(self.url, {'status': 'paid'})
+        load = Load.objects.get(pk=self.l.pk)
+        load.payment_type = 'Quick Pay'
+        load.save()
+        p = self.fresh()
+        self.assertEqual((p.payment_type, p.quick_pay_fee, p.load.driver_pay), ('Regular Pay', D('0'), D('874')))
+
+    def test_a_type_changed_in_accounting_writes_back_to_the_load(self):
+        self.c.patch(self.url, {'payment_type': 'Quick Pay'})
+        load = Load.objects.get(pk=self.l.pk)
+        self.assertEqual(load.payment_type, 'Quick Pay')
+        self.assertTrue(LoadHistory.objects.filter(load=load, description='Load Updated | Payment Type: Regular Pay -> Quick Pay').exists())
+        # saving the load again with the same type changes nothing
+        load.note = 'call on arrival'
+        load.save()
+        self.assertEqual((self.fresh().quick_pay_fee, self.fresh().load.driver_pay), (D('43.70'), D('830.30')))
+
+    def test_sync_command_moves_stale_payouts_and_keeps_hand_set_ones(self):
+        stale = self.load(10034, driver_pay='500', pay='Regular Pay')
+        Load.objects.filter(pk=stale.pk).update(payment_type='Quick Pay')
+        by_hand = self.load(10035, driver_pay='300', pay='Quick Pay')
+        self.c.patch(reverse('accounting-payout', args=[by_hand.payout.id]), {'payment_type': 'Regular Pay'})
+        Load.objects.filter(pk=by_hand.pk).update(payment_type='Quick Pay')
+        no_fee = self.load(10036, driver_pay='400', pay='Quick Pay')
+        Payout.objects.filter(load=no_fee).update(quick_pay_fee=0, gross=400)
+        out = StringIO()
+        call_command('sync_payment_types', stdout=out)
+        self.assertIn('would move: load', out.getvalue())
+        self.assertIn('1 moved, 1 kept, 1 Quick Pay payouts without the fee (dry run)', out.getvalue())
+        self.assertEqual(Payout.objects.get(load=stale).payment_type, 'Regular Pay')
+        out = StringIO()
+        call_command('sync_payment_types', apply=True, stdout=out)
+        p = Payout.objects.select_related('load').get(load=stale)
+        self.assertEqual((p.payment_type, p.quick_pay_fee, p.gross, p.load.driver_pay), ('Quick Pay', D('25.00'), D('475.00'), D('475.00')))
+        self.assertEqual(Payout.objects.get(load=by_hand).payment_type, 'Regular Pay')
+        self.assertEqual(Payout.objects.get(load=no_fee).quick_pay_fee, D('0'))
+        call_command('sync_payment_types', apply=True, take_fees=True, stdout=StringIO())
+        self.assertEqual(Payout.objects.get(load=no_fee).quick_pay_fee, D('20.00'))
 
     def test_a_paid_payout_cannot_change(self):
         self.c.patch(self.url, {'payment_type': 'Quick Pay'})

@@ -39,7 +39,7 @@ class Command(BaseCommand):
                 made += 1
                 continue
             with transaction.atomic():
-                payout, invoice = create_for_load(load, take_expenses=False)
+                payout, invoice = create_for_load(load, take_expenses=False, take_fee=False)
                 name = (load.status.name if load.status else '').lower()
                 if name in ('invoiced', 'factored', 'paid') or (load.pickup_date and load.pickup_date < cutoff):
                     payout.status = Payout.PAID
