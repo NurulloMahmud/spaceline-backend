@@ -78,17 +78,6 @@ class Config:
     # instead of the real recipient, so a test bid can never reach a broker.
     EMAIL_REDIRECT_TO: str = os.getenv("EMAIL_REDIRECT_TO", "").strip()
 
-    # Whose bids must leave from a mailbox of their own (connected for them
-    # under Admin > Mailboxes): comma-separated BTM user ids, or "*" for
-    # everyone. Anyone else sends from the company's shared mailbox.
-    PERSONAL_MAILBOX_USERS: str = os.getenv("PERSONAL_MAILBOX_USERS", "").strip()
-
-    def personal_mailbox_allowed(self, user_id: int) -> bool:
-        allowed = self.PERSONAL_MAILBOX_USERS
-        if allowed == "*":
-            return True
-        return str(user_id) in {part.strip() for part in allowed.split(",") if part.strip()}
-
     # The company's shared mailbox, read over IMAP with an app password as the
     # catch-all: replies on negotiations that predate per-dispatcher mailboxes
     # and anything copied to it. Both values empty leaves that reader off; the

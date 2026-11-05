@@ -218,6 +218,26 @@ class PayoutRules(AccountingBase):
         self.assertFalse(PayoutExpense.objects.filter(payout=self.p, deduction=d).exists())
         self.assertEqual(PayoutExpense.objects.get(payout=other.payout, deduction=d).amount, D('76'))
 
+    def test_accounting_can_park_a_payout_on_hold_and_release_it(self):
+        acct = self.api(self.acct)
+        r = acct.patch(self.url, {'status': 'hold'})
+        self.assertEqual((r.status_code, r.data['status']), (200, 'hold'))
+        self.assertEqual(r.data['held_by']['username'], 'elena')
+        self.assertIsNotNone(r.data['held_at'])
+        summary = acct.get(reverse('accounting-payouts-summary')).data
+        self.assertEqual(summary['hold']['count'], 1)
+        self.assertEqual(summary['pending']['count'], 0)
+        r = acct.patch(self.url, {'status': 'confirmed'})
+        self.assertEqual(r.data['status'], 'confirmed')
+        self.assertIsNone(r.data['held_at'])
+        self.assertIsNotNone(r.data['confirmed_at'])
+        r = acct.patch(self.url, {'status': 'hold'})
+        self.assertEqual(r.data['status'], 'hold')
+        self.assertIsNone(r.data['confirmed_at'])
+        r = acct.patch(self.url, {'status': 'pending'})
+        self.assertEqual((r.data['status'], r.data['held_at']), ('pending', None))
+        self.assertEqual(acct.patch(self.url, {'status': 'paid'}).status_code, 403)
+
     def test_who_may_set_which_status(self):
         acct, boss = self.api(self.acct), self.api(self.boss)
         self.assertEqual(acct.patch(self.url, {'status': 'confirmed'}).data['status'], 'confirmed')

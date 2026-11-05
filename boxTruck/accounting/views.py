@@ -87,7 +87,7 @@ def paginate(view, request, qs, to_dict):
 
 # --- Payouts -------------------------------------------------------------------------------------
 
-PAYOUT_RELATED = ('load', 'load__status', 'load__driver', 'load__broker', 'load__invoice', 'confirmed_by', 'paid_by')
+PAYOUT_RELATED = ('load', 'load__status', 'load__driver', 'load__broker', 'load__invoice', 'held_by', 'confirmed_by', 'paid_by')
 
 
 def payout_queryset():
@@ -134,6 +134,7 @@ class PayoutSummaryView(views.APIView):
             rows = q.annotate(applied=Coalesce(Sum('expenses__amount'), ZERO)).values_list('gross', 'applied')
             return sum((max(ZERO, g - a) for g, a in rows), ZERO), q.count()
         pending, pending_n = totals(base.filter(status=Payout.PENDING))
+        hold, hold_n = totals(base.filter(status=Payout.HOLD))
         confirmed, confirmed_n = totals(base.filter(status=Payout.CONFIRMED))
         paid_n = base.filter(status=Payout.PAID).count()
         week = timezone.now() - timezone.timedelta(days=7)
@@ -141,7 +142,8 @@ class PayoutSummaryView(views.APIView):
         month = timezone.now() - timezone.timedelta(days=30)
         deducted = PayoutExpense.objects.filter(payout__in=base.filter(load__pickup_date__gte=month)).aggregate(s=Coalesce(Sum('amount'), ZERO))['s']
         return Response({
-            'pending': {'count': pending_n, 'total': pending}, 'confirmed': {'count': confirmed_n, 'total': confirmed},
+            'pending': {'count': pending_n, 'total': pending}, 'hold': {'count': hold_n, 'total': hold},
+            'confirmed': {'count': confirmed_n, 'total': confirmed},
             'paid': {'count': paid_n}, 'paid_week': {'count': paid_week_n, 'total': paid_week},
             'deducted_30d': deducted, 'total': base.count(),
         })
@@ -178,9 +180,15 @@ class PayoutDetailView(views.APIView):
                 if new == Payout.CONFIRMED:
                     p.confirmed_at = timezone.now()
                     p.confirmed_by = user
-                if new == Payout.PENDING:
+                if new in (Payout.PENDING, Payout.HOLD):
                     p.confirmed_at = None
                     p.confirmed_by = None
+                if new == Payout.HOLD:
+                    p.held_at = timezone.now()
+                    p.held_by = user
+                elif p.status == Payout.HOLD:
+                    p.held_at = None
+                    p.held_by = None
                 if new == Payout.PAID:
                     if not p.confirmed_at:
                         p.confirmed_at = timezone.now()

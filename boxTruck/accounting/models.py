@@ -23,8 +23,11 @@ class Payout(models.Model):
     off both `gross` and the load's driver pay, so the load's profit includes it, and it is kept
     so the move can be undone when the payout leaves Quick Pay.
     """
-    PENDING, CONFIRMED, PAID = 'pending', 'confirmed', 'paid'
-    STATUSES = [(PENDING, 'Pending'), (CONFIRMED, 'Confirmed'), (PAID, 'Paid')]
+    PENDING, HOLD, CONFIRMED, PAID = 'pending', 'hold', 'confirmed', 'paid'
+    # Hold sits between Pending and Confirmed: accounting parks a payout there
+    # (a dispute, missing paperwork) and releases it back to Pending or on to
+    # Confirmed. Paid still belongs to management alone.
+    STATUSES = [(PENDING, 'Pending'), (HOLD, 'On hold'), (CONFIRMED, 'Confirmed'), (PAID, 'Paid')]
     QUICK_PAY = 'Quick Pay'
     PAYMENT_TYPES = [QUICK_PAY, 'Regular Pay', 'Zelle in Advance']
 
@@ -33,6 +36,8 @@ class Payout(models.Model):
     quick_pay_fee = models.DecimalField(max_digits=20, decimal_places=2, default=ZERO)
     payment_type = models.CharField(max_length=50, default='Regular Pay')
     status = models.CharField(max_length=20, choices=STATUSES, default=PENDING)
+    held_at = models.DateTimeField(null=True, blank=True)
+    held_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     confirmed_at = models.DateTimeField(null=True, blank=True)
     confirmed_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     paid_at = models.DateTimeField(null=True, blank=True)

@@ -104,13 +104,12 @@ def sending_mailbox(
     session: Session, company_id: int, user_id: Optional[int]
 ) -> Optional[models.EmailAccount]:
     """
-    The mailbox a new bid leaves from.
-
-    Where personal mailboxes are rolled out, a bid leaves from the
-    dispatcher's own mailbox and from nowhere else: the broker's reply has to
-    reach the person who bid, and the shared mailbox is going away. No
-    mailbox, or a dead one, stops the bid with a message that says what to
-    do. Outside the rollout the company's shared mailbox sends as before.
+    The mailbox a new bid leaves from: the dispatcher's own, and nowhere
+    else. The broker's reply has to reach the person who bid, so a dispatcher
+    without a connected mailbox, or with a dead one, cannot bid until an
+    administrator connects it under Admin > Mailboxes. The shared mailbox
+    only serves callers with no user (internal callers) and replies on old
+    threads (see thread_mailbox).
     """
     if user_id:
         own = (
@@ -123,8 +122,6 @@ def sending_mailbox(
         )
         if own and own.status == "active":
             return own
-        if not config.personal_mailbox_allowed(user_id):
-            return shared_mailbox(session, company_id)
         if own and own.status != "revoked":
             raise NegotiationError(
                 f"Your email {own.email_address} is no longer connected. "

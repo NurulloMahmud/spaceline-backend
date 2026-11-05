@@ -14,7 +14,7 @@ def auth_headers():
 
 
 @pytest.fixture
-def stub_peers(monkeypatch, load_snapshot, company_profile, driver_profile):
+def stub_peers(monkeypatch, load_snapshot, company_profile, driver_profile, bidder_mailbox):
     sent = []
 
     async def fake_get_load(load_uuid):
@@ -56,7 +56,11 @@ def test_endpoints_require_a_token(client):
     assert client.get("/api/v1/events/stream").status_code == 401
 
 
-def test_bidding_without_a_mailbox_is_refused(client, auth_headers, stub_peers):
+def test_bidding_without_a_mailbox_is_refused(client, auth_headers, stub_peers, session, bidder_mailbox):
+    """A dispatcher whose mailbox was never connected (or was disconnected)
+    cannot bid, whatever mailboxes the company has."""
+    session.delete(bidder_mailbox)
+    session.commit()
     resp = client.post(
         "/api/v1/negotiations",
         headers=auth_headers,

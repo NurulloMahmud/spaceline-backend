@@ -103,6 +103,24 @@ def session(schema):
 
 
 @pytest.fixture
+def bidder_mailbox(session):
+    """User 7's own mailbox: a bid leaves from the dispatcher's own mailbox
+    and from nowhere else, so every bid test needs one. Reused when another
+    fixture (own_account) already made user 7's row."""
+    acct = session.query(models.EmailAccount).filter_by(user_id=7).first()
+    if acct is None:
+        acct = models.EmailAccount(
+            company_id=1,
+            user_id=7,
+            nylas_grant_id="grant-7",
+            email_address="dispatcher7@shipluxellc.com",
+        )
+        session.add(acct)
+        session.commit()
+    return acct
+
+
+@pytest.fixture
 def account(session):
     acct = models.EmailAccount(
         company_id=1,

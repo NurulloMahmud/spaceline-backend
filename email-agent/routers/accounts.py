@@ -8,7 +8,6 @@ import logging
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from config.settings import config
 from database import models
 from database.connection import session_dependency
 from services.auth import Principal, current_user, scoped_company
@@ -43,11 +42,11 @@ def get_my_account(
     session: Session = Depends(session_dependency),
 ):
     """
-    The caller's own mailbox. `enabled` says whether bids must leave from a
-    mailbox of their own (the personal-mailbox rollout), so the load board
-    can say that one is missing.
+    The caller's own mailbox. Bids leave from it and from nowhere else, so
+    the load board shows "not connected" instead of a Send button while it is
+    missing. `enabled` is kept for the frontend and is always true.
     """
-    enabled = config.personal_mailbox_allowed(principal.user_id)
+    enabled = True
     account = (
         session.query(models.EmailAccount)
         .filter(models.EmailAccount.user_id == principal.user_id)

@@ -65,6 +65,7 @@ def payout_dict(p, detail=False):
     out = {
         'id': p.id, 'load': load_dict(p.load), 'gross': p.gross, 'applied': applied, 'amount': max(ZERO, p.gross - applied),
         'quick_pay_fee': p.quick_pay_fee, 'payment_type': p.payment_type, 'status': p.status,
+        'held_at': p.held_at, 'held_by': user_dict(p.held_by),
         'confirmed_at': p.confirmed_at, 'confirmed_by': user_dict(p.confirmed_by),
         'paid_at': p.paid_at, 'paid_by': user_dict(p.paid_by), 'reopened_at': p.reopened_at,
         'expenses': [link_dict(l, p.status) for l in links],

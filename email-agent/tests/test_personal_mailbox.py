@@ -15,35 +15,23 @@ from tests.test_negotiation_service import POSTING, stubs  # noqa: F401
 
 
 @pytest.fixture
-def rolled_out(monkeypatch):
-    monkeypatch.setattr(config, "PERSONAL_MAILBOX_USERS", "7")
-
-
-@pytest.fixture
 def own_account(session):
-    acct = models.EmailAccount(
-        company_id=1,
-        user_id=7,
-        nylas_grant_id="grant-own-7",
-        email_address="jane@gmail.com",
-    )
-    session.add(acct)
+    """Jane's own mailbox (user 7). Takes over the row bidder_mailbox may have
+    made first, so the two fixtures agree whichever runs first."""
+    acct = session.query(models.EmailAccount).filter_by(user_id=7).first()
+    if acct is None:
+        acct = models.EmailAccount(company_id=1, user_id=7, nylas_grant_id="grant-own-7", email_address="jane@gmail.com")
+        session.add(acct)
+    else:
+        acct.nylas_grant_id = "grant-own-7"
+        acct.email_address = "jane@gmail.com"
+        acct.status = "active"
     session.commit()
     return acct
 
 
 def _headers(**claims):
     return {"Authorization": f"Bearer {make_token(**claims)}"}
-
-
-def test_the_card_stays_hidden_until_rolled_out(client):
-    resp = client.get("/api/v1/accounts/me", headers=_headers())
-    assert resp.json() == {"enabled": False, "connected": False}
-
-
-def test_star_rolls_it_out_to_everyone(monkeypatch):
-    monkeypatch.setattr(config, "PERSONAL_MAILBOX_USERS", "*")
-    assert config.personal_mailbox_allowed(12345)
 
 
 def test_company_status_reports_the_shared_mailbox_only(client, session, own_account):
@@ -84,51 +72,50 @@ async def test_a_bid_leaves_from_the_dispatchers_own_mailbox_as_an_alert_reply(
     assert negotiation.email_account_id == own_account.id
 
 
-async def test_a_dispatcher_without_their_own_mailbox_uses_the_shared_one(
+async def test_a_dispatcher_without_their_own_mailbox_cannot_bid_from_the_shared_one(
     session, account, own_account, stubs, monkeypatch  # noqa: F811
 ):
-    sent = []
+    """The shared mailbox never carries a new bid: the broker's answer must
+    reach the person who bid, so the bid waits for an administrator."""
+    async def never_send(account, **kwargs):
+        raise AssertionError("nothing may be sent for a dispatcher without a mailbox")
 
-    async def fake_send(account, **kwargs):
+    monkeypatch.setattr(outbound, "send", never_send)
 
-        kwargs["grant_id"] = account.nylas_grant_id
-        sent.append(kwargs)
-        return {"id": "msg-out-1", "thread_id": "t"}
+    with pytest.raises(NegotiationError) as err:
+        await _bid(session, user_id=8)
 
-    monkeypatch.setattr(outbound, "send", fake_send)
-
-    negotiation = await _bid(session, user_id=8)
-
-    assert sent[0]["grant_id"] == "grant-1"
-    assert sent[0]["in_reply_to"] is None
-    assert negotiation.email_account_id == account.id
+    assert err.value.status_code == 409
+    assert err.value.code == "mailbox_not_connected"
+    assert "Admin > Mailboxes" in err.value.message
 
 
-async def test_a_dead_personal_mailbox_falls_back_to_the_shared_one_outside_the_rollout(
+async def test_a_dead_personal_mailbox_does_not_fall_back_to_the_shared_one(
     session, account, own_account, stubs, monkeypatch  # noqa: F811
 ):
     own_account.status = "expired"
     session.commit()
-    sent = []
 
-    async def fake_send(account, **kwargs):
+    async def never_send(account, **kwargs):
+        raise AssertionError("nothing may be sent from a dead mailbox")
 
-        kwargs["grant_id"] = account.nylas_grant_id
-        sent.append(kwargs)
-        return {"id": "msg-out-1", "thread_id": "t"}
+    monkeypatch.setattr(outbound, "send", never_send)
 
-    monkeypatch.setattr(outbound, "send", fake_send)
+    with pytest.raises(NegotiationError) as err:
+        await _bid(session)
 
-    await _bid(session)
-
-    assert sent[0]["grant_id"] == "grant-1"
+    assert err.value.code == "mailbox_not_connected"
+    assert "jane@gmail.com" in err.value.message
 
 
-async def test_a_rolled_out_dispatcher_without_a_mailbox_cannot_bid(
-    session, account, stubs, monkeypatch, rolled_out  # noqa: F811
+async def test_a_dispatcher_without_a_mailbox_cannot_bid(
+    session, account, stubs, monkeypatch  # noqa: F811
 ):
-    """The shared mailbox is going away: once a dispatcher may connect their
-    own, a bid waits until they have."""
+    """A bid waits until an administrator has connected the dispatcher's
+    mailbox; the company's shared mailbox never stands in."""
+    session.query(models.EmailAccount).filter_by(user_id=7).delete()
+    session.commit()
+
     async def never_send(account, **kwargs):
         kwargs["grant_id"] = account.nylas_grant_id
         raise AssertionError("nothing may be sent without the dispatcher's mailbox")
@@ -144,8 +131,8 @@ async def test_a_rolled_out_dispatcher_without_a_mailbox_cannot_bid(
     assert session.query(models.Negotiation).count() == 0
 
 
-async def test_a_rolled_out_dispatcher_with_a_dead_mailbox_is_told_to_reconnect(
-    session, account, own_account, stubs, monkeypatch, rolled_out  # noqa: F811
+async def test_a_dispatcher_with_a_dead_mailbox_is_told_to_reconnect(
+    session, account, own_account, stubs, monkeypatch  # noqa: F811
 ):
     own_account.status = "expired"
     session.commit()
@@ -164,8 +151,8 @@ async def test_a_rolled_out_dispatcher_with_a_dead_mailbox_is_told_to_reconnect(
     assert own_account.email_address in err.value.message
 
 
-async def test_a_rolled_out_dispatcher_who_disconnected_is_asked_to_connect_again(
-    session, account, own_account, stubs, monkeypatch, rolled_out  # noqa: F811
+async def test_a_dispatcher_who_disconnected_is_asked_to_connect_again(
+    session, account, own_account, stubs, monkeypatch  # noqa: F811
 ):
     own_account.status = "revoked"
     session.commit()

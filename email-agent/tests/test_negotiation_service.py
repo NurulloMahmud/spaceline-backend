@@ -16,7 +16,7 @@ async def _async(value):
 
 
 @pytest.fixture
-def stubs(monkeypatch, load_snapshot, company_profile, driver_profile):
+def stubs(monkeypatch, load_snapshot, company_profile, driver_profile, bidder_mailbox):
     recorded = {"bids": []}
 
     async def fake_record_bid(**kwargs):
