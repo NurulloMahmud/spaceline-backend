@@ -13,7 +13,8 @@ from typing import Optional
 
 from config.settings import config
 from database import models
-from services import bid_email, imap_smtp, secrets
+from database.connection import get_session
+from services import alerts, bid_email, imap_smtp, secrets
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,24 @@ def sent_rfc_id(sent: dict) -> Optional[str]:
             value = str(h.get("value") or "").strip().strip("<>").strip()
             return value or None
     return None
+
+
+# Seconds between tries when the server is busy or the connection drops:
+# four tries in all, inside the dispatcher's click.
+RETRY_DELAYS = (2, 5, 10)
+
+
+def _password_refused(account_id, text: str) -> None:
+    """The one send failure that is the mailbox's own: it stays failing, and
+    bids stop, until an administrator enters a working app password."""
+    with get_session() as session:
+        account = session.get(models.EmailAccount, account_id)
+        if account is None:
+            return
+        account.last_error = f"SMTP: {text}"
+        if account.status == "active":
+            account.status = "failing"
+        session.commit()
 
 
 async def send(
@@ -80,11 +99,29 @@ async def send(
         reply_to=reply_to,
         cc=cc,
     )
-    try:
-        rfc_id = await asyncio.to_thread(imap_smtp.send, creds, msg)
-    except Exception as e:  # noqa: BLE001 - smtplib raises a family of its own
-        logger.error(f"SMTP send from {account.email_address} failed: {e}")
-        raise SendError(f"{account.email_address} could not send over SMTP: {imap_smtp._plain(e)}")
+    tries = 0
+    while True:
+        try:
+            rfc_id = await asyncio.to_thread(imap_smtp.send, creds, msg)
+            break
+        except Exception as e:  # noqa: BLE001 - smtplib raises a family of its own
+            tries += 1
+            plain = imap_smtp._plain(e)
+            if imap_smtp.transient(e) and tries <= len(RETRY_DELAYS):
+                delay = RETRY_DELAYS[tries - 1]
+                logger.warning(
+                    f"SMTP send from {account.email_address} failed (try {tries}): {plain}; "
+                    f"trying again in {delay}s"
+                )
+                await asyncio.sleep(delay)
+                continue
+            logger.error(f"SMTP send from {account.email_address} failed after {tries} tr{'y' if tries == 1 else 'ies'}: {e}")
+            if imap_smtp.sign_in_refused(e):
+                _password_refused(account.id, plain)
+            alerts.send_failed(account.email_address, plain, tries)
+            raise SendError(f"{account.email_address} could not send over SMTP: {plain}")
+    if tries:
+        logger.info(f"SMTP send from {account.email_address} went through on try {tries + 1}")
     logger.info(
         f"sent '{subject}' from {account.email_address} over SMTP"
         + (f" as a reply: In-Reply-To <{in_reply_to.strip().strip('<>')}>" if in_reply_to else "")

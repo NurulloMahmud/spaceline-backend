@@ -58,6 +58,42 @@ class CheckResult:
         }
 
 
+_SIGN_IN_WORDS = (
+    "authenticationfailed",
+    "invalid credentials",
+    "username and password not accepted",
+    "application-specific password",
+    "login failed",
+    "[auth]",
+)
+
+
+def sign_in_refused(e: Exception) -> bool:
+    """The provider turned the password down, over IMAP or SMTP. The one
+    failure that is the mailbox's own and stays until someone fixes it."""
+    if isinstance(e, smtplib.SMTPAuthenticationError):
+        return True
+    if isinstance(e, imaplib.IMAP4.error):
+        text = str(e).lower()
+        return any(w in text for w in _SIGN_IN_WORDS)
+    return False
+
+
+def transient(e: Exception) -> bool:
+    """A failure that passes on its own: a busy or restarting server, a slow
+    or dropped connection. Worth another try; a refused password, sender or
+    recipient is not."""
+    if sign_in_refused(e):
+        return False
+    if isinstance(e, smtplib.SMTPResponseException):
+        return 400 <= int(e.smtp_code) < 500
+    if isinstance(e, smtplib.SMTPRecipientsRefused):
+        return all(400 <= int(code) < 500 for code, _ in e.recipients.values())
+    if isinstance(e, (smtplib.SMTPServerDisconnected, imaplib.IMAP4.abort)):
+        return True
+    return isinstance(e, (TimeoutError, ConnectionError, ssl.SSLError, OSError))
+
+
 def _plain(e: Exception) -> str:
     """The provider's words, without the exception class around them."""
     text = str(e)

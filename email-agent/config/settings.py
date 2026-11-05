@@ -118,6 +118,13 @@ class Config:
     IP_ALERT_BOT_TOKEN: str = os.getenv("IP_ALERT_BOT_TOKEN", "")
     IP_ALERT_CHAT_ID: str = os.getenv("IP_ALERT_CHAT_ID", "")
 
+    # Operator alerts (services/alerts.py): a mailbox whose password was
+    # refused, a bid that could not be sent after retries, reads failing for
+    # a while, the reader gone quiet. The same bot and chat as the IP alerts
+    # unless these are set.
+    ALERT_BOT_TOKEN: str = os.getenv("ALERT_BOT_TOKEN", "") or os.getenv("IP_ALERT_BOT_TOKEN", "")
+    ALERT_CHAT_ID: str = os.getenv("ALERT_CHAT_ID", "") or os.getenv("IP_ALERT_CHAT_ID", "")
+
     # behaviour
     CORS_ORIGINS: list[str] = [
         o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()

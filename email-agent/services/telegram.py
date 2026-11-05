@@ -13,7 +13,9 @@ logger = logging.getLogger(__name__)
 API_ROOT = "https://api.telegram.org"
 
 
-async def send_message(chat_id: str, text: str, bot_token: str | None = None) -> bool:
+async def send_message(
+    chat_id: str, text: str, bot_token: str | None = None, parse_mode: str | None = "Markdown"
+) -> bool:
     bot_token = bot_token if bot_token is not None else config.TELEGRAM_BOT_TOKEN
     if not bot_token:
         logger.error("no telegram bot token set — cannot send message")
@@ -29,7 +31,7 @@ async def send_message(chat_id: str, text: str, bot_token: str | None = None) ->
                 json={
                     "chat_id": chat_id,
                     "text": text,
-                    "parse_mode": "Markdown",
+                    **({"parse_mode": parse_mode} if parse_mode else {}),
                 },
             )
         except httpx.HTTPError as e:

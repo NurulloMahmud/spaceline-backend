@@ -16,6 +16,10 @@ The same reader covers every mailbox connected with an app password
 answers to their own bids. The shared mailbox is the catch-all for every
 negotiation of the company; a dispatcher's mailbox answers only for its own.
 
+Each mailbox is read over one standing IMAP connection, opened on first
+use and kept across passes; a connection the server drops is reopened on the
+spot. Signing in afresh every pass is what made Gmail slow to answer.
+
 The reader keeps its place per mailbox as (UIDVALIDITY, last UID) in the
 database, so a restart carries on where it left off, and a mailbox seen for
 the first time starts at its end rather than replaying history. A message
@@ -39,7 +43,7 @@ from sqlalchemy.exc import IntegrityError
 from config.settings import config
 from database import models
 from database.connection import get_session
-from services import inbound, secrets
+from services import alerts, imap_smtp, inbound, secrets
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +126,8 @@ def sources(session) -> list[Source]:
 
 
 class Mailbox:
-    """One IMAP session on the shared folder, read-only. Synchronous: the
-    caller runs it in a thread."""
+    """One IMAP session on one folder, read-only. Synchronous: the caller
+    runs it in a thread. Opened once and kept; see _read_batch."""
 
     def __init__(self, host: str, user: str, password: str, folder: str, port: int = 993):
         self.host, self.user, self.password, self.folder, self.port = host, user, password, folder, int(port or 993)
@@ -131,7 +135,7 @@ class Mailbox:
         self.uidvalidity = 0
         self.gmail = "gmail" in host.lower()
 
-    def __enter__(self) -> "Mailbox":
+    def open(self) -> "Mailbox":
         self.conn = imaplib.IMAP4_SSL(self.host, self.port, timeout=60)
         self.conn.login(self.user, self.password)
         typ, _ = self.conn.select(_quote(self.folder), readonly=True)
@@ -141,12 +145,23 @@ class Mailbox:
         self.uidvalidity = int(data[0]) if data and data[0] else 0
         return self
 
-    def __exit__(self, *exc) -> None:
+    def close(self) -> None:
+        conn, self.conn = self.conn, None
+        if conn is None:
+            return
         try:
-            if self.conn is not None:
-                self.conn.logout()
+            conn.logout()
         except Exception:
-            pass
+            try:
+                conn.shutdown()
+            except Exception:
+                pass
+
+    def __enter__(self) -> "Mailbox":
+        return self.open()
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def last_uid(self) -> int:
         typ, data = self.conn.uid("search", None, "ALL")
@@ -304,21 +319,69 @@ def is_alert(message: dict) -> bool:
     return False
 
 
-def _read_batch(last_uid: Optional[int], source: Source) -> tuple[int, int, list[tuple[int, bytes, Optional[str]]]]:
+# The standing connection per mailbox, by address. Only the reader's own
+# thread touches it (poll_once reads the mailboxes one after another).
+_connections: dict[str, Mailbox] = {}
+
+
+def _drop(source: Source) -> None:
+    box = _connections.pop(source.key, None)
+    if box is not None:
+        box.close()
+
+
+def close_unused(keep: set[str]) -> None:
+    """Sign out of mailboxes that are no longer read (disconnected or revoked)."""
+    for key in [k for k in _connections if k not in keep]:
+        box = _connections.pop(key)
+        box.close()
+        logger.info(f"mailbox {key}: signed out, no longer read")
+
+
+def close_all() -> None:
+    close_unused(set())
+
+
+def _read(box: Mailbox, known: Optional[tuple[int, int]]) -> tuple[int, int, list[tuple[int, bytes, Optional[str]]]]:
+    if known is None or known[0] != box.uidvalidity:
+        # First sight of the folder, or its UIDs were renumbered: the caller
+        # starts at its end. Counting the folder is the one slow command, so
+        # it runs only here.
+        return box.uidvalidity, box.last_uid(), []
+    fetched = []
+    for uid in box.uids_after(known[1])[:BATCH_LIMIT]:
+        raw, thread_id = box.fetch(uid)
+        fetched.append((uid, raw, thread_id))
+    return box.uidvalidity, known[1], fetched
+
+
+def _read_batch(known: Optional[tuple[int, int]], source: Source) -> tuple[int, int, list[tuple[int, bytes, Optional[str]]]]:
     """
-    One IMAP session: (uidvalidity, folder's last uid, [(uid, raw, thread_id)]).
-    With no cursor yet (`last_uid` None) nothing is fetched; the caller records
-    the folder's end and starts from there.
+    One pass over one mailbox on its standing connection:
+    (uidvalidity, folder's last uid, [(uid, raw, thread_id)]). `known` is the
+    cursor (uidvalidity, last uid), or None before the first pass, when
+    nothing is fetched and the caller records the folder's end.
+
+    A connection the server has dropped since the last pass is replaced and
+    the pass tried once more; a mailbox that cannot be opened fresh raises.
     """
-    with Mailbox(source.host, source.address, source.password, source.folder, source.port) as box:
-        end = box.last_uid()
-        if last_uid is None:
-            return box.uidvalidity, end, []
-        fetched = []
-        for uid in box.uids_after(last_uid)[:BATCH_LIMIT]:
-            raw, thread_id = box.fetch(uid)
-            fetched.append((uid, raw, thread_id))
-        return box.uidvalidity, end, fetched
+    box = _connections.get(source.key)
+    if box is not None:
+        try:
+            return _read(box, known)
+        except Exception as e:  # noqa: BLE001 - whatever the socket raises
+            _drop(source)
+            if imap_smtp.sign_in_refused(e):
+                raise
+            logger.info(f"mailbox {source.address}: connection lost ({imap_smtp._plain(e)}); signing in again")
+    box = Mailbox(source.host, source.address, source.password, source.folder, source.port)
+    box.open()
+    _connections[source.key] = box
+    try:
+        return _read(box, known)
+    except Exception:
+        _drop(source)
+        raise
 
 
 def _advance(session, source: Source, uidvalidity: int, uid: int) -> None:
@@ -328,24 +391,6 @@ def _advance(session, source: Source, uidvalidity: int, uid: int) -> None:
     else:
         row.uidvalidity = uidvalidity
         row.last_uid = uid
-
-
-_SIGN_IN_WORDS = (
-    "authenticationfailed",
-    "invalid credentials",
-    "username and password not accepted",
-    "application-specific password",
-    "login failed",
-    "[auth]",
-)
-
-
-def sign_in_failed(e: Exception) -> bool:
-    """Whether the provider turned the credentials down. Anything else (a slow
-    read, a dropped connection, a busy server) is the network's fault and
-    passes on its own, so it must not take the dispatcher's mailbox away."""
-    text = str(e).lower()
-    return isinstance(e, imaplib.IMAP4.error) and any(w in text for w in _SIGN_IN_WORDS)
 
 
 def _mark(session, source: Source, error: Optional[str], fatal: bool = False) -> None:
@@ -413,11 +458,9 @@ async def poll_source(source: Source, attempts: dict) -> int:
         known = (row.uidvalidity, row.last_uid) if row else None
 
     try:
-        uidvalidity, end, batch = await asyncio.to_thread(
-            _read_batch, known[1] if known else None, source
-        )
+        uidvalidity, end, batch = await asyncio.to_thread(_read_batch, known, source)
     except Exception as e:  # noqa: BLE001 - the mailbox, not the service, is at fault
-        fatal = sign_in_failed(e)
+        fatal = imap_smtp.sign_in_refused(e)
         text = str(e)[:300] or type(e).__name__
         with get_session() as session:
             _mark(session, source, f"IMAP: {text}" if fatal else f"IMAP, last pass: {text}; trying again", fatal)
@@ -482,6 +525,8 @@ async def poll_once(attempts: dict) -> int:
             raise
         except Exception as e:  # noqa: BLE001
             logger.error(f"mailbox {source.address}: pass failed: {str(e)[:300] or type(e).__name__}")
+    await asyncio.to_thread(close_unused, {s.key for s in todo})
+    alerts.last_reader_pass = datetime.now(timezone.utc)
     return handled
 
 
@@ -506,6 +551,7 @@ async def poll_forever() -> None:
             await poll_once(attempts)
         except asyncio.CancelledError:
             logger.info("shared inbox reader stopping")
+            close_all()
             raise
         except Exception:
             logger.exception("mailbox pass failed; continuing")

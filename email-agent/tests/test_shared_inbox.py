@@ -266,7 +266,8 @@ async def test_the_first_pass_starts_at_the_end_of_the_folder(
 ):
     reads = []
 
-    def read_batch(last_uid, source):
+    def read_batch(known, source):
+        last_uid = known[1] if known else None
         reads.append(last_uid)
         return 42, 5776, [] if last_uid is None else [(5777, raw_email(), None)]
 
