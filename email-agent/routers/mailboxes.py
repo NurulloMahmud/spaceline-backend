@@ -5,9 +5,7 @@ dispatcher.
 The dispatcher hands over nothing but the app password their provider
 issued; the admin enters it here, the service signs in both ways to prove
 it, and from then on that dispatcher's bids leave over SMTP from their own
-address and their inbox is read over IMAP (services.shared_inbox). Nylas
-keeps working for every mailbox connected through it; connecting a user
-here replaces their Nylas grant, which is revoked.
+address and their inbox is read over IMAP (services.shared_inbox).
 
 Open to Management and Developer accounts, plus any BTM user id listed in
 MAILBOX_ADMIN_USERS: every row here is a credential to someone else's
@@ -30,7 +28,6 @@ from database.connection import session_dependency
 from routers.schemas import MailboxCredentialsIn
 from services import imap_smtp, secrets
 from services.auth import Principal, current_user
-from services.nylas_client import NylasError, nylas
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +152,7 @@ def list_mailboxes(
     session: Session = Depends(session_dependency),
 ):
     """Every mailbox of the company: the shared one as the server has it,
-    and one row per dispatcher, Nylas or app password alike."""
+    and one row per dispatcher."""
     rows = (
         session.query(models.EmailAccount)
         .filter(models.EmailAccount.company_id == principal.company_id)
@@ -280,9 +277,8 @@ async def connect_user(
 ):
     """
     Store a dispatcher's mailbox after proving it signs in. An existing
-    mailbox of theirs, Nylas or app password, is replaced; a Nylas grant is
-    revoked so the provider stops holding access nobody uses. Leaving the
-    password out keeps the one already stored (editing hosts or ports).
+    mailbox of theirs is replaced. Leaving the password out keeps the one
+    already stored (editing hosts or ports).
     """
     if not config.MAILBOX_SECRET_KEY:
         raise HTTPException(500, "MAILBOX_SECRET_KEY is not set on the server, so app passwords cannot be stored")
@@ -323,13 +319,7 @@ async def connect_user(
             email_address=creds.address,
         )
         session.add(existing)
-    elif not existing.uses_imap and not existing.nylas_grant_id.startswith(("imap:", "revoked:")):
-        try:
-            await nylas.revoke_grant(existing.nylas_grant_id)
-        except NylasError as e:
-            logger.warning(f"grant {existing.nylas_grant_id} for user {user_id} could not be revoked: {e}")
-        existing.nylas_grant_id = f"imap:{uuid.uuid4()}"
-    elif existing.nylas_grant_id.startswith("revoked:"):
+    elif not existing.nylas_grant_id.startswith("imap:"):
         existing.nylas_grant_id = f"imap:{uuid.uuid4()}"
 
     existing.transport = models.TRANSPORT_IMAP
@@ -377,12 +367,6 @@ async def disconnect_user(
     account = _user_account(session, principal.company_id, user_id)
     if account is None or account.status == "revoked":
         return {"connected": False}
-    if not account.uses_imap and not account.nylas_grant_id.startswith(("imap:", "revoked:")):
-        try:
-            await nylas.revoke_grant(account.nylas_grant_id)
-        except NylasError as e:
-            logger.warning(f"grant {account.nylas_grant_id} for user {user_id} could not be revoked: {e}")
-        account.nylas_grant_id = f"revoked:{account.id}"
     account.secret = None
     account.status = "revoked"
     account.last_error = None

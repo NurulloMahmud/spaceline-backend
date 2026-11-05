@@ -9,7 +9,6 @@ import pytest
 from database import models
 from services import events, inbound
 from services.ai import ai
-from services.nylas_client import nylas
 
 
 def test_strip_quoted_removes_history():
@@ -171,16 +170,6 @@ def test_pdf_attachments_only():
     }
     ids = [a["id"] for a in inbound.pdf_attachments(message)]
     assert ids == ["1", "3"]
-
-
-def test_webhook_signature_is_enforced():
-    body = json.dumps({"type": "message.created"}).encode()
-    good = hmac.new(b"test-webhook-secret", body, hashlib.sha256).hexdigest()
-
-    assert nylas.verify_webhook(good, body) is True
-    assert nylas.verify_webhook("deadbeef", body) is False
-    assert nylas.verify_webhook("", body) is False
-    assert nylas.verify_webhook(good, b'{"type":"tampered"}') is False
 
 
 @pytest.fixture

@@ -74,30 +74,13 @@ class Config:
     ATREK_BASE_URL: str = _base_url("ATREK_BASE_URL")
     ATREK_INTERNAL_SECRET: str = os.getenv("ATREK_INTERNAL_SECRET", "")
 
-    # nylas
-    NYLAS_API_KEY: str = os.getenv("NYLAS_API_KEY", "")
-    NYLAS_API_URI: str = os.getenv("NYLAS_API_URI", "https://api.us.nylas.com")
-    NYLAS_CLIENT_ID: str = os.getenv("NYLAS_CLIENT_ID", "")
-    NYLAS_CALLBACK_URI: str = os.getenv("NYLAS_CALLBACK_URI", "")
-    NYLAS_WEBHOOK_SECRET: str = os.getenv("NYLAS_WEBHOOK_SECRET", "")
-
     # Test servers only: when set, every outgoing email goes to this address
     # instead of the real recipient, so a test bid can never reach a broker.
     EMAIL_REDIRECT_TO: str = os.getenv("EMAIL_REDIRECT_TO", "").strip()
 
-    # Where a browser lands after Nylas hosted auth finishes. The mailbox
-    # connect card lives on this page; the callback redirects here rather
-    # than dumping raw JSON in the tab Nylas left the user on.
-    FRONTEND_MAILBOX_SETTINGS_URL: str = os.getenv(
-        "FRONTEND_MAILBOX_SETTINGS_URL", ""
-    ).rstrip("/")
-    # Same, for a dispatcher connecting their own mailbox from their profile.
-    FRONTEND_PERSONAL_MAILBOX_URL: str = os.getenv(
-        "FRONTEND_PERSONAL_MAILBOX_URL", ""
-    ).rstrip("/")
-
-    # Who may connect their own mailbox and bid from it: comma-separated BTM
-    # user ids, or "*" for everyone. Empty keeps the feature off.
+    # Whose bids must leave from a mailbox of their own (connected for them
+    # under Admin > Mailboxes): comma-separated BTM user ids, or "*" for
+    # everyone. Anyone else sends from the company's shared mailbox.
     PERSONAL_MAILBOX_USERS: str = os.getenv("PERSONAL_MAILBOX_USERS", "").strip()
 
     def personal_mailbox_allowed(self, user_id: int) -> bool:
@@ -106,13 +89,10 @@ class Config:
             return True
         return str(user_id) in {part.strip() for part in allowed.split(",") if part.strip()}
 
-    # The shared mailbox that catches broker replies. An email sent from a
-    # dispatcher's own mailbox names it as Reply-To (next to the dispatcher)
-    # and Cc, and this service reads it over IMAP with an app password. Nylas
-    # no longer watches any mailbox: Gmail charges every read it makes against
-    # the mailbox's own API quota, and a mailbox on the Sylectus alert list
-    # spends that quota on alerts, so bids sent from it were refused. Both
-    # values empty leaves the reader off.
+    # The company's shared mailbox, read over IMAP with an app password as the
+    # catch-all: replies on negotiations that predate per-dispatcher mailboxes
+    # and anything copied to it. Both values empty leaves that reader off; the
+    # dispatchers' own mailboxes are read regardless.
     SHARED_INBOX_ADDRESS: str = os.getenv("SHARED_INBOX_ADDRESS", "").strip().lower()
     SHARED_INBOX_APP_PASSWORD: str = os.getenv("SHARED_INBOX_APP_PASSWORD", "")
     SHARED_INBOX_IMAP_HOST: str = os.getenv("SHARED_INBOX_IMAP_HOST", "imap.gmail.com")
@@ -122,11 +102,9 @@ class Config:
     def shared_inbox_enabled(self) -> bool:
         return bool(self.SHARED_INBOX_ADDRESS and self.SHARED_INBOX_APP_PASSWORD)
 
-    # Mailboxes connected with an app password instead of Nylas: the admin
-    # page that enters them (routers/mailboxes.py) is open only to these BTM
-    # user ids, and the passwords rest encrypted with this Fernet key
-    # (services/secrets.py). Nylas keeps working for every mailbox connected
-    # through it; an app-password mailbox sends over SMTP and is read over IMAP.
+    # Admin > Mailboxes (routers/mailboxes.py) is open to management and
+    # developers plus these BTM user ids; the app passwords it stores rest
+    # encrypted with this Fernet key (services/secrets.py).
     MAILBOX_ADMIN_USERS: str = os.getenv("MAILBOX_ADMIN_USERS", "").strip()
     MAILBOX_SECRET_KEY: str = os.getenv("MAILBOX_SECRET_KEY", "").strip()
 

@@ -23,7 +23,6 @@ from services import booking, events, suggestions
 from services.ai import ai
 from services.boxtruck import BoxTruckError, boxtruck
 from services.negotiations import load_summary_text, reply_subject
-from services.nylas_client import NylasError, nylas
 
 logger = logging.getLogger(__name__)
 
@@ -789,19 +788,11 @@ async def handle_ratecon(
     attachment = attachments[0]
     filename = attachment.get("filename") or "ratecon.pdf"
 
-    # A message read over IMAP arrives with its attachments; one Nylas
-    # delivered has to be fetched.
+    # A message read over IMAP arrives with its attachments' bytes.
     content = attachment.get("content")
     if content is None:
-        try:
-            content = await nylas.download_attachment(
-                grant_id=account.nylas_grant_id,
-                attachment_id=attachment.get("id"),
-                message_id=nylas_message_id,
-            )
-        except NylasError as e:
-            record_parse_failure(session, negotiation, message_row, filename, f"Could not download the attachment: {e}")
-            return
+        record_parse_failure(session, negotiation, message_row, filename, "The attachment's content was not available")
+        return
 
     broker = await boxtruck.resolve_broker(
         name=negotiation.broker_name or "",

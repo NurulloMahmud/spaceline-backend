@@ -1,28 +1,17 @@
 """
-A dispatcher's own mailbox: connected from their profile, used for their
-bids, and kept apart from the company's shared dispatch mailbox. The bid
-replies to the Sylectus alert by Message-ID, since the alert never reached
-the personal mailbox.
+A dispatcher's own mailbox: connected for them under Admin > Mailboxes, used
+for their bids, and kept apart from the company's shared dispatch mailbox.
+The bid replies to the Sylectus alert by Message-ID.
 """
-from urllib.parse import parse_qs, urlparse
-
-import httpx
 import pytest
 
 from config.settings import config
 from database import models
-from routers.accounts import _sign, _sign_personal
 from services import inbound
 from services.negotiations import NegotiationError, create_negotiation
-from services.nylas_client import nylas, NylasRateLimited
+from services import outbound
 from tests.test_auth import make_token
 from tests.test_negotiation_service import POSTING, stubs  # noqa: F401
-
-
-@pytest.fixture
-def nylas_configured(monkeypatch):
-    monkeypatch.setattr(config, "NYLAS_CLIENT_ID", "test-client-id")
-    monkeypatch.setattr(config, "NYLAS_CALLBACK_URI", "https://example.com/callback")
 
 
 @pytest.fixture
@@ -47,12 +36,6 @@ def _headers(**claims):
     return {"Authorization": f"Bearer {make_token(**claims)}"}
 
 
-def _redirect(resp):
-    assert resp.status_code == 302, resp.text
-    location = urlparse(resp.headers["location"])
-    return location.path, {k: v[0] for k, v in parse_qs(location.query).items()}
-
-
 def test_the_card_stays_hidden_until_rolled_out(client):
     resp = client.get("/api/v1/accounts/me", headers=_headers())
     assert resp.json() == {"enabled": False, "connected": False}
@@ -63,113 +46,9 @@ def test_star_rolls_it_out_to_everyone(monkeypatch):
     assert config.personal_mailbox_allowed(12345)
 
 
-def test_connecting_ones_own_mailbox_through_google_is_retired(client, nylas_configured, rolled_out):
-    resp = client.post("/api/v1/accounts/me/connect", headers=_headers())
-    assert resp.status_code == 410
-    assert "Admin > Mailboxes" in resp.json()["detail"]
-
-
-def test_connecting_stores_a_mailbox_for_that_user(client, monkeypatch, session, account):
-    async def fake_exchange(code):
-        return {"grant_id": "grant-own-7", "email": "jane@gmail.com"}
-
-    monkeypatch.setattr(nylas, "exchange_code", fake_exchange)
-
-    resp = client.get(
-        "/api/v1/accounts/callback",
-        params={"code": "abc", "state": _sign_personal(7, 1)},
-        follow_redirects=False,
-    )
-
-    path, params = _redirect(resp)
-    assert path == "/profile"
-    assert params["mailbox"] == "connected"
-    own = session.query(models.EmailAccount).filter_by(user_id=7).one()
-    assert (own.company_id, own.email_address, own.status) == (1, "jane@gmail.com", "active")
-    # The shared mailbox is untouched.
-    shared = session.query(models.EmailAccount).filter_by(company_id=1, user_id=None).one()
-    assert shared.nylas_grant_id == "grant-1"
-
-
-def test_the_shared_mailbox_cannot_be_claimed_as_a_personal_one(
-    client, monkeypatch, session, account
-):
-    revoked = []
-
-    async def fake_exchange(code):
-        return {"grant_id": "grant-1", "email": "dispatch@shipluxellc.com"}
-
-    async def fake_revoke(grant_id):
-        revoked.append(grant_id)
-
-    monkeypatch.setattr(nylas, "exchange_code", fake_exchange)
-    monkeypatch.setattr(nylas, "revoke_grant", fake_revoke)
-
-    resp = client.get(
-        "/api/v1/accounts/callback",
-        params={"code": "abc", "state": _sign_personal(7, 1)},
-        follow_redirects=False,
-    )
-
-    _, params = _redirect(resp)
-    assert params == {"mailbox": "error", "reason": "mailbox_in_use"}
-    assert revoked == []
-    assert session.query(models.EmailAccount).filter_by(user_id=7).count() == 0
-
-
-def test_a_forged_personal_state_is_refused(client):
-    resp = client.get(
-        "/api/v1/accounts/callback",
-        params={"code": "abc", "state": "u7-1.00000000000000000000000000000000"},
-        follow_redirects=False,
-    )
-    path, params = _redirect(resp)
-    assert path == "/profile"
-    assert params["reason"] == "invalid_state"
-
-
-def test_reconnecting_the_shared_mailbox_leaves_personal_ones_alone(
-    client, monkeypatch, session, account, own_account
-):
-    async def fake_exchange(code):
-        return {"grant_id": "grant-shared-2", "email": "dispatch@shipluxellc.com"}
-
-    monkeypatch.setattr(nylas, "exchange_code", fake_exchange)
-
-    resp = client.get(
-        "/api/v1/accounts/callback",
-        params={"code": "abc", "state": _sign(1)},
-        follow_redirects=False,
-    )
-
-    _, params = _redirect(resp)
-    assert params["mailbox"] == "connected"
-    session.expire_all()
-    assert session.get(models.EmailAccount, account.id).nylas_grant_id == "grant-shared-2"
-    assert session.get(models.EmailAccount, own_account.id).nylas_grant_id == "grant-own-7"
-
-
 def test_company_status_reports_the_shared_mailbox_only(client, session, own_account):
     resp = client.get("/api/v1/accounts", headers=_headers())
     assert resp.json() == {"connected": False}
-
-
-def test_disconnecting_revokes_and_hides_the_mailbox(
-    client, monkeypatch, session, own_account, rolled_out
-):
-    revoked = []
-
-    async def fake_revoke(grant_id):
-        revoked.append(grant_id)
-
-    monkeypatch.setattr(nylas, "revoke_grant", fake_revoke)
-
-    resp = client.delete("/api/v1/accounts/me", headers=_headers())
-    assert resp.json() == {"connected": False}
-    assert revoked == ["grant-own-7"]
-    assert client.get("/api/v1/accounts/me", headers=_headers()).json() == {
-        "enabled": True, "connected": False,
-    }
 
 
 async def _bid(session, user_id=7):
@@ -185,59 +64,24 @@ async def _bid(session, user_id=7):
 async def test_a_bid_leaves_from_the_dispatchers_own_mailbox_as_an_alert_reply(
     session, account, own_account, stubs, monkeypatch, load_snapshot  # noqa: F811
 ):
-    # The dispatcher's mailbox did not get the alert (or not yet): the bid
-    # still replies to it, by Message-ID.
+    # The bid replies to the alert by Message-ID, which Gmail threads for
+    # SMTP-submitted mail whether or not the mailbox already holds the alert.
     load_snapshot.update(POSTING)
     sent = []
-    searched = []
 
-    async def not_there(grant_id, rfc_id):
-        searched.append((grant_id, rfc_id))
-        return None
+    async def fake_send(account, **kwargs):
 
-    async def fake_send(**kwargs):
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": "msg-out-1", "thread_id": "thread-own"}
-
-    monkeypatch.setattr(nylas, "find_message_by_rfc_id", not_there)
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     negotiation = await _bid(session)
 
-    assert searched == [("grant-own-7", POSTING["email_message_id"])]
     assert sent[0]["grant_id"] == "grant-own-7"
-    assert sent[0]["reply_to_message_id"] is None
     assert sent[0]["in_reply_to"] == POSTING["email_message_id"]
     assert sent[0]["subject"] == "Re: " + POSTING["email_subject"]
     assert negotiation.email_account_id == own_account.id
-
-
-async def test_a_bid_from_a_mailbox_that_holds_the_alert_replies_to_that_copy(
-    session, account, own_account, stubs, monkeypatch, load_snapshot  # noqa: F811
-):
-    # The dispatcher is on the Sylectus alert list, so their mailbox has the
-    # posting: the bid replies to it by Nylas id, which is what makes Gmail
-    # show posting and bid as one conversation on their side.
-    load_snapshot.update(POSTING)
-    sent = []
-
-    async def found(grant_id, rfc_id):
-        assert grant_id == "grant-own-7"
-        return {"id": "nylas-own-posting", "subject": POSTING["email_subject"]}
-
-    async def fake_send(**kwargs):
-        sent.append(kwargs)
-        return {"id": "msg-out-1", "thread_id": "thread-own-posting"}
-
-    monkeypatch.setattr(nylas, "find_message_by_rfc_id", found)
-    monkeypatch.setattr(nylas, "send_message", fake_send)
-
-    negotiation = await _bid(session)
-
-    assert sent[0]["reply_to_message_id"] == "nylas-own-posting"
-    assert sent[0]["in_reply_to"] is None
-    assert sent[0]["subject"] == "Re: " + POSTING["email_subject"]
-    assert negotiation.nylas_thread_id == "thread-own-posting"
 
 
 async def test_a_dispatcher_without_their_own_mailbox_uses_the_shared_one(
@@ -245,11 +89,13 @@ async def test_a_dispatcher_without_their_own_mailbox_uses_the_shared_one(
 ):
     sent = []
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": "msg-out-1", "thread_id": "t"}
 
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     negotiation = await _bid(session, user_id=8)
 
@@ -265,11 +111,13 @@ async def test_a_dead_personal_mailbox_falls_back_to_the_shared_one_outside_the_
     session.commit()
     sent = []
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": "msg-out-1", "thread_id": "t"}
 
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     await _bid(session)
 
@@ -281,10 +129,11 @@ async def test_a_rolled_out_dispatcher_without_a_mailbox_cannot_bid(
 ):
     """The shared mailbox is going away: once a dispatcher may connect their
     own, a bid waits until they have."""
-    async def never_send(**kwargs):
+    async def never_send(account, **kwargs):
+        kwargs["grant_id"] = account.nylas_grant_id
         raise AssertionError("nothing may be sent without the dispatcher's mailbox")
 
-    monkeypatch.setattr(nylas, "send_message", never_send)
+    monkeypatch.setattr(outbound, "send", never_send)
 
     with pytest.raises(NegotiationError) as err:
         await _bid(session)
@@ -301,10 +150,12 @@ async def test_a_rolled_out_dispatcher_with_a_dead_mailbox_is_told_to_reconnect(
     own_account.status = "expired"
     session.commit()
 
-    async def never_send(**kwargs):
+    async def never_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         raise AssertionError("nothing may be sent from the shared mailbox")
 
-    monkeypatch.setattr(nylas, "send_message", never_send)
+    monkeypatch.setattr(outbound, "send", never_send)
 
     with pytest.raises(NegotiationError) as err:
         await _bid(session)
@@ -354,11 +205,13 @@ def test_a_reply_leaves_from_the_mailbox_that_sent_the_bid(
     suggestion = _pending_suggestion(session, negotiation)
     sent = []
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": "msg-out-2", "thread_id": "thread-1"}
 
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     resp = client.post(
         f"/api/v1/suggestions/{suggestion.id}/send", headers=_headers(), json={}
@@ -374,10 +227,12 @@ def test_a_reply_waits_when_the_bidding_mailbox_was_disconnected(
     own_account.status = "revoked"
     suggestion = _pending_suggestion(session, negotiation)
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         raise AssertionError("must not answer from another address")
 
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     resp = client.post(
         f"/api/v1/suggestions/{suggestion.id}/send", headers=_headers(), json={}
@@ -402,147 +257,6 @@ def test_a_personal_thread_matches_only_in_its_own_inbox(
     message = {"id": "m", "thread_id": "thread-1", "subject": "Re: Bid"}
     assert inbound.match_negotiation(session, own_account, message, set()) == negotiation
     assert inbound.match_negotiation(session, account, message, set()) is None
-
-
-class _Response:
-    status_code = 200
-    text = ""
-
-    def json(self):
-        return {"data": {"id": "out-1"}}
-
-
-async def test_a_throttled_send_is_tried_again_then_reported(monkeypatch):
-    from services import nylas_client
-
-    posts = []
-    slept = []
-
-    class _Throttled(_Response):
-        status_code = 429
-        text = '{"error":{"type":"quota_exceeded_error","message":"Activity limit reached"}}'
-
-    async def post(self, url, **kwargs):
-        posts.append(kwargs["json"])
-        return _Throttled()
-
-    async def no_sleep(seconds):
-        slept.append(seconds)
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
-    monkeypatch.setattr(nylas_client.asyncio, "sleep", no_sleep)
-
-    with pytest.raises(NylasRateLimited):
-        await nylas.send_message(grant_id="g", to_email="b@x.com", subject="s", body="b")
-
-    assert len(posts) == 3
-    assert slept == [2, 5]
-
-
-async def test_a_rate_limited_mailbox_tells_the_dispatcher_to_wait(
-    session, account, own_account, stubs, monkeypatch, load_snapshot  # noqa: F811
-):
-    load_snapshot.update(POSTING)
-
-    async def not_there(grant_id, rfc_id):
-        return None
-
-    async def throttled(**kwargs):
-        raise NylasRateLimited("send failed (429): quota exceeded")
-
-    monkeypatch.setattr(nylas, "find_message_by_rfc_id", not_there)
-    monkeypatch.setattr(nylas, "send_message", throttled)
-
-    with pytest.raises(NegotiationError) as err:
-        await _bid(session)
-
-    assert err.value.status_code == 429
-    assert err.value.code == "mailbox_rate_limited"
-    assert own_account.email_address in err.value.message
-    assert "Wait a minute" in err.value.message
-
-
-async def test_the_alert_reply_headers_reach_nylas(monkeypatch):
-    posted = []
-
-    async def post(self, url, **kwargs):
-        posted.append(kwargs["json"])
-        return _Response()
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
-
-    await nylas.send_message(
-        grant_id="g", to_email="b@x.com", subject="Re: s", body="b",
-        in_reply_to="87764f$oi77l@out07.sylectus.com",
-    )
-
-    assert posted[0]["custom_headers"] == [
-        {"name": "In-Reply-To", "value": "<87764f$oi77l@out07.sylectus.com>"},
-        {"name": "References", "value": "<87764f$oi77l@out07.sylectus.com>"},
-    ]
-    assert "reply_to_message_id" not in posted[0]
-
-
-async def test_the_send_asks_nylas_for_the_headers_it_wrote(monkeypatch, caplog):
-    calls = []
-
-    async def post(self, url, **kwargs):
-        calls.append(kwargs)
-        r = _Response()
-        r.json = lambda: {"data": {"id": "out-1", "headers": [
-            {"name": "Message-Id", "value": "<out-1@mail.gmail.com>"},
-            {"name": "In-Reply-To", "value": "<87764f$oi77l@out07.sylectus.com>"},
-            {"name": "References", "value": "<87764f$oi77l@out07.sylectus.com>"},
-        ]}}
-        return r
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
-
-    with caplog.at_level("INFO"):
-        await nylas.send_message(
-            grant_id="g", to_email="b@x.com", subject="Re: s", body="b",
-            in_reply_to="87764f$oi77l@out07.sylectus.com",
-        )
-
-    assert calls[0]["params"] == {"fields": "include_basic_headers"}
-    assert "as a reply: In-Reply-To <87764f$oi77l@out07.sylectus.com>" in caplog.text
-
-
-async def test_a_reply_that_lost_its_headers_is_logged_as_an_error(monkeypatch, caplog):
-    async def post(self, url, **kwargs):
-        r = _Response()
-        r.json = lambda: {"data": {"id": "out-1", "headers": [
-            {"name": "Message-Id", "value": "<out-1@mail.gmail.com>"},
-        ]}}
-        return r
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
-
-    with caplog.at_level("ERROR"):
-        await nylas.send_message(
-            grant_id="g", to_email="b@x.com", subject="Re: s", body="b",
-            in_reply_to="<x@y>",
-        )
-
-    assert "without In-Reply-To" in caplog.text
-
-
-async def test_a_reply_inside_the_mailbox_needs_no_custom_headers(monkeypatch):
-    posted = []
-
-    async def post(self, url, **kwargs):
-        posted.append(kwargs["json"])
-        return _Response()
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
-
-    await nylas.send_message(
-        grant_id="g", to_email="b@x.com", subject="Re: s", body="b",
-        reply_to_message_id="nylas-1", in_reply_to="<x@y>",
-    )
-
-    assert posted[0]["reply_to_message_id"] == "nylas-1"
-    assert "custom_headers" not in posted[0]
 
 
 async def test_a_reply_sent_from_the_dispatchers_own_gmail_lands_in_their_conversation(

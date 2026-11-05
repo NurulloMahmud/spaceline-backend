@@ -8,7 +8,6 @@ from database import models
 from services import booking, events, inbound
 from services.ai import ai
 from services.boxtruck import BoxTruckError, boxtruck
-from services.nylas_client import nylas
 
 PARSED_RATECON = {
     "broker_name": "Acme Logistics",
@@ -41,9 +40,6 @@ def wire(monkeypatch, session):
     """Stubs every outbound call and records what the pipeline tried to do."""
     calls = {"booked": [], "telegram": [], "events": []}
 
-    async def fake_download(*a, **k):
-        return b"%PDF-1.4 fake"
-
     async def fake_resolve_broker(**k):
         return {"id": 501, "name": "Acme Logistics", "mc": "123456", "ai_type": "Gemini"}
 
@@ -58,7 +54,6 @@ def wire(monkeypatch, session):
     def fake_publish(event):
         calls["events"].append(event)
 
-    monkeypatch.setattr(nylas, "download_attachment", fake_download)
     monkeypatch.setattr(boxtruck, "resolve_broker", fake_resolve_broker)
     monkeypatch.setattr(boxtruck, "book_load", fake_book_load)
     monkeypatch.setattr("services.telegram.send_message", fake_send_message)
@@ -100,7 +95,7 @@ async def run_ratecon(session, account, negotiation, parsed, monkeypatch):
         account=account,
         negotiation=negotiation,
         message_row=message,
-        attachments=[{"id": "att-1", "filename": "ratecon.pdf"}],
+        attachments=[{"id": "att-1", "filename": "ratecon.pdf", "content": b"%PDF-1.4 fake"}],
         nylas_message_id="msg-ratecon",
     )
     session.commit()

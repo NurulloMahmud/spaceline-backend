@@ -4,7 +4,7 @@ import pytest
 from database import models
 from services.atrek import atrek
 from services.boxtruck import boxtruck
-from services.nylas_client import nylas
+from services import outbound
 from tests.test_auth import make_token
 
 
@@ -20,7 +20,9 @@ def stub_peers(monkeypatch, load_snapshot, company_profile, driver_profile):
     async def fake_get_load(load_uuid):
         return load_snapshot
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": f"msg-out-{len(sent)}", "thread_id": f"thread-{len(sent)}"}
 
@@ -29,7 +31,7 @@ def stub_peers(monkeypatch, load_snapshot, company_profile, driver_profile):
 
     monkeypatch.setattr(atrek, "get_load", fake_get_load)
     monkeypatch.setattr(atrek, "record_dispatcher_bid", fake_record_bid)
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
     monkeypatch.setattr(boxtruck, "get_company", lambda cid: _async(company_profile))
     monkeypatch.setattr(boxtruck, "get_dispatcher", lambda uid: _async({"full_name": "Jane Dispatcher"}))
     monkeypatch.setattr(boxtruck, "get_driver", lambda did: _async(driver_profile))
@@ -193,15 +195,18 @@ def test_sending_a_suggestion_replies_on_the_thread(
 ):
     sent = []
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": "msg-out-2", "thread_id": "thread-1"}
 
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     inbound_msg = models.EmailMessage(
         negotiation_id=negotiation.id,
         nylas_message_id="msg-in-1",
+        rfc_message_id="in-1@acme",
         direction="inbound",
         body_text="Can you do 2900?",
     )
@@ -223,7 +228,7 @@ def test_sending_a_suggestion_replies_on_the_thread(
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == models.SENT
-    assert sent[0]["reply_to_message_id"] == "msg-in-1"
+    assert sent[0]["in_reply_to"] == "in-1@acme"
     assert "Our rate is $3,200." in sent[0]["body"]
 
 
@@ -236,9 +241,8 @@ def test_sending_a_suggestion_learns_a_missing_thread_id(
     match only by subject, so every later send is a chance to learn it.
     """
     negotiation.nylas_thread_id = None
-    monkeypatch.setattr(
-        nylas, "send_message",
-        lambda **k: _async({"id": "msg-out-4", "thread_id": "thread-learned"}),
+    monkeypatch.setattr(outbound, "send",
+        lambda account=None, **k: _async({"id": "msg-out-4", "thread_id": "thread-learned"}),
     )
     suggestion = models.Suggestion(
         negotiation_id=negotiation.id,
@@ -263,9 +267,8 @@ def test_sending_a_suggestion_does_not_move_a_known_thread(
     client, auth_headers, account, session, negotiation, monkeypatch
 ):
     """A send that comes back on another thread must not repoint the thread."""
-    monkeypatch.setattr(
-        nylas, "send_message",
-        lambda **k: _async({"id": "msg-out-5", "thread_id": "some-other-thread"}),
+    monkeypatch.setattr(outbound, "send",
+        lambda account=None, **k: _async({"id": "msg-out-5", "thread_id": "some-other-thread"}),
     )
     suggestion = models.Suggestion(
         negotiation_id=negotiation.id,
@@ -289,9 +292,8 @@ def test_sending_a_suggestion_does_not_move_a_known_thread(
 def test_editing_before_sending_is_recorded_separately(
     client, auth_headers, account, session, negotiation, monkeypatch
 ):
-    monkeypatch.setattr(
-        nylas, "send_message",
-        lambda **k: _async({"id": "msg-out-3", "thread_id": "thread-1"}),
+    monkeypatch.setattr(outbound, "send",
+        lambda account=None, **k: _async({"id": "msg-out-3", "thread_id": "thread-1"}),
     )
     suggestion = models.Suggestion(
         negotiation_id=negotiation.id,

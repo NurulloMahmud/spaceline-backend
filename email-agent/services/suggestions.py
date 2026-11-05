@@ -10,12 +10,34 @@ from sqlalchemy.orm import Session
 
 from database import models
 from services import events
-from services.mailboxes import catcher_headers
 from services import outbound
 from services.negotiations import NegotiationError, reply_subject, thread_mailbox
-from services.nylas_client import NylasError, nylas
 
 logger = logging.getLogger(__name__)
+
+
+def reply_target(session: Session, negotiation: models.Negotiation, source_id=None) -> Optional[str]:
+    """
+    The RFC Message-ID a new email on this negotiation answers: the message
+    the dispatcher is replying to when known, else the broker's latest, else
+    our own latest, else the posting email the negotiation started from.
+    Every mail client threads on it, whichever mailbox holds the message.
+    """
+    if source_id is not None:
+        source = session.get(models.EmailMessage, source_id)
+        if source is not None and source.rfc_message_id:
+            return source.rfc_message_id
+    messages = (
+        session.query(models.EmailMessage)
+        .filter(models.EmailMessage.negotiation_id == negotiation.id)
+        .order_by(models.EmailMessage.created_at.desc())
+        .all()
+    )
+    ordered = [m for m in messages if m.direction == "inbound"] + [m for m in messages if m.direction != "inbound"]
+    rfc_id = next((m.rfc_message_id for m in ordered if m.rfc_message_id), None)
+    if rfc_id:
+        return rfc_id
+    return (negotiation.load_snapshot or {}).get("email_message_id") or None
 
 
 def get_for_company(
@@ -116,21 +138,9 @@ async def send(
             code="mailbox_not_connected",
         )
 
-    # The broker's message this answers. Its Nylas id threads the reply
-    # inside the mailbox that holds it; a message read from the shared
-    # mailbox over IMAP has no Nylas id, and the RFC Message-ID threads it on
-    # the broker's side just the same.
-    reply_to = None
-    in_reply_to = None
-    if suggestion.in_reply_to_message_id:
-        source = (
-            session.query(models.EmailMessage)
-            .filter(models.EmailMessage.id == suggestion.in_reply_to_message_id)
-            .first()
-        )
-        if source:
-            reply_to = source.nylas_message_id
-            in_reply_to = source.rfc_message_id
+    # The reply threads on the Message-ID of the message it answers: the
+    # broker's latest, else our own, else the posting email itself.
+    in_reply_to = reply_target(session, negotiation, suggestion.in_reply_to_message_id)
 
     try:
         sent = await outbound.send(
@@ -138,11 +148,9 @@ async def send(
             to_email=negotiation.broker_email,
             subject=final_subject,
             body=final_body.replace("\n", "<br>"),
-            reply_to_message_id=reply_to,
             in_reply_to=in_reply_to,
-            **catcher_headers(session, account),
         )
-    except NylasError as e:
+    except outbound.SendError as e:
         logger.error(f"suggestion {suggestion_id} send failed: {e}")
         raise NegotiationError(
             f"Could not send the email: {e}", status_code=502, code="send_failed"
@@ -159,7 +167,7 @@ async def send(
         models.EmailMessage(
             negotiation_id=negotiation.id,
             nylas_message_id=sent.get("id"),
-            rfc_message_id=nylas.sent_rfc_id(sent),
+            rfc_message_id=outbound.sent_rfc_id(sent),
             direction="outbound",
             from_email=account.email_address,
             to_email=negotiation.broker_email,

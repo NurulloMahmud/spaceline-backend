@@ -17,11 +17,9 @@ from sqlalchemy.orm import Session
 
 from database import models
 from services import events
-from services.mailboxes import catcher_headers
 from services import outbound
 from services.negotiations import NegotiationError, reply_subject, thread_mailbox
-from services.nylas_client import NylasError, nylas
-from services.suggestions import REPLIED_IN_APP, supersede_pending
+from services.suggestions import REPLIED_IN_APP, reply_target, supersede_pending
 
 logger = logging.getLogger(__name__)
 
@@ -148,27 +146,6 @@ def mark_read(session: Session, negotiation: models.Negotiation, user_id: int) -
     return now
 
 
-def _reply_targets(session: Session, negotiation: models.Negotiation) -> tuple[Optional[str], Optional[str]]:
-    """(Nylas message id, RFC Message-ID) of the message a new email answers:
-    the broker's latest, else ours. The Nylas id threads it inside the
-    mailbox; the RFC id still threads it on the broker's side when the Nylas
-    id belongs to a grant that has since been replaced."""
-    messages = (
-        session.query(models.EmailMessage)
-        .filter(models.EmailMessage.negotiation_id == negotiation.id)
-        .order_by(models.EmailMessage.created_at.desc())
-        .all()
-    )
-    ordered = [m for m in messages if m.direction == "inbound"] + [
-        m for m in messages if m.direction != "inbound"
-    ]
-    nylas_id = next((m.nylas_message_id for m in ordered if m.nylas_message_id), None)
-    rfc_id = next((m.rfc_message_id for m in ordered if m.rfc_message_id), None)
-    if rfc_id is None and not messages:
-        rfc_id = (negotiation.load_snapshot or {}).get("email_message_id")
-    return nylas_id, rfc_id
-
-
 async def write(
     session: Session,
     negotiation: models.Negotiation,
@@ -206,36 +183,15 @@ async def write(
 
     subject = reply_subject(negotiation)
     html_body = html.escape(text).replace("\n", "<br>")
-    nylas_id, rfc_id = _reply_targets(session, negotiation)
     try:
-        try:
-            sent = await outbound.send(
-                account,
-                to_email=negotiation.broker_email,
-                subject=subject,
-                body=html_body,
-                reply_to_message_id=nylas_id,
-                in_reply_to=rfc_id,
-                **catcher_headers(session, account),
-            )
-        except NylasError as e:
-            if not nylas_id:
-                raise
-            # The message may live in a grant this mailbox no longer has (it
-            # was reconnected). Thread on the Message-ID instead.
-            logger.warning(
-                f"conversation {negotiation.id}: reply_to {nylas_id} refused ({e}), "
-                "sending on the Message-ID instead"
-            )
-            sent = await outbound.send(
-                account,
-                to_email=negotiation.broker_email,
-                subject=subject,
-                body=html_body,
-                in_reply_to=rfc_id,
-                **catcher_headers(session, account),
-            )
-    except NylasError as e:
+        sent = await outbound.send(
+            account,
+            to_email=negotiation.broker_email,
+            subject=subject,
+            body=html_body,
+            in_reply_to=reply_target(session, negotiation),
+        )
+    except outbound.SendError as e:
         logger.error(f"conversation {negotiation.id}: send failed: {e}")
         raise NegotiationError(f"Could not send the email: {e}", status_code=502, code="send_failed")
 
@@ -245,7 +201,7 @@ async def write(
     message = models.EmailMessage(
         negotiation_id=negotiation.id,
         nylas_message_id=sent.get("id"),
-        rfc_message_id=nylas.sent_rfc_id(sent),
+        rfc_message_id=outbound.sent_rfc_id(sent),
         direction="outbound",
         from_email=account.email_address,
         to_email=negotiation.broker_email,

@@ -58,15 +58,17 @@ OUTCOME_MISMATCH = "mismatch"
 OUTCOME_PARSE_FAILED = "parse_failed"
 
 
+# "nylas" survives only on rows connected through Nylas before 2026-11-05;
+# every such row is revoked. New rows are "imap".
 TRANSPORT_NYLAS = "nylas"
 TRANSPORT_IMAP = "imap"
 
 
 class EmailAccount(Base):
     """
-    A mailbox connected through Nylas: either the company's shared dispatch
-    mailbox (`user_id` is null, one per company) or one dispatcher's own
-    mailbox (`user_id` set, one per user). A dispatcher with their own
+    A mailbox connected with an app password: either the company's shared
+    dispatch mailbox (`user_id` is null, one per company) or one dispatcher's
+    own mailbox (`user_id` set, one per user). A dispatcher with their own
     mailbox bids from it; everyone else bids from the shared one.
     """
     __tablename__ = "email_accounts"
@@ -92,11 +94,10 @@ class EmailAccount(Base):
     # mail. Null on accounts connected before the check existed.
     expected_email_address = Column(String, nullable=True)
     status = Column(String, default="active", nullable=False)
-    # How mail moves for this mailbox. "nylas": through the grant above.
-    # "imap": with an app password, sent over SMTP and read over IMAP by
-    # services.shared_inbox; `nylas_grant_id` then holds a placeholder
-    # ("imap:<uuid>") because the column is required and unique.
-    transport = Column(String, default=TRANSPORT_NYLAS, nullable=False, server_default=TRANSPORT_NYLAS)
+    # "imap": sent over SMTP and read over IMAP by services.shared_inbox with
+    # the app password below. `nylas_grant_id` is a legacy column kept because
+    # it is required and unique; it holds "imap:<uuid>" for every live row.
+    transport = Column(String, default=TRANSPORT_IMAP, nullable=False, server_default=TRANSPORT_NYLAS)
     imap_host = Column(String, nullable=True)
     imap_port = Column(Integer, nullable=True)
     smtp_host = Column(String, nullable=True)
@@ -294,7 +295,9 @@ class ConversationRead(Base):
 
 
 class ProcessedWebhook(Base):
-    """Nylas retries webhooks; this keeps message handling idempotent."""
+    """One row per message the IMAP reader has handled, keyed
+    "imap:<mailbox>:<uidvalidity>:<uid>", so a message is never run through
+    the pipeline twice. (Named for the Nylas webhooks it first served.)"""
     __tablename__ = "processed_webhooks"
 
     id = _uuid_pk()

@@ -1,32 +1,33 @@
 """
 One door out for every email this service sends.
 
-A mailbox connected through Nylas sends through its grant, exactly as
-before. A mailbox connected with an app password (EmailAccount.transport
-"imap") sends over SMTP from its own address with In-Reply-To set, which
-threads the bid under the Sylectus alert in the dispatcher's own Gmail and
-on the broker's side alike. Both return the dict the callers already read:
-`id`, `thread_id` and `headers` with the Message-ID.
+Every mailbox is connected with an app password (EmailAccount.transport
+"imap") and sends over SMTP from its own address with In-Reply-To set, which
+threads the bid under the Sylectus alert in the dispatcher's own Gmail and on
+the broker's side alike. The result carries the Message-ID the email went
+out with, which is how the broker's answer is matched back to it.
 """
 import asyncio
 import logging
 from typing import Optional
 
+from config.settings import config
 from database import models
 from services import bid_email, imap_smtp, secrets
-from services.nylas_client import NylasError, nylas
 
 logger = logging.getLogger(__name__)
 
 
-class SendError(NylasError):
-    """An SMTP send that failed. Subclasses NylasError so every caller's
-    existing handling (a 502 with the reason) applies unchanged."""
+class SendError(Exception):
+    """A send that failed; the callers answer 502 with the reason."""
 
 
 def credentials(account: models.EmailAccount) -> imap_smtp.Credentials:
-    if not account.secret:
-        raise SendError(f"{account.email_address} has no app password stored; connect it again")
+    if not account.uses_imap or not account.secret:
+        raise SendError(
+            f"{account.email_address} has no app password stored; "
+            "an administrator connects it again under Admin > Mailboxes"
+        )
     return imap_smtp.Credentials(
         address=account.email_address,
         password=secrets.decrypt(account.secret),
@@ -37,35 +38,25 @@ def credentials(account: models.EmailAccount) -> imap_smtp.Credentials:
     )
 
 
+def sent_rfc_id(sent: dict) -> Optional[str]:
+    """The Message-ID a send went out with, without angle brackets."""
+    for h in sent.get("headers") or []:
+        if isinstance(h, dict) and str(h.get("name", "")).lower() == "message-id":
+            value = str(h.get("value") or "").strip().strip("<>").strip()
+            return value or None
+    return None
+
+
 async def send(
     account: models.EmailAccount,
     *,
     to_email: str,
     subject: str,
     body: str,
-    reply_to_message_id: Optional[str] = None,
     in_reply_to: Optional[str] = None,
     reply_to: Optional[list[str]] = None,
     cc: Optional[list[str]] = None,
 ) -> dict:
-    if not account.uses_imap:
-        extra = {}
-        if reply_to:
-            extra["reply_to"] = reply_to
-        if cc:
-            extra["cc"] = cc
-        return await nylas.send_message(
-            grant_id=account.nylas_grant_id,
-            to_email=to_email,
-            subject=subject,
-            body=body,
-            reply_to_message_id=reply_to_message_id,
-            in_reply_to=in_reply_to,
-            **extra,
-        )
-
-    from config.settings import config  # local: tests monkeypatch the instance
-
     if config.EMAIL_REDIRECT_TO:
         logger.warning(
             f"EMAIL_REDIRECT_TO is set: '{subject}' meant for {to_email} "

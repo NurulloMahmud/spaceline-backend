@@ -7,7 +7,8 @@ from services.boxtruck import boxtruck
 from services.negotiations import (
     NegotiationError, create_negotiation, extract_broker_email,
 )
-from services.nylas_client import NylasError, nylas
+from services import outbound
+from services.outbound import SendError
 
 
 async def _async(value):
@@ -42,10 +43,11 @@ def test_broker_email_is_found_wherever_the_feed_puts_it():
 async def test_a_send_failure_leaves_no_negotiation_behind(
     session, account, stubs, monkeypatch
 ):
-    async def failing_send(**kwargs):
-        raise NylasError("mailbox rejected the message")
+    async def failing_send(account, **kwargs):
+        kwargs["grant_id"] = account.nylas_grant_id
+        raise SendError("mailbox rejected the message")
 
-    monkeypatch.setattr(nylas, "send_message", failing_send)
+    monkeypatch.setattr(outbound, "send", failing_send)
 
     with pytest.raises(NegotiationError) as e:
         await create_negotiation(
@@ -66,9 +68,8 @@ async def test_a_send_failure_leaves_no_negotiation_behind(
 async def test_the_dispatcher_bid_is_recorded_on_the_board(
     session, account, stubs, monkeypatch
 ):
-    monkeypatch.setattr(
-        nylas, "send_message",
-        lambda **k: _async({"id": "msg-1", "thread_id": "thread-9"}),
+    monkeypatch.setattr(outbound, "send",
+        lambda account=None, **k: _async({"id": "msg-1", "thread_id": "thread-9"}),
     )
 
     negotiation = await create_negotiation(
@@ -96,9 +97,8 @@ async def test_the_dispatcher_bid_is_recorded_on_the_board(
 async def test_a_placed_bid_is_relayed_to_the_driver_hub(
     session, account, stubs, monkeypatch, bid_status_reports
 ):
-    monkeypatch.setattr(
-        nylas, "send_message",
-        lambda **k: _async({"id": "msg-1", "thread_id": "thread-9"}),
+    monkeypatch.setattr(outbound, "send",
+        lambda account=None, **k: _async({"id": "msg-1", "thread_id": "thread-9"}),
     )
 
     await create_negotiation(
@@ -135,9 +135,8 @@ async def test_a_board_failure_does_not_undo_a_sent_email(
     session, account, stubs, monkeypatch
 ):
     """The email is already gone; the negotiation must still exist."""
-    monkeypatch.setattr(
-        nylas, "send_message",
-        lambda **k: _async({"id": "msg-1", "thread_id": "thread-9"}),
+    monkeypatch.setattr(outbound, "send",
+        lambda account=None, **k: _async({"id": "msg-1", "thread_id": "thread-9"}),
     )
     monkeypatch.setattr(atrek, "record_dispatcher_bid", lambda **k: _async(False))
 
@@ -190,20 +189,16 @@ async def test_bid_replies_to_the_posting_email(
     load_snapshot.update(POSTING)
     sent = []
 
-    async def fake_find(grant_id, rfc_id):
-        assert rfc_id == "<posting-1@mail.gmail.com>"
-        return {"id": "nylas-posting-1", "subject": POSTING["email_subject"]}
+    async def fake_send(account, **kwargs):
 
-    async def fake_send(**kwargs):
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": "msg-out-1", "thread_id": "thread-posting"}
-
-    monkeypatch.setattr(nylas, "find_message_by_rfc_id", fake_find)
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     negotiation = await _bid(session)
 
-    assert sent[0]["reply_to_message_id"] == "nylas-posting-1"
+    assert sent[0]["in_reply_to"] == POSTING["email_message_id"]
     assert sent[0]["subject"] == "Re: " + POSTING["email_subject"]
     assert negotiation.subject == sent[0]["subject"]
     assert negotiation.nylas_thread_id == "thread-posting"
@@ -217,16 +212,15 @@ async def test_bid_replies_by_message_id_when_the_posting_is_not_in_the_mailbox(
     load_snapshot.update(POSTING)
     sent = []
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": "msg-out-1", "thread_id": "thread-new"}
-
-    monkeypatch.setattr(nylas, "find_message_by_rfc_id", lambda g, r: _async(None))
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     await _bid(session)
 
-    assert sent[0]["reply_to_message_id"] is None
     assert sent[0]["in_reply_to"] == POSTING["email_message_id"]
     assert sent[0]["subject"] == "Re: " + POSTING["email_subject"]
 
@@ -237,16 +231,15 @@ async def test_a_posting_without_a_subject_still_starts_a_new_email(
     load_snapshot.update({**POSTING, "email_subject": ""})
     sent = []
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": "msg-out-1", "thread_id": "thread-new"}
-
-    monkeypatch.setattr(nylas, "find_message_by_rfc_id", lambda g, r: _async(None))
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     await _bid(session)
 
-    assert sent[0]["reply_to_message_id"] is None
     assert sent[0]["in_reply_to"] is None
     assert sent[0]["subject"] == "Ref 55012 \u00b7 Chicago, IL \u2192 Detroit, MI"
 
@@ -259,15 +252,13 @@ async def test_the_composer_email_goes_out_as_a_reply_to_the_posting(
     sent = []
     composer = '<div><b>All in:</b> $3,200</div><div>Can pick up today</div>'
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": "msg-out-1", "thread_id": "thread-posting"}
 
-    monkeypatch.setattr(
-        nylas, "find_message_by_rfc_id",
-        lambda g, r: _async({"id": "nylas-posting-1", "subject": POSTING["email_subject"]}),
-    )
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     negotiation = await create_negotiation(
         session=session,
@@ -279,7 +270,7 @@ async def test_the_composer_email_goes_out_as_a_reply_to_the_posting(
     )
 
     assert sent[0]["body"] == composer
-    assert sent[0]["reply_to_message_id"] == "nylas-posting-1"
+    assert sent[0]["in_reply_to"] == POSTING["email_message_id"]
     assert sent[0]["subject"] == "Re: " + POSTING["email_subject"]
     stored = session.query(models.EmailMessage).filter_by(negotiation_id=negotiation.id).one()
     assert stored.body_text == "All in: $3,200\nCan pick up today"
@@ -290,11 +281,13 @@ async def test_a_blank_composer_falls_back_to_the_template(
 ):
     sent = []
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": "msg-out-1", "thread_id": "t"}
 
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     await create_negotiation(
         session=session,
@@ -314,10 +307,10 @@ async def test_a_load_without_a_posting_email_never_searches_the_mailbox(
     async def boom(grant_id, rfc_id):
         raise AssertionError("should not search")
 
-    async def fake_send(**kwargs):
-        return {"id": "msg-out-1", "thread_id": "t"}
+    async def fake_send(account, **kwargs):
 
-    monkeypatch.setattr(nylas, "find_message_by_rfc_id", boom)
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+        kwargs["grant_id"] = account.nylas_grant_id
+        return {"id": "msg-out-1", "thread_id": "t"}
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     await _bid(session)

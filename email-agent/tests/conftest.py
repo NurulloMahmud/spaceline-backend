@@ -25,9 +25,7 @@ os.environ.setdefault("PRICE_TOLERANCE_CENTS", "0")
 
 # Forced, never setdefault: a real .env sits next to this suite, and these are
 # live credentials. A stub that slips means a test authenticating against
-# production Nylas or OpenAI with the deployment's own keys.
-os.environ["NYLAS_API_KEY"] = "test-nylas-key"
-os.environ["NYLAS_WEBHOOK_SECRET"] = "test-webhook-secret"
+# production OpenAI with the deployment's own keys.
 os.environ["OPENAI_API_KEY"] = "test-openai-key"
 os.environ["TELEGRAM_BOT_TOKEN"] = "test-telegram-token"
 

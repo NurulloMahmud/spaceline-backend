@@ -7,15 +7,13 @@ negotiation whichever mailbox sent the bid.
 import asyncio
 from email.message import EmailMessage as MimeMessage
 
-import httpx
 import pytest
 
 from config.settings import config
 from database import models
 from services import inbound, shared_inbox
 from services.boxtruck import BoxTruckError, boxtruck
-from services.mailboxes import catcher_headers
-from services.nylas_client import nylas
+from services import outbound
 from tests.test_negotiation_service import POSTING, stubs  # noqa: F401
 from tests.test_personal_mailbox import _bid, _headers, own_account  # noqa: F401
 
@@ -59,97 +57,31 @@ def raw_email(
     return msg.as_bytes()
 
 
-# --- what the send carries ---------------------------------------------------
+# --- what the send records ---------------------------------------------------
 
 
-async def test_a_bid_from_a_dispatchers_mailbox_routes_the_answer_to_the_shared_one(
+async def test_a_bid_records_the_message_id_it_went_out_with(
     session, account, own_account, stubs, monkeypatch, load_snapshot  # noqa: F811
 ):
     load_snapshot.update(POSTING)
     sent = []
 
-    async def not_there(grant_id, rfc_id):
-        return None
+    async def fake_send(account, **kwargs):
 
-    async def fake_send(**kwargs):
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {
             "id": "msg-out-1",
             "thread_id": "thread-own",
             "headers": [{"name": "Message-Id", "value": "<bid-1@mail.gmail.com>"}],
         }
-
-    monkeypatch.setattr(nylas, "find_message_by_rfc_id", not_there)
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     negotiation = await _bid(session)
 
-    assert sent[0]["reply_to"] == ["jane@gmail.com", SHARED]
-    assert sent[0]["cc"] == [SHARED]
-    outbound = session.query(models.EmailMessage).filter_by(negotiation_id=negotiation.id).one()
-    assert outbound.rfc_message_id == "bid-1@mail.gmail.com"
-
-
-async def test_a_bid_from_the_shared_mailbox_needs_no_detour(
-    session, account, own_account, stubs, monkeypatch  # noqa: F811
-):
-    sent = []
-
-    async def fake_send(**kwargs):
-        sent.append(kwargs)
-        return {"id": "msg-out-1", "thread_id": "t"}
-
-    monkeypatch.setattr(nylas, "send_message", fake_send)
-
-    await _bid(session, user_id=8)
-
-    assert sent[0]["grant_id"] == "grant-1"
-    assert "reply_to" not in sent[0]
-    assert "cc" not in sent[0]
-
-
-def test_the_configured_address_wins_over_the_shared_account(session, account, own_account, monkeypatch):
-    monkeypatch.setattr(config, "SHARED_INBOX_ADDRESS", "replies@shipluxellc.com")
-    assert catcher_headers(session, own_account) == {
-        "reply_to": ["jane@gmail.com", "replies@shipluxellc.com"],
-        "cc": ["replies@shipluxellc.com"],
-    }
-    # The shared account is not the configured reader either, so its own
-    # mail is routed there too.
-    assert catcher_headers(session, account)["cc"] == ["replies@shipluxellc.com"]
-
-
-async def test_the_nylas_payload_carries_reply_to_and_cc(monkeypatch):
-    posts = []
-
-    class _Sent:
-        status_code = 200
-        text = ""
-
-        def json(self):
-            return {"data": {"id": "m", "thread_id": "t"}}
-
-    async def post(self, url, **kwargs):
-        posts.append(kwargs["json"])
-        return _Sent()
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
-
-    await nylas.send_message(
-        grant_id="g", to_email="b@x.com", subject="s", body="b",
-        reply_to=["jane@gmail.com", SHARED], cc=[SHARED],
-    )
-    assert posts[0]["reply_to"] == [{"email": "jane@gmail.com"}, {"email": SHARED}]
-    assert posts[0]["cc"] == [{"email": SHARED}]
-
-    # A test server that redirects mail must not copy the shared mailbox in.
-    monkeypatch.setattr(config, "EMAIL_REDIRECT_TO", "tester@example.com")
-    await nylas.send_message(
-        grant_id="g", to_email="b@x.com", subject="s", body="b",
-        reply_to=["jane@gmail.com", SHARED], cc=[SHARED],
-    )
-    assert "cc" not in posts[1]
-    assert posts[1]["to"] == [{"email": "tester@example.com"}]
+    assert sent[0]["in_reply_to"] == POSTING["email_message_id"]
+    stored = session.query(models.EmailMessage).filter_by(negotiation_id=negotiation.id).one()
+    assert stored.rfc_message_id == "bid-1@mail.gmail.com"
 
 
 def test_a_reply_to_a_message_read_over_imap_threads_on_its_message_id(
@@ -177,17 +109,17 @@ def test_a_reply_to_a_message_read_over_imap_threads_on_its_message_id(
     session.commit()
     sent = []
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         sent.append(kwargs)
         return {"id": "msg-out-2", "thread_id": "thread-1"}
 
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
 
     resp = client.post(f"/api/v1/suggestions/{suggestion.id}/send", headers=_headers(), json={})
     assert resp.status_code == 200, resp.text
-    assert sent[0]["reply_to_message_id"] is None
     assert sent[0]["in_reply_to"] == "reply-1@acme"
-    assert sent[0]["reply_to"] == ["jane@gmail.com", SHARED]
 
 
 # --- parsing -----------------------------------------------------------------
@@ -416,9 +348,6 @@ async def test_a_ratecon_read_over_imap_needs_no_download(
 ):
     parsed_with = []
 
-    async def never_download(**kwargs):
-        raise AssertionError("the bytes came with the message")
-
     async def no_broker(**kwargs):
         return None
 
@@ -426,7 +355,6 @@ async def test_a_ratecon_read_over_imap_needs_no_download(
         parsed_with.append((filename, content))
         raise BoxTruckError("unreadable")
 
-    monkeypatch.setattr(nylas, "download_attachment", never_download)
     monkeypatch.setattr(boxtruck, "resolve_broker", no_broker)
     monkeypatch.setattr(boxtruck, "parse_ratecon", parse)
 

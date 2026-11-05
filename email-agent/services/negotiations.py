@@ -16,9 +16,7 @@ from database import models
 from services import bid_email, events
 from services.atrek import atrek
 from services.boxtruck import boxtruck
-from services.mailboxes import catcher_headers
 from services import outbound
-from services.nylas_client import NylasError, NylasRateLimited, nylas
 
 logger = logging.getLogger(__name__)
 
@@ -88,35 +86,6 @@ def load_summary_text(load: dict) -> str:
         f"Pieces: {load.get('pieces', 'N/A')}, Weight: {load.get('weight', 'N/A')} lbs",
         f"Broker contact: {load.get('contact_name', 'N/A')}",
     ])
-
-
-async def find_posting_email(
-    account: models.EmailAccount, load_detail: dict
-) -> tuple[Optional[str], Optional[str]]:
-    """
-    The load's own Posted-loads email in the dispatch mailbox, if there is one.
-
-    Returns (nylas_message_id, subject) so the bid can be a reply to it and
-    land in the same conversation. (None, None) means start a new email: the
-    load did not come from an email, the feed did not say which one, or the
-    mailbox no longer has it.
-    """
-    rfc_id = (load_detail.get("email_message_id") or "").strip()
-    if not rfc_id:
-        return None, None
-    if account.uses_imap:
-        # No Nylas id to reply to; the SMTP send threads on the Message-ID,
-        # which Gmail honours for mail submitted over SMTP.
-        return None, load_detail.get("email_subject")
-    message = await nylas.find_message_by_rfc_id(account.nylas_grant_id, rfc_id)
-    if not message or not message.get("id"):
-        logger.info(
-            f"load {load_detail.get('id')}: posting email {rfc_id} is not in the "
-            f"mailbox; the bid replies to it by Message-ID instead"
-        )
-        return None, None
-    subject = message.get("subject") or load_detail.get("email_subject")
-    return message["id"], subject
 
 
 def shared_mailbox(session: Session, company_id: int) -> Optional[models.EmailAccount]:
@@ -271,25 +240,15 @@ async def create_negotiation(
             f"equipment. Check that the driver endpoint accepts the internal secret."
         )
 
-    # Reply to the broker's posting email when we can, so the bid sits in the
-    # conversation they started instead of opening a second one. When the
-    # sending mailbox holds the alert itself (it is on the Sylectus alert
-    # list), the bid replies to that copy: Nylas then hands Gmail the thread,
-    # and the dispatcher sees posting and bid together in their own mailbox.
-    # Otherwise the reply goes by the alert's Message-ID, which Sylectus gives
-    # every recipient alike; the broker threads it just the same.
+    # Reply to the broker's posting email, by the Message-ID Sylectus gives
+    # every recipient alike. Gmail threads SMTP-submitted mail on it, so the
+    # dispatcher sees posting and bid together in their own mailbox, and the
+    # broker's client threads it just the same.
     in_reply_to = (load_detail.get("email_message_id") or "").strip() or None
     posting_subject = load_detail.get("email_subject") if in_reply_to else None
-    reply_to_message_id = None
-    if in_reply_to:
-        reply_to_message_id, found_subject = await find_posting_email(account, load_detail)
-        if reply_to_message_id:
-            in_reply_to = None
-            posting_subject = found_subject or posting_subject
-    if (reply_to_message_id or in_reply_to) and posting_subject:
+    if in_reply_to and posting_subject:
         subject = f"Re: {RE_PREFIX.sub('', posting_subject.strip())}"
     else:
-        reply_to_message_id = None
         in_reply_to = None
         subject = bid_email.build_subject(load_detail)
     # The email the dispatcher was looking at when they pressed Send, edits and
@@ -328,19 +287,9 @@ async def create_negotiation(
             to_email=resolved_email,
             subject=subject,
             body=body,
-            reply_to_message_id=reply_to_message_id,
             in_reply_to=in_reply_to,
-            **catcher_headers(session, account),
         )
-    except NylasRateLimited as e:
-        logger.error(f"bid email for load {load_uuid} was rate-limited by the provider: {e}")
-        raise NegotiationError(
-            f"Gmail is rate-limiting {account.email_address} right now, so the bid "
-            f"was not sent. Wait a minute and send it again.",
-            status_code=429,
-            code="mailbox_rate_limited",
-        )
-    except NylasError as e:
+    except outbound.SendError as e:
         logger.error(f"bid email failed for load {load_uuid}: {e}")
         raise NegotiationError(
             f"Could not send the bid email: {e}",
@@ -348,20 +297,14 @@ async def create_negotiation(
             code="send_failed",
         )
 
+    # The mailbox's thread id is learnt from the first reply read over IMAP;
+    # until then the reply matches on the Message-ID it quotes.
     negotiation.nylas_thread_id = sent.get("thread_id")
-    if not negotiation.nylas_thread_id:
-        # Not fatal: inbound.match_negotiation falls back to the broker address
-        # and subject, and adopts the thread id off the first reply. Worth
-        # knowing about, because every reply on this negotiation takes the
-        # slower path until then.
-        logger.warning(
-            f"negotiation {negotiation.id}: the send response carried no thread id"
-        )
     session.add(
         models.EmailMessage(
             negotiation_id=negotiation.id,
             nylas_message_id=sent.get("id"),
-            rfc_message_id=nylas.sent_rfc_id(sent),
+            rfc_message_id=outbound.sent_rfc_id(sent),
             direction="outbound",
             from_email=account.email_address,
             to_email=resolved_email,

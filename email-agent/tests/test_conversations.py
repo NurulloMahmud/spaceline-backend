@@ -8,7 +8,8 @@ import pytest
 
 from database import models
 from services import conversations
-from services.nylas_client import NylasError, nylas
+from services import outbound
+from services.outbound import SendError
 from tests.test_auth import make_token
 
 
@@ -42,11 +43,13 @@ def _message(session, negotiation, direction, minutes_ago, **extra):
 def sends(monkeypatch):
     calls = []
 
-    async def fake_send(**kwargs):
+    async def fake_send(account, **kwargs):
+
+        kwargs["grant_id"] = account.nylas_grant_id
         calls.append(kwargs)
         return {"id": f"sent-{len(calls)}", "thread_id": "thread-1"}
 
-    monkeypatch.setattr(nylas, "send_message", fake_send)
+    monkeypatch.setattr(outbound, "send", fake_send)
     return calls
 
 
@@ -136,7 +139,7 @@ def test_the_dispatcher_writes_on_the_thread_at_any_time(client, session, negoti
     assert call["grant_id"] == "grant-1"
     assert call["to_email"] == "broker@acme-logistics.com"
     assert call["subject"] == "Re: Bid — Chicago, IL to Detroit, MI"
-    assert call["reply_to_message_id"] == "broker-1"
+    assert call["in_reply_to"] == "r1@acme"
     assert call["body"] == "We can do $2,950.<br>&lt;b&gt;Thanks&lt;/b&gt;"
 
     session.expire_all()
@@ -164,25 +167,14 @@ def test_others_can_read_but_not_write(client, session, negotiation, account, se
     assert sends == []
 
 
-def test_a_reply_to_id_from_a_replaced_grant_falls_back_to_the_message_id(
-    client, session, negotiation, account, monkeypatch
-):
+def test_a_reply_threads_on_the_brokers_latest_message_id(client, session, negotiation, account, sends):
     _message(session, negotiation, "inbound", 10, nylas_message_id="old-grant-msg", rfc_message_id="<r1@acme>")
-    calls = []
-
-    async def fake_send(**kwargs):
-        calls.append(kwargs)
-        if kwargs.get("reply_to_message_id"):
-            raise NylasError("send failed (404): message not found")
-        return {"id": "sent-2"}
-
-    monkeypatch.setattr(nylas, "send_message", fake_send)
     resp = client.post(
         f"/api/v1/conversations/{negotiation.id}/messages", json={"body": "Still available?"}, headers=_headers(7)
     )
     assert resp.status_code == 201, resp.text
-    assert [c.get("reply_to_message_id") for c in calls] == ["old-grant-msg", None]
-    assert calls[1]["in_reply_to"] == "<r1@acme>"
+    (call,) = sends
+    assert call["in_reply_to"] == "<r1@acme>"
 
 
 def test_a_disconnected_personal_mailbox_cannot_write(client, session, negotiation, sends):

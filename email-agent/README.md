@@ -29,13 +29,13 @@ atrek (Go)          load feed + bid board          driver bids, dispatcher bids
 
 1. A dispatcher clicks **Bid** on the bid board and names a price.
    `POST /api/v1/negotiations` renders the fixed bid-email template and sends it
-   to the broker from the dispatcher's own mailbox (Nylas), or from the
-   company's shared dispatch mailbox for dispatchers without one. A bid from
-   a dispatcher's mailbox names the shared mailbox as Reply-To and Cc.
-2. The broker replies. The answer lands in the shared mailbox, which the
-   service reads over IMAP (`services/shared_inbox.py`); the agent classifies
-   the message and drafts a reply. The dispatcher can **ignore**, **send**, or
-   **edit & send**.
+   to the broker over SMTP from the dispatcher's own mailbox, as a reply to
+   the Sylectus alert by Message-ID, or from the company's shared mailbox for
+   dispatchers without one.
+2. The broker replies. The answer lands in the dispatcher's mailbox, which
+   the service reads over IMAP (`services/shared_inbox.py`); the agent
+   classifies the message and drafts a reply. The dispatcher can **ignore**,
+   **send**, or **edit & send**.
    *Nothing is ever auto-sent to a broker except that first bid email.*
 3. The broker sends a rate confirmation. The agent parses it through the TMS's
    existing parser and verifies it:
@@ -68,77 +68,20 @@ the group the driver already talks to.
 `PRICE_TOLERANCE_CENTS` is `0` and should stay there: it is the guard that stops
 a $3,000 ratecon from booking a $3,200 agreement.
 
-### Nylas
+### Mail transport
 
-One grant per company — a shared dispatch mailbox, not per-dispatcher inboxes.
-The grant id and address live on `email_accounts`, keyed by company, so each
-customer's mailbox is its own row; nothing about a connection comes from env.
-
-`POST /api/v1/accounts/connect` builds the hosted-auth URL (management only)
-and takes an optional `email_address`. That address is sent as `login_hint`
-*and* signed into `state`, and the callback refuses a grant for any other
-mailbox — handing the unwanted grant back to Nylas rather than keeping live
-access to an inbox it just rejected. Without it, whichever mailbox is
-authorised is accepted, which is what accounts connected before this existed
-still do (their `expected_email_address` is null).
-
-The authorization code is single-use: a failed exchange redirects with
-`reason=exchange_failed` and the flow has to be restarted from `connect`.
-Retrying the same code cannot succeed, so nothing here retries it.
-
-Broker mail arrives here **directly from Nylas**. This service owns the Nylas
-application (client id `4ee94420-d0d6-46f3-b789-999263f0e18d`, US region); no
-peer server relays deliveries, so the only thing standing between the public
-internet and the pipeline is the HMAC signature on each request.
-
-Two URLs have to be registered on the Nylas application, and they are not
-interchangeable:
-
-| Purpose | URL | Env |
-|---|---|---|
-| OAuth redirect after hosted auth | `https://spaceline.boxtruckmanage.com/email-agent/api/v1/accounts/callback` | `NYLAS_CALLBACK_URI` |
-| Webhook delivery | `https://spaceline.boxtruckmanage.com/email-agent/internal/v1/webhooks/nylas` | — |
-
-The OAuth redirect cannot double as the webhook URL: it answers with a 302 to
-the frontend settings page, and Nylas only registers a webhook whose endpoint
-echoes the `challenge` query parameter back as plain text (`70005
-unable.verify.webhook_url` otherwise).
-
-Registering both, on a fresh application:
-
-```bash
-export NYLAS_API_KEY=...   # the value from your .env
-
-curl -X POST https://api.us.nylas.com/v3/applications/callback-uris \
-  -H "Authorization: Bearer $NYLAS_API_KEY" -H "Content-Type: application/json" \
-  -d '{"url":"https://spaceline.boxtruckmanage.com/email-agent/api/v1/accounts/callback","platform":"web"}'
-
-curl -X POST https://api.us.nylas.com/v3/webhooks \
-  -H "Authorization: Bearer $NYLAS_API_KEY" -H "Content-Type: application/json" \
-  -d '{"trigger_types":["grant.expired","grant.deleted"],
-       "webhook_url":"https://spaceline.boxtruckmanage.com/email-agent/internal/v1/webhooks/nylas",
-       "description":"email-agent inbound broker mail"}'
-```
-
-The webhook response carries `webhook_secret` **once**. Put it in
-`NYLAS_WEBHOOK_SECRET` before the service handles traffic; until it matches,
-every delivery is rejected with a 401.
-
-The webhook carries grant events only. `message.created` used to be on it,
-and it made Nylas read every new message in every connected mailbox. Gmail
-charges those reads to each mailbox's own API quota (6,000 units a minute per
-user on this project), and a dispatcher mailbox on the Sylectus alert list
-spends that on alerts, so bids sent from it were refused with 429. Broker
-replies now reach the service through the shared mailbox instead: see
-*Shared mailbox over IMAP* below. `python -m scripts.nylas_webhook_triggers
---webhook-url ...` takes `message.created` off an existing webhook without
-replacing it.
+Mail moves over IMAP and SMTP with app passwords; no provider API and no
+third-party mail service is involved. Nylas, which carried the first version,
+was retired on 2026-11-05: its grants and webhook were deleted and the client
+code removed. The `nylas_*` columns on `email_accounts`, `email_messages` and
+`negotiations` are legacy names kept to avoid a migration; `nylas_grant_id`
+holds `imap:<uuid>` on every live mailbox row.
 
 ### Shared mailbox over IMAP
 
-Every email a dispatcher's own mailbox sends names the company's shared
-mailbox as Reply-To (next to the dispatcher) and Cc, so the broker's answer
-reaches both. The service polls the shared mailbox with an app password:
+The company's shared mailbox is read as the catch-all for negotiations that
+predate per-dispatcher mailboxes and for anything copied to it. The service
+polls it with an app password:
 
 | Env | Meaning |
 |---|---|
@@ -148,7 +91,8 @@ reaches both. The service polls the shared mailbox with an app password:
 | `SHARED_INBOX_FOLDER` | default `INBOX` |
 | `SHARED_INBOX_POLL_SECONDS` | default 15 |
 
-Both of the first two empty leaves the reader off for the shared mailbox. It keeps its place in
+Both of the first two empty leaves that reader off; the dispatchers' own
+mailboxes are read regardless. It keeps its place in
 `shared_inbox_cursors` and starts at the folder's end the first time it sees
 it. Messages from any of the company's own mailboxes (the Cc copy of a bid)
 and Sylectus alerts are skipped. A reply matches its negotiation by the
@@ -158,15 +102,14 @@ row now records, before the subject-and-broker fallback.
 ### Dispatcher mailboxes with an app password
 
 `Admin > Mailboxes` (frontend) lets an admin connect a dispatcher's mailbox
-without Nylas: email address, the provider's app password, and the IMAP and
+with an app password: email address, the app password, and the IMAP and
 SMTP hosts, which the page prefills per provider. The service signs in both
 ways before storing anything (`POST /api/v1/mailboxes/test`,
 `PUT /api/v1/mailboxes/users/{id}`). Such a mailbox (`email_accounts.transport
 = 'imap'`) sends over SMTP from its own address, as a reply to the Sylectus
 alert by Message-ID, and is read over IMAP by the same reader as the shared
 mailbox, matching only its own negotiations. No Google API is involved, so
-the per-user quota cannot refuse a bid. Nylas mailboxes keep working
-unchanged; connecting a user here replaces and revokes their Nylas grant.
+the per-user quota cannot refuse a bid.
 
 | Env | Meaning |
 |---|---|
@@ -215,7 +158,7 @@ createdb email_agent_test
 .venv/bin/python -m pytest -q
 ```
 
-The suite runs against a real Postgres and stubs every outbound call (Nylas,
+The suite runs against a real Postgres and stubs every outbound call (SMTP,
 OpenAI, the TMS, Telegram). `tests/test_ratecon_verification.py` is the one that
 matters most — it pins the rule that a mismatched rate confirmation never
 becomes a load.
@@ -231,15 +174,13 @@ services/
   negotiations.py        starting a bid (the only auto-sent email)
   inbound.py             broker message → classify → suggest or verify
   shared_inbox.py        the shared mailbox and every app-password mailbox over IMAP, feeding inbound.py
-  mailboxes.py           Reply-To and Cc that route answers to the shared mailbox
-  outbound.py            one send door: Nylas for Nylas mailboxes, SMTP for app-password ones
+  outbound.py            the one send door, SMTP from the mailbox's own address
   imap_smtp.py           plain IMAP/SMTP sign-in check, message build and send
   secrets.py             app passwords encrypted at rest (MAILBOX_SECRET_KEY)
   booking.py             verified ratecon → TMS load → driver notice
   suggestions.py         ignore / send / edit & send
   ai.py                  every model call, all schema-constrained JSON
   bid_email.py           the fixed bid template
-  nylas_client.py        Nylas v3 REST
   boxtruck.py atrek.py telegram.py    peer services
   events.py              SSE hub
 routers/                 HTTP surface
@@ -250,14 +191,13 @@ scripts/                 one-off maintenance run by hand
 
 - **Single instance.** The SSE hub is in-process; running replicas needs Redis
   pub/sub behind `services/events.py` (the publish/subscribe surface stays the same).
-- **Webhooks are idempotent** via the `processed_webhooks` table, and booking is
-  guarded by `negotiations.tms_load_id` plus a `load_number` check in the TMS.
+- **Reads are idempotent** via the `processed_webhooks` table (one row per
+  message the IMAP reader handled), and booking is guarded by
+  `negotiations.tms_load_id` plus a `load_number` check in the TMS.
 - **One email is stored once, however many copies of it the mailbox holds.**
-  A reply written in Gmail or Outlook rather than in this app arrives as
-  `message.created` twice whenever the mail client saves its own copy to Sent
-  and the provider saves another: two Nylas ids, one email, and the thread
-  showed it twice. Messages are fetched with `fields=include_basic_headers`
-  and matched on the RFC `Message-Id`, which identifies the email rather than
+  The same email can reach the service more than once (a copy in the
+  dispatcher's inbox and one in the shared catch-all, for instance). Messages
+  are matched on the RFC `Message-Id`, which identifies the email rather than
   one mailbox copy of it (`inbound.duplicate_of`). Where a provider returns no
   headers, an outbound message repeating the text of one sent to the same
   negotiation in the last `DUPLICATE_WINDOW_MINUTES` is taken for the same

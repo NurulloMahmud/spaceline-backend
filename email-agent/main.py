@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from database.connection import init_db  # noqa: E402
-from routers import accounts, conversations, events, mailboxes, negotiations, suggestions, webhooks  # noqa: E402
+from routers import accounts, conversations, events, mailboxes, negotiations, suggestions  # noqa: E402
 from services import maintenance, shared_inbox  # noqa: E402
 
 
@@ -65,7 +65,6 @@ app.include_router(conversations.router)
 app.include_router(accounts.router)
 app.include_router(mailboxes.router)
 app.include_router(events.router)
-app.include_router(webhooks.router)
 
 
 @app.get("/api/v1/health", tags=["health"])

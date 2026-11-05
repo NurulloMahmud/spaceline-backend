@@ -12,9 +12,7 @@ from cryptography.fernet import Fernet
 from config.settings import config
 from database import models
 from services import imap_smtp, outbound, secrets, shared_inbox
-from services.mailboxes import catcher_headers
-from services.negotiations import find_posting_email
-from services.nylas_client import nylas
+from services import outbound
 from tests.test_auth import make_token
 from tests.test_negotiation_service import POSTING, stubs  # noqa: F401
 from tests.test_personal_mailbox import _bid, own_account  # noqa: F401
@@ -196,25 +194,6 @@ def test_a_mailbox_that_does_not_sign_in_is_not_stored(client, session, account,
     assert session.query(models.EmailAccount).filter_by(user_id=4).count() == 0
 
 
-def test_connecting_a_nylas_user_replaces_and_revokes_their_grant(
-    client, session, account, own_account, admin_on, signs_in, monkeypatch
-):
-    revoked = []
-
-    async def revoke(grant_id):
-        revoked.append(grant_id)
-
-    monkeypatch.setattr(nylas, "revoke_grant", revoke)
-
-    resp = client.put("/api/v1/mailboxes/users/7", headers=_h(), json=dict(CREDS, email_address="jane@gmail.com"))
-    assert resp.status_code == 200, resp.text
-    assert revoked == ["grant-own-7"]
-    session.refresh(own_account)
-    assert own_account.uses_imap
-    assert own_account.nylas_grant_id.startswith("imap:")
-    assert own_account.status == "active"
-
-
 def test_editing_without_a_password_keeps_the_stored_one(client, session, account, admin_on, signs_in):
     client.put("/api/v1/mailboxes/users/4", headers=_h(), json=CREDS)
     resp = client.put(
@@ -247,7 +226,7 @@ def test_the_list_shows_every_mailbox_and_hides_passwords(client, session, accou
     body = resp.json()
     by_user = {a["user_id"]: a for a in body["accounts"]}
     assert by_user[4]["transport"] == "imap"
-    assert by_user[7]["transport"] == "nylas"
+    assert by_user[7]["transport"] == "imap"
     assert body["shared"]["account"]["email_address"] == account.email_address
     assert body["secret_key_set"] is True
     assert CREDS["password"] not in resp.text
@@ -328,12 +307,6 @@ async def test_a_bid_from_an_app_password_mailbox_goes_out_over_smtp_as_a_reply(
 ):
     load_snapshot.update(POSTING)
 
-    async def never(**kwargs):
-        raise AssertionError("Nylas must not be used for this mailbox")
-
-    monkeypatch.setattr(nylas, "send_message", never)
-    monkeypatch.setattr(nylas, "find_message_by_rfc_id", never)
-
     negotiation = await _bid(session, user_id=4)
 
     assert smtp_server["ports"] == [("smtp.gmail.com", 465)]
@@ -378,20 +351,6 @@ def test_a_redirected_test_server_drops_the_cc_and_rewrites_the_recipient():
     assert parsed["Reply-To"] == "a@x.com, shared@x.com"
     assert parsed["Cc"] == "shared@x.com"
     assert parsed["Message-ID"].endswith("@x.com>")
-
-
-def test_an_app_password_mailbox_needs_no_detour_to_the_shared_one(session, account, imap_account):
-    assert catcher_headers(session, imap_account) == {}
-
-
-async def test_the_posting_lookup_is_skipped_for_an_app_password_mailbox(imap_account, monkeypatch):
-    async def never(*a, **k):
-        raise AssertionError("no Nylas lookup for an IMAP mailbox")
-
-    monkeypatch.setattr(nylas, "find_message_by_rfc_id", never)
-    nylas_id, subject = await find_posting_email(imap_account, dict(POSTING))
-    assert nylas_id is None
-    assert subject == POSTING["email_subject"]
 
 
 # --- reading -----------------------------------------------------------------
