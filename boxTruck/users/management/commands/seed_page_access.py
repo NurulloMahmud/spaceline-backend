@@ -35,6 +35,7 @@ PAYROLL_BILLING_EXCLUDED = {
 # department name (lowercase) -> set of page keys the department's users get full CRUD on
 DEPARTMENT_PAGE_KEYS = {
     'management': ALL_KEYS,
+    'developer': ALL_KEYS,
     'payroll': ALL_KEYS - PAYROLL_BILLING_EXCLUDED,
     'billing': ALL_KEYS - PAYROLL_BILLING_EXCLUDED,
     'dispatch manager': {

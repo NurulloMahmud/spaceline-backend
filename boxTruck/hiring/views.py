@@ -68,7 +68,7 @@ class DriverViewSet(viewsets.ModelViewSet):
         return Driver.objects.all()
 
     def perform_create(self, serializer):
-        if self.request.user.department.name.lower() in ['management', 'billing', 'payroll']:
+        if self.request.user.department.name.lower() in ['management', 'developer', 'billing', 'payroll']:
             serializer.save()
         else:
             serializer.save(referral_by=self.request.user)

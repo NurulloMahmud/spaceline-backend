@@ -1,7 +1,7 @@
 from rest_framework.permissions import BasePermission
 
 # departments allowed to change the company's payment method / see billing detail
-_BILLING_DEPARTMENTS = {"management", "billing"}
+_BILLING_DEPARTMENTS = {"management", "developer", "billing"}
 
 
 def _department_name(user):

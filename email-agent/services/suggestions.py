@@ -111,7 +111,7 @@ async def send(
         # reconnect instead.
         raise NegotiationError(
             f"{account.email_address} sent this bid and is no longer connected. "
-            "Reconnect it from your profile to reply.",
+            "Ask an administrator to reconnect it under Admin > Mailboxes to reply.",
             status_code=409,
             code="mailbox_not_connected",
         )

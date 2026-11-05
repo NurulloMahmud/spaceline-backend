@@ -63,16 +63,10 @@ def test_star_rolls_it_out_to_everyone(monkeypatch):
     assert config.personal_mailbox_allowed(12345)
 
 
-def test_a_user_outside_the_rollout_cannot_connect(client, nylas_configured, rolled_out):
-    resp = client.post("/api/v1/accounts/me/connect", headers=_headers(user_id=8))
-    assert resp.status_code == 403
-
-
-def test_a_rolled_out_user_gets_a_state_naming_them(client, nylas_configured, rolled_out):
+def test_connecting_ones_own_mailbox_through_google_is_retired(client, nylas_configured, rolled_out):
     resp = client.post("/api/v1/accounts/me/connect", headers=_headers())
-    assert resp.status_code == 200
-    query = parse_qs(urlparse(resp.json()["auth_url"]).query)
-    assert query["state"][0].startswith("u7-1.")
+    assert resp.status_code == 410
+    assert "Admin > Mailboxes" in resp.json()["detail"]
 
 
 def test_connecting_stores_a_mailbox_for_that_user(client, monkeypatch, session, account):
@@ -297,7 +291,7 @@ async def test_a_rolled_out_dispatcher_without_a_mailbox_cannot_bid(
 
     assert err.value.code == "mailbox_not_connected"
     assert err.value.status_code == 409
-    assert "profile" in err.value.message
+    assert "Admin > Mailboxes" in err.value.message
     assert session.query(models.Negotiation).count() == 0
 
 
@@ -328,7 +322,7 @@ async def test_a_rolled_out_dispatcher_who_disconnected_is_asked_to_connect_agai
     with pytest.raises(NegotiationError) as err:
         await _bid(session)
 
-    assert err.value.message.startswith("Connect your email")
+    assert "Admin > Mailboxes" in err.value.message
 
 
 def _pending_suggestion(session, negotiation):

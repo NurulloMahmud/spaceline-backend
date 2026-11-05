@@ -68,8 +68,9 @@ def _plain(e: Exception) -> str:
     return text.strip().strip("[]").strip()[:300] or type(e).__name__
 
 
-def check(creds: Credentials) -> CheckResult:
-    """Sign in both ways and count what is in the inbox. Never raises."""
+def check(creds: Credentials, smtp: bool = True) -> CheckResult:
+    """Sign in both ways (or IMAP alone, for a mailbox that is only read) and
+    count what is in the folder. Never raises."""
     result = CheckResult()
     try:
         conn = imaplib.IMAP4_SSL(creds.imap_host, creds.imap_port, timeout=TIMEOUT_SECONDS)
@@ -92,9 +93,12 @@ def check(creds: Credentials) -> CheckResult:
     except Exception as e:  # noqa: BLE001 - every failure is reported, not raised
         result.imap_error = _plain(e)
 
+    if not smtp:
+        result.smtp_ok = True
+        return result
     try:
-        with _smtp(creds) as smtp:
-            smtp.login(creds.address, creds.password)
+        with _smtp(creds) as conn:
+            conn.login(creds.address, creds.password)
         result.smtp_ok = True
     except Exception as e:  # noqa: BLE001
         result.smtp_error = _plain(e)

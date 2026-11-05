@@ -159,20 +159,20 @@ def get_my_account(
     }
 
 
+NYLAS_RETIRED = (
+    "Mailboxes are no longer connected through Google sign-in. An administrator "
+    "connects them with an app password under Admin > Mailboxes."
+)
+
+
 @router.post("/me/connect")
 def connect_my_account(principal: Principal = Depends(current_user)):
-    """The URL to authorise the caller's own mailbox, for bidding from it."""
-    if not config.personal_mailbox_allowed(principal.user_id):
-        raise HTTPException(403, "connecting your own mailbox is not enabled for you")
-    if not principal.company_id:
-        raise HTTPException(403, "token carries no company")
-    if not config.NYLAS_CLIENT_ID or not config.NYLAS_CALLBACK_URI:
-        raise HTTPException(500, "Nylas hosted auth is not configured")
-    return {
-        "auth_url": nylas.hosted_auth_url(
-            state=_sign_personal(principal.user_id, principal.company_id)
-        )
-    }
+    """
+    Retired. Mailboxes connected through Nylas keep working until an
+    administrator replaces them, but no new grant is issued: every mailbox is
+    now entered under Admin > Mailboxes with an app password.
+    """
+    raise HTTPException(410, NYLAS_RETIRED)
 
 
 @router.delete("/me")
@@ -288,8 +288,9 @@ def connect(
     """
     if not principal.is_management:
         raise HTTPException(403, "only management users can connect a mailbox")
+    raise HTTPException(410, NYLAS_RETIRED)
 
-    target = body.company_id if body.company_id else company_id
+    target = body.company_id if body.company_id else company_id  # noqa: F841 - kept with the callback below
 
     if not config.NYLAS_CLIENT_ID or not config.NYLAS_CALLBACK_URI:
         raise HTTPException(500, "Nylas hosted auth is not configured")

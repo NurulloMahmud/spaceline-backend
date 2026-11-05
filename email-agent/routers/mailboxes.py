@@ -9,8 +9,10 @@ address and their inbox is read over IMAP (services.shared_inbox). Nylas
 keeps working for every mailbox connected through it; connecting a user
 here replaces their Nylas grant, which is revoked.
 
-Open only to the BTM user ids in MAILBOX_ADMIN_USERS: every row here is a
-credential to someone else's mailbox.
+Open to Management and Developer accounts, plus any BTM user id listed in
+MAILBOX_ADMIN_USERS: every row here is a credential to someone else's
+mailbox. The posted-loads listener mailbox, which feeds the load board, is
+developers' alone.
 """
 import asyncio
 import logging
@@ -36,11 +38,39 @@ router = APIRouter(prefix="/api/v1/mailboxes", tags=["mailboxes"])
 
 
 def mailbox_admin(principal: Principal = Depends(current_user)) -> Principal:
-    if not config.mailbox_admin(principal.user_id):
-        raise HTTPException(403, "this page is not open to your account")
+    if not (principal.is_management or config.mailbox_admin(principal.user_id)):
+        raise HTTPException(403, "this page is open to management and developers only")
     if principal.company_id is None:
         raise HTTPException(403, "your account is not linked to a company")
     return principal
+
+
+def developer_only(principal: Principal = Depends(mailbox_admin)) -> Principal:
+    if not principal.is_developer:
+        raise HTTPException(403, "only a developer can change the posted-loads listener mailbox")
+    return principal
+
+
+def listener_view(row: Optional[models.ListenerMailbox]) -> Optional[dict]:
+    if row is None:
+        return None
+    return {
+        "email_address": row.email_address,
+        "imap_host": row.imap_host,
+        "imap_port": row.imap_port,
+        "folder": row.folder,
+        "updated_at": row.updated_at,
+        "updated_by_user_id": row.updated_by_user_id,
+    }
+
+
+def _listener_row(session: Session, company_id: int) -> Optional[models.ListenerMailbox]:
+    return (
+        session.query(models.ListenerMailbox)
+        .filter(models.ListenerMailbox.company_id == company_id)
+        .order_by(models.ListenerMailbox.updated_at.desc())
+        .first()
+    )
 
 
 def view(account: models.EmailAccount) -> dict:
@@ -61,13 +91,16 @@ def view(account: models.EmailAccount) -> dict:
 
 
 def _credentials(body: MailboxCredentialsIn, password: str) -> imap_smtp.Credentials:
+    if not body.imap_only and not (body.smtp_host or "").strip():
+        raise HTTPException(422, "an SMTP host is required for a mailbox that sends")
     return imap_smtp.Credentials(
         address=str(body.email_address).strip().lower(),
         password=password,
         imap_host=body.imap_host.strip(),
         imap_port=int(body.imap_port),
-        smtp_host=body.smtp_host.strip(),
+        smtp_host=(body.smtp_host or "").strip(),
         smtp_port=int(body.smtp_port),
+        folder=(body.folder or "INBOX").strip() or "INBOX",
     )
 
 
@@ -144,8 +177,67 @@ def list_mailboxes(
             "account": view(shared_row) if shared_row else None,
         },
         "accounts": [view(r) for r in rows if r.user_id is not None],
+        "listener": listener_view(_listener_row(session, principal.company_id)),
+        "can_manage_listener": principal.is_developer,
         "secret_key_set": bool(config.MAILBOX_SECRET_KEY),
     }
+
+
+@router.put("/listener")
+async def set_listener(
+    body: MailboxCredentialsIn,
+    principal: Principal = Depends(developer_only),
+    session: Session = Depends(session_dependency),
+):
+    """
+    The mailbox the Sylectus posted-loads listener reads: address, app
+    password and the folder the alerts are filed in. Proven over IMAP before
+    it is stored; the listener picks the change up within a minute without
+    a restart. Leaving the password out keeps the stored one.
+    """
+    if not config.MAILBOX_SECRET_KEY:
+        raise HTTPException(500, "MAILBOX_SECRET_KEY is not set on the server, so app passwords cannot be stored")
+    existing = _listener_row(session, principal.company_id)
+    password = (body.password or "").strip()
+    if not password:
+        if existing is None:
+            raise HTTPException(422, "an app password is required")
+        try:
+            password = secrets.decrypt(existing.secret)
+        except secrets.SecretError as e:
+            raise HTTPException(500, str(e))
+    body.imap_only = True
+    creds = _credentials(body, password)
+    result = await asyncio.to_thread(imap_smtp.check, creds, False)
+    if not result.ok:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": "The mailbox did not sign in; nothing was saved.",
+                "code": "check_failed",
+                "result": result.as_dict(),
+            },
+        )
+    try:
+        stored_secret = secrets.encrypt(password)
+    except secrets.SecretError as e:
+        raise HTTPException(500, str(e))
+    if existing is None:
+        existing = models.ListenerMailbox(company_id=principal.company_id, secret=stored_secret)
+        session.add(existing)
+    existing.email_address = creds.address
+    existing.imap_host = creds.imap_host
+    existing.imap_port = creds.imap_port
+    existing.folder = creds.folder
+    existing.secret = stored_secret
+    existing.updated_by_user_id = principal.user_id
+    existing.updated_at = datetime.now(timezone.utc)
+    session.flush()
+    logger.info(
+        f"developer {principal.user_id} pointed the posted-loads listener at "
+        f"{creds.address} ({creds.folder})"
+    )
+    return {"listener": listener_view(existing), "result": result.as_dict()}
 
 
 @router.post("/test")
@@ -156,7 +248,7 @@ async def test_credentials(
     """Sign in both ways with what was typed, without storing anything."""
     if not body.password:
         raise HTTPException(422, "an app password is required to test")
-    result = await asyncio.to_thread(imap_smtp.check, _credentials(body, body.password))
+    result = await asyncio.to_thread(imap_smtp.check, _credentials(body, body.password), not body.imap_only)
     return result.as_dict()
 
 

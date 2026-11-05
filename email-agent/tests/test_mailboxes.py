@@ -47,7 +47,7 @@ def signs_in(monkeypatch):
     """The provider accepts whatever is typed; what was tried is recorded."""
     tried = []
 
-    def check(creds):
+    def check(creds, smtp=True):
         tried.append(creds)
         return imap_smtp.CheckResult(imap_ok=True, inbox_messages=1204, smtp_ok=True, alerts_today=38)
 
@@ -57,7 +57,7 @@ def signs_in(monkeypatch):
 
 @pytest.fixture
 def refuses(monkeypatch):
-    def check(creds):
+    def check(creds, smtp=True):
         return imap_smtp.CheckResult(imap_ok=False, imap_error="[AUTHENTICATIONFAILED] Invalid credentials", smtp_ok=True)
 
     monkeypatch.setattr(imap_smtp, "check", check)
@@ -66,15 +66,104 @@ def refuses(monkeypatch):
 # --- who gets in -------------------------------------------------------------
 
 
-def test_the_page_is_closed_to_everyone_else(client, admin_on):
-    assert client.get("/api/v1/mailboxes", headers=_h(user_id=7, department="Management")).status_code == 403
-    assert client.put("/api/v1/mailboxes/users/4", headers=_h(user_id=7), json=CREDS).status_code == 403
+def test_the_page_is_open_to_management_developers_and_the_allowlist(client, admin_on):
+    assert client.get("/api/v1/mailboxes", headers=_h(user_id=7, department="Dispatch")).status_code == 403
+    assert client.put("/api/v1/mailboxes/users/4", headers=_h(user_id=7, department="Billing"), json=CREDS).status_code == 403
+    assert client.get("/api/v1/mailboxes", headers=_h(user_id=7, department="Management")).status_code == 200
+    assert client.get("/api/v1/mailboxes", headers=_h(user_id=8, department="Developer")).status_code == 200
     assert client.get("/api/v1/mailboxes", headers=_h()).status_code == 200
 
 
-def test_nobody_gets_in_when_no_admin_is_configured(client, monkeypatch):
+def test_the_allowlist_alone_still_opens_it(client, monkeypatch):
     monkeypatch.setattr(config, "MAILBOX_ADMIN_USERS", "")
     assert client.get("/api/v1/mailboxes", headers=_h()).status_code == 403
+    monkeypatch.setattr(config, "MAILBOX_ADMIN_USERS", str(ADMIN))
+    assert client.get("/api/v1/mailboxes", headers=_h()).status_code == 200
+
+
+# --- the posted-loads listener mailbox ------------------------------------------
+
+
+LISTENER = {
+    "email_address": "spaceline@boxtruckmanage.com",
+    "password": "wxyz wxyz wxyz wxyz",
+    "imap_host": "imap.gmail.com",
+    "imap_port": 993,
+    "folder": "Posted loads",
+    "imap_only": True,
+}
+
+
+def test_only_a_developer_sets_the_listener_mailbox(client, admin_on, signs_in):
+    assert client.put("/api/v1/mailboxes/listener", headers=_h(department="Management"), json=LISTENER).status_code == 403
+    resp = client.put("/api/v1/mailboxes/listener", headers=_h(department="Developer"), json=LISTENER)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["listener"]["folder"] == "Posted loads"
+    assert signs_in[0].folder == "Posted loads"
+    assert signs_in[0].smtp_host == ""
+
+
+def test_the_listener_mailbox_is_stored_encrypted_and_listed(client, session, account, admin_on, signs_in):
+    client.put("/api/v1/mailboxes/listener", headers=_h(department="Developer"), json=LISTENER)
+    row = session.query(models.ListenerMailbox).one()
+    assert row.secret != LISTENER["password"]
+    assert secrets.decrypt(row.secret) == LISTENER["password"]
+    assert row.updated_by_user_id == ADMIN
+
+    listed = client.get("/api/v1/mailboxes", headers=_h(department="Management")).json()
+    assert listed["listener"]["email_address"] == "spaceline@boxtruckmanage.com"
+    assert listed["can_manage_listener"] is False
+    assert client.get("/api/v1/mailboxes", headers=_h(department="Developer")).json()["can_manage_listener"] is True
+    assert LISTENER["password"] not in str(listed)
+
+
+def test_the_listener_mailbox_can_be_edited_without_retyping_the_password(client, session, admin_on, signs_in):
+    client.put("/api/v1/mailboxes/listener", headers=_h(department="Developer"), json=LISTENER)
+    resp = client.put(
+        "/api/v1/mailboxes/listener", headers=_h(department="Developer"),
+        json=dict(LISTENER, password=None, folder="Alerts"),
+    )
+    assert resp.status_code == 200, resp.text
+    assert signs_in[-1].password == LISTENER["password"]
+    assert session.query(models.ListenerMailbox).one().folder == "Alerts"
+
+
+def test_a_listener_mailbox_that_does_not_sign_in_is_not_stored(client, session, admin_on, refuses):
+    resp = client.put("/api/v1/mailboxes/listener", headers=_h(department="Developer"), json=LISTENER)
+    assert resp.status_code == 422
+    assert session.query(models.ListenerMailbox).count() == 0
+
+
+def test_an_imap_only_check_skips_smtp(monkeypatch):
+    calls = []
+
+    class FakeIMAP:
+        def __init__(self, host, port, timeout=None):
+            calls.append(("imap", host, port))
+
+        def login(self, user, password):
+            pass
+
+        def select(self, folder, readonly=True):
+            return "OK", [b"12"]
+
+        def uid(self, *args):
+            return "OK", [b"1 2 3"]
+
+        def logout(self):
+            pass
+
+    def no_smtp(creds):
+        raise AssertionError("SMTP must not be tried")
+
+    monkeypatch.setattr(imap_smtp.imaplib, "IMAP4_SSL", FakeIMAP)
+    monkeypatch.setattr(imap_smtp, "_smtp", no_smtp)
+    result = imap_smtp.check(
+        imap_smtp.Credentials(address="a@x.com", password="p", imap_host="imap.x.com", folder="Posted loads"),
+        smtp=False,
+    )
+    assert result.ok and result.inbox_messages == 12 and result.alerts_today == 3
+    assert calls == [("imap", "imap.x.com", 993)]
 
 
 # --- storing -----------------------------------------------------------------
@@ -168,7 +257,7 @@ def test_the_list_shows_every_mailbox_and_hides_passwords(client, session, accou
 def test_a_retest_records_the_outcome_on_the_row(client, session, account, admin_on, signs_in, monkeypatch):
     client.put("/api/v1/mailboxes/users/4", headers=_h(), json=CREDS)
 
-    def now_refused(creds):
+    def now_refused(creds, smtp=True):
         return imap_smtp.CheckResult(imap_ok=False, imap_error="password revoked", smtp_ok=True)
 
     monkeypatch.setattr(imap_smtp, "check", now_refused)

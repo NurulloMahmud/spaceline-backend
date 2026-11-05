@@ -159,12 +159,12 @@ def sending_mailbox(
         if own and own.status != "revoked":
             raise NegotiationError(
                 f"Your email {own.email_address} is no longer connected. "
-                "Reconnect it from your profile to bid.",
+                "Ask an administrator to reconnect it under Admin > Mailboxes to bid.",
                 status_code=409,
                 code="mailbox_not_connected",
             )
         raise NegotiationError(
-            "Connect your email from your profile before bidding.",
+            "Your email is not connected. Ask an administrator to connect it under Admin > Mailboxes before bidding.",
             status_code=409,
             code="mailbox_not_connected",
         )

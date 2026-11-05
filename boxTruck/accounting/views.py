@@ -23,7 +23,7 @@ from .services import (
 )
 
 ACCOUNTING = ('billing', 'payroll')
-MANAGEMENT = ('management',)
+MANAGEMENT = ('management', 'developer')
 
 
 def department(user):

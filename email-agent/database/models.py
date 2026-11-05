@@ -302,6 +302,28 @@ class ProcessedWebhook(Base):
     created_at = Column(DateTime(timezone=True), default=_now, nullable=False)
 
 
+class ListenerMailbox(Base):
+    """
+    The mailbox the Sylectus posted-loads listener reads. One row per company
+    (one company today). Set by a developer under Admin > Mailboxes; the
+    listener (a separate service sharing this database) reads the newest row
+    and signs in with the decrypted app password, falling back to its own
+    .env when there is none.
+    """
+    __tablename__ = "listener_mailbox"
+
+    id = _uuid_pk()
+    company_id = Column(Integer, nullable=False, index=True)
+    email_address = Column(String, nullable=False)
+    imap_host = Column(String, nullable=False, default="imap.gmail.com")
+    imap_port = Column(Integer, nullable=False, default=993)
+    folder = Column(String, nullable=False, default="INBOX")
+    secret = Column(Text, nullable=False)
+    updated_by_user_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_now, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
+
+
 class SharedInboxCursor(Base):
     """
     How far the IMAP reader has got in the shared mailbox: the last UID it

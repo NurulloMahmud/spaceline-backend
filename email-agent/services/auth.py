@@ -23,8 +23,13 @@ class Principal:
     company_name: Optional[str] = None
 
     @property
+    def is_developer(self) -> bool:
+        return (self.department or "").strip().lower() == "developer"
+
+    @property
     def is_management(self) -> bool:
-        return (self.department or "").lower() == "management"
+        """Management, and developers, who can do everything management can."""
+        return (self.department or "").strip().lower() in ("management", "developer")
 
 
 def _company_id_from(claims: dict) -> Optional[int]:

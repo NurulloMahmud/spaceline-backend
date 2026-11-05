@@ -6,11 +6,12 @@ from rest_framework import status, generics, views
 from rest_framework.generics import CreateAPIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.exceptions import PermissionDenied
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .permissions import IsAdminUser, IsDispatchManager, IsDispatch, IsInternalService, IsUpdater
+from .permissions import IsAdminUser, IsDispatchManager, IsDispatch, IsInternalService, IsUpdater, is_developer
 from .models import PasswordReset, Company, CustomUser, Department, Team, UserInvite, Page, UserPageAccess
 from .serializers import (
     InviteUserSerializer, PasswordResetRequestSerializer, PasswordResetSerializer, CompanySerializer, UserProfileSerializer, RegisterWithInviteSerializer, UserRegisterSerializer, CustomTokenObtainPairSerializer,
@@ -85,6 +86,13 @@ class UserRetrieveAPIView(generics.ListAPIView):
         return queryset
 
 
+def guard_developer_target(request, target):
+    """A developer's account (name, department, access, sign-in, password) is
+    changed by developers only."""
+    if is_developer(target) and not is_developer(request.user):
+        raise PermissionDenied("Only a developer can change a developer's account.")
+
+
 class UserUpdateView(generics.UpdateAPIView):
     serializer_class = UserUpdateSerializer
     queryset = CustomUser.objects.all()
@@ -95,6 +103,11 @@ class UserUpdateView(generics.UpdateAPIView):
         else:
             permission_classes = [IsDispatchManager | IsAdminUser | IsUpdater]
         return [permission() for permission in permission_classes]
+
+    def get_object(self):
+        target = super().get_object()
+        guard_developer_target(self.request, target)
+        return target
 
 
 class PasswordResetRequestView(APIView):
@@ -112,6 +125,7 @@ class PasswordResetRequestView(APIView):
             username = serializer.validated_data['username']
             try:
                 user = User.objects.get(username=username)
+                guard_developer_target(request, user)
                 reset_request = PasswordReset.objects.filter(username=user, clicked=False).first()
                 if reset_request:
                     encoded_username = urlsafe_base64_encode(username.encode())
@@ -200,6 +214,18 @@ class UserPageAccessViewSet(viewsets.ModelViewSet):
         if user_id:
             queryset = queryset.filter(user_id=user_id)
         return queryset
+
+    def perform_create(self, serializer):
+        guard_developer_target(self.request, serializer.validated_data.get('user'))
+        serializer.save()
+
+    def perform_update(self, serializer):
+        guard_developer_target(self.request, serializer.instance.user)
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        guard_developer_target(self.request, instance.user)
+        instance.delete()
 
 
 class MyPageAccessView(generics.ListAPIView):

@@ -118,3 +118,10 @@ def test_internal_secret_must_match():
     for bad in ("", "wrong"):
         with pytest.raises(HTTPException):
             auth.require_internal(bad)
+
+
+def test_a_developer_counts_as_management_and_more():
+    principal = auth.current_user(f"Bearer {make_token(department='Developer')}")
+    assert principal.is_management is True
+    assert principal.is_developer is True
+    assert auth.current_user(f"Bearer {make_token(department='Management')}").is_developer is False

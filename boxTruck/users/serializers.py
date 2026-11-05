@@ -1,5 +1,8 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
+
+from users.permissions import DEVELOPER, is_developer
 from django.utils import timezone
 from rest_framework.validators import UniqueValidator
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -176,9 +179,18 @@ class UserUpdateSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         user = request.user
         new_department = attrs.get('department')
+        # A developer's account is changed by developers only, and only a
+        # developer can make someone a developer.
+        target = getattr(self, 'instance', None)
+        if target is not None and is_developer(target) and not is_developer(user):
+            raise PermissionDenied("Only a developer can change a developer's account.")
+        if new_department and new_department.name.lower() == DEVELOPER and not is_developer(user):
+            raise serializers.ValidationError({
+                "department": "Only a developer can assign the Developer department."
+            })
         if user.department and user.department.name.lower() == "dispatch manager":
             if new_department:
-                restricted_departments = ["management", "billing", "payroll"]
+                restricted_departments = ["management", "developer", "billing", "payroll"]
                 if new_department.name.lower() in restricted_departments:
                     raise serializers.ValidationError({
                         "department": "Dispatch Manager cannot assign users to Management, Billing, or Payroll."
@@ -283,8 +295,10 @@ class InviteUserSerializer(serializers.ModelSerializer):
     def validate_department(self, value):
         request = self.context.get('request')
         user = request.user
+        if value.name.lower() == DEVELOPER and not is_developer(user):
+            raise serializers.ValidationError("Only a developer can invite a developer.")
         if user.department and user.department.name.lower() == "dispatch manager":
-            restricted_departments = ["management", "billing", "payroll"]
+            restricted_departments = ["management", "developer", "billing", "payroll"]
             if value.name.lower() in restricted_departments:
                 raise serializers.ValidationError(
                     "Dispatch Manager cannot invite users to Management, Billing, or Payroll."

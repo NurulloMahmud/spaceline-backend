@@ -157,7 +157,7 @@ class StatementViewSet(viewsets.ModelViewSet):
             if not start_date or not end_date:
                 return Statement.objects.none()
             queryset = Statement.objects.filter(start_date__gte=start_date, end_date__lte=end_date)
-            if user.department.name.lower() not in ['management', 'billing', 'payroll', 'accounting', 'audit']:
+            if user.department.name.lower() not in ['management', 'developer', 'billing', 'payroll', 'accounting', 'audit']:
                 queryset = queryset.exclude(status__name='In Process')
         return queryset.order_by('driver__full_name')
 

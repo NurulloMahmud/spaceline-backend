@@ -57,8 +57,10 @@ class MailboxCredentialsIn(BaseModel):
     )
     imap_host: str = Field(..., min_length=3, max_length=200)
     imap_port: int = Field(993, ge=1, le=65535)
-    smtp_host: str = Field(..., min_length=3, max_length=200)
+    smtp_host: Optional[str] = Field(None, max_length=200)
     smtp_port: int = Field(465, ge=1, le=65535)
+    folder: str = Field("INBOX", min_length=1, max_length=200)
+    imap_only: bool = Field(False, description="a mailbox that is only read: skip the SMTP sign-in")
 
 
 class MessageOut(BaseModel):
