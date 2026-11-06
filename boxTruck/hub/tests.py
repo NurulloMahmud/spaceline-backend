@@ -551,20 +551,28 @@ class BidStatusRelayTests(TestCase):
         )
 
     def test_without_a_driver_every_app_bid_is_told(self):
+        not_app = driver_hub.DriverHubError(404, "no such bid", "not_found")
         with patch("hub.bids.load_bids", return_value=self.BIDS), patch(
             "hub.services.driver_hub.update_bid_target"
-        ) as update:
+        ) as update, patch(
+            "hub.services.driver_hub.update_bid_by_tenant_bid", side_effect=not_app
+        ) as by_bid:
             reached = bids.relay_bid_status(self.LOAD, "lost")
         self.assertEqual(reached, [12, 13])
         self.assertEqual(update.call_count, 2)
+        # The Telegram bid is asked about by its id; the hub has no such app bid.
+        self.assertEqual(by_bid.call_args.args, ("b4", "lost"))
 
     def test_a_hub_failure_on_one_target_does_not_stop_the_rest(self):
         with patch("hub.bids.load_bids", return_value=self.BIDS), patch(
             "hub.services.driver_hub.update_bid_target",
             side_effect=[driver_hub.DriverHubError(500, "boom"), {"ok": True}],
+        ), patch(
+            "hub.services.driver_hub.update_bid_by_tenant_bid",
+            return_value={"id": 40},
         ):
             reached = bids.relay_bid_status(self.LOAD, "lost")
-        self.assertEqual(reached, [13])
+        self.assertEqual(reached, [13, 40])
 
     def test_bids_are_read_from_the_loads_service_with_the_internal_secret(self):
         body = {"success": True, "data": {"color": "red", "bids": self.BIDS}}
@@ -2018,6 +2026,85 @@ class AccountingPayoutSyncTests(TestCase):
             [{"kind": "expense", "label": "Fuel advance", "amount": -110.0}],
         )
 
+    def test_stops_saved_after_the_load_reach_the_hub(self) -> None:
+        """The Add load form's order: the load (and its payout) first, then each stop."""
+        dispatcher = CustomUser.objects.create_user(
+            username="dana",
+            password="x",
+            department=Department.objects.create(name="Dispatch"),
+        )
+        client = self.api(dispatcher)
+        load = self.run_hub(
+            lambda: Load.objects.create(
+                driver=self.driver, load_number="TEST-QA-1", driver_pay=Decimal("500")
+            )
+        )
+        stops_url = reverse("load-stops-list")
+        with patch("billing.views.debounce_recalculate_miles"):
+            first = self.run_hub(
+                lambda: client.post(
+                    stops_url,
+                    {
+                        "load": load.id,
+                        "order": 1,
+                        "city": "Chicago",
+                        "state": "IL",
+                        "load_pickup": True,
+                    },
+                    format="json",
+                )
+            )
+            second = self.run_hub(
+                lambda: client.post(
+                    stops_url,
+                    {
+                        "load": load.id,
+                        "order": 2,
+                        "city": "Indianapolis",
+                        "state": "IN",
+                        "load_drop": True,
+                    },
+                    format="json",
+                )
+            )
+        self.assertEqual(
+            (first.status_code, second.status_code),
+            (201, 201),
+            (first.content, second.content),
+        )
+        routes = [
+            (b["load"]["pick_up_at"], b["load"]["deliver_to"]) for b in self.posts()
+        ]
+        self.assertEqual(
+            routes, [("", ""), ("Chicago, IL", ""), ("Chicago, IL", "Indianapolis, IN")]
+        )
+
+        with patch("billing.tasks.calculate_loaded_miles_background"), patch(
+            "billing.tasks.calculate_empty_miles_multi_background"
+        ):
+            gone = self.run_hub(
+                lambda: client.delete(
+                    reverse("load-stops-detail", args=[second.json()["id"]])
+                )
+            )
+        self.assertEqual(gone.status_code, 204)
+        self.assertEqual(
+            (
+                self.posts()[-1]["load"]["pick_up_at"],
+                self.posts()[-1]["load"]["deliver_to"],
+            ),
+            ("Chicago, IL", ""),
+        )
+
+        # New dates on the load are pushed too.
+        load = Load.objects.get(pk=load.pk)
+        load.pickup_date = datetime(2026, 11, 7, 13, 0, tzinfo=dt_timezone.utc)
+        self.run_hub(load.save)
+        self.assertEqual(
+            self.posts()[-1]["load"]["pick_up_date"], "2026-11-07T13:00:00+00:00"
+        )
+        self.assertEqual(len(self.posts()), 5)
+
     def test_a_driver_pay_change_on_the_load_is_pushed(self) -> None:
         load = self.run_hub(lambda: self.make_load(self.driver))
         self.calls.clear()
@@ -2446,3 +2533,173 @@ class BackgroundRunnerTests(TestCase):
                 threading.Event().wait(0.02)
         self.assertNotEqual(seen, [threading.current_thread().name])
         close_all.assert_called_once()
+
+
+@override_settings(**HUB)
+class BidRelayByBidIdTests(TestCase):
+    """App bids carry the driver's own note, so the hub is told by the loads-service bid id."""
+
+    LOAD = "8d1e4f2a-0000-4000-8000-000000000002"
+    BIDS = [
+        {
+            "id": "6f1c2a90-aaaa-4bbb-8ccc-000000000001",
+            "action": "driver_bid",
+            "bid_amount": 1250.0,
+            "note": "TEST bid from QA, can load tomorrow 1 PM",
+            "driver": {"id": 214},
+        },
+        {
+            "id": "6f1c2a90-aaaa-4bbb-8ccc-000000000002",
+            "action": "driver_bid",
+            "bid_amount": 1100.0,
+            "note": "Driver app bid",
+            "driver": {"id": 188},
+        },
+        {
+            "id": "old-1",
+            "action": "driver_bid",
+            "bid_amount": 1000.0,
+            "note": "hub target #12",
+            "driver": {"id": 214},
+        },
+        {
+            "id": "b3",
+            "action": "dispatcher_bid",
+            "bid_amount": 1400.0,
+            "note": "Bid emailed to broker",
+            "driver": {"id": 214},
+        },
+    ]
+
+    def setUp(self) -> None:
+        Company.objects.create(name="Space Line LLC")
+        self.calls: list[tuple[str, str, dict | None]] = []
+
+    def hub(
+        self, method: str, url: str, json: dict | None = None, **kwargs: object
+    ) -> MagicMock:
+        self.calls.append((method, url.replace("https://hub.test", ""), json))
+        if url.endswith("/by-tenant-bid/status"):
+            return _response(200, {"id": 31, "status": json["status"]})
+        return _response(200, {"id": 12, "status": json["status"]})
+
+    def test_a_driver_bid_without_the_tag_is_relayed_by_its_id(self) -> None:
+        with patch("hub.bids.load_bids", return_value=self.BIDS[:1]), patch(
+            "hub.services.driver_hub.requests.request", side_effect=self.hub
+        ):
+            reached = bids.relay_bid_status(
+                self.LOAD,
+                "placed",
+                carrier_amount=1400,
+                driver_amount=1250,
+                placed_by="Dylan Brooks",
+                tenant_bid_id="b3",
+                note="Bid emailed",
+                driver_id=214,
+            )
+        self.assertEqual(reached, [31])
+        self.assertEqual(
+            self.calls,
+            [
+                (
+                    "POST",
+                    "/t/v1/bid-targets/by-tenant-bid/status",
+                    {
+                        "tenant_bid_id": "6f1c2a90-aaaa-4bbb-8ccc-000000000001",
+                        "status": "placed",
+                        "carrier_amount": 1400.0,
+                        "driver_amount": 1250.0,
+                        "placed_by": "Dylan Brooks",
+                        "note": "Bid emailed",
+                    },
+                )
+            ],
+        )
+
+    def test_an_old_tagged_bid_still_uses_its_target(self) -> None:
+        with patch("hub.bids.load_bids", return_value=self.BIDS), patch(
+            "hub.services.driver_hub.requests.request", side_effect=self.hub
+        ):
+            reached = bids.relay_bid_status(
+                self.LOAD, "won", tenant_bid_id="b3", driver_id=214
+            )
+        self.assertEqual(reached, [31, 12])
+        self.assertEqual(
+            [(m, p) for m, p, _ in self.calls],
+            [
+                ("POST", "/t/v1/bid-targets/by-tenant-bid/status"),
+                ("POST", "/t/v1/bid-targets/12/status"),
+            ],
+        )
+        self.assertEqual(self.calls[1][2], {"status": "won", "tenant_bid_id": "b3"})
+
+    def test_the_driver_filter_picks_that_drivers_bids(self) -> None:
+        with patch("hub.bids.load_bids", return_value=self.BIDS), patch(
+            "hub.services.driver_hub.requests.request", side_effect=self.hub
+        ):
+            bids.relay_bid_status(self.LOAD, "lost", driver_id=188)
+        self.assertEqual(
+            [body["tenant_bid_id"] for _, _, body in self.calls],
+            ["6f1c2a90-aaaa-4bbb-8ccc-000000000002"],
+        )
+        with patch("hub.bids.load_bids", return_value=self.BIDS):
+            found = bids.driver_bid_targets(self.LOAD, 214)
+        self.assertEqual(
+            [(b.target_id, b.tenant_bid_id, b.driver_id) for b in found],
+            [(None, "6f1c2a90-aaaa-4bbb-8ccc-000000000001", 214), (12, None, 214)],
+        )
+
+    def test_a_404_is_quiet_and_the_rest_carry_on(self) -> None:
+        replies = [
+            _response(404, {"error": "no such driver-app bid", "code": "not_found"}),
+            _response(200, {"id": 32, "status": "lost"}),
+            _response(200, {"id": 12, "status": "lost"}),
+        ]
+        with patch("hub.bids.load_bids", return_value=self.BIDS), patch(
+            "hub.services.driver_hub.requests.request", side_effect=replies
+        ), self.assertLogs("hub", "INFO") as logs:
+            reached = bids.relay_bid_status(self.LOAD, "lost")
+        self.assertEqual(reached, [32, 12])
+        self.assertEqual({r.levelname for r in logs.records}, {"INFO"})
+        self.assertIn(
+            "no driver-app bid 6f1c2a90-aaaa-4bbb-8ccc-000000000001",
+            "\n".join(logs.output),
+        )
+
+    def test_the_endpoint_takes_driver_bid_ids(self) -> None:
+        user = CustomUser.objects.create_user(
+            username="maria", password="x", first_name="Maria", last_name="Lopez"
+        )
+        client = APIClient()
+        client.force_authenticate(user)
+        with patch("hub.bids.load_bids") as load_bids, patch(
+            "hub.services.driver_hub.requests.request", side_effect=self.hub
+        ):
+            response = client.post(
+                reverse("hub-bid-status"),
+                {
+                    "load_id": self.LOAD,
+                    "status": "declined",
+                    "driver_bid_ids": ["6f1c2a90-aaaa-4bbb-8ccc-000000000002"],
+                    "note": "Declined by dispatch",
+                },
+                format="json",
+            )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json(), {"targets": [31]})
+        load_bids.assert_not_called()
+        self.assertEqual(
+            self.calls[0][2],
+            {
+                "tenant_bid_id": "6f1c2a90-aaaa-4bbb-8ccc-000000000002",
+                "status": "declined",
+                "placed_by": "Maria Lopez",
+                "note": "Declined by dispatch",
+            },
+        )
+        response = client.post(
+            reverse("hub-bid-status"),
+            {"load_id": self.LOAD, "status": "lost", "driver_bid_ids": "x"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)

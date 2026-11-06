@@ -5,7 +5,7 @@ from django.db.models.signals import post_delete, post_save, pre_delete, pre_sav
 from django.dispatch import receiver
 
 from accounting.models import Payout, PayoutExpense
-from billing.models import BrokerBlacklist, Load
+from billing.models import BrokerBlacklist, Load, LoadStop
 from hiring.models import Driver
 from users.models import Company
 
@@ -16,6 +16,7 @@ from .tenant import push_tenant_name
 
 # The load fields a driver-app payout shows or follows (the payout's gross and
 # fee are set with QuerySet.update when the driver pay or pay type changes).
+# The route comes from the stops, which have their own receiver below.
 LOAD_FIELDS = (
     "driver_id",
     "driver_pay",
@@ -89,6 +90,22 @@ def load_changed_for_hub(
         ).exists():
             payouts.schedule_delete(payout_id)
     payouts.schedule_push(payout_id)
+
+
+@receiver(post_save, sender=LoadStop)
+@receiver(post_delete, sender=LoadStop)
+def load_stop_changed(
+    sender: type[LoadStop], instance: LoadStop, **kwargs: Any
+) -> None:
+    # The payout shows the route, and the Add load form saves the stops after
+    # the load (and its payout), often in later requests.
+    if not driver_hub.configured() or not instance.load_id:
+        return
+    payouts.schedule_push(
+        Payout.objects.filter(load_id=instance.load_id)
+        .values_list("id", flat=True)
+        .first()
+    )
 
 
 @receiver(pre_save, sender=Company)

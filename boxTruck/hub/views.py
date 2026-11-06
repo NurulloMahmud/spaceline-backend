@@ -97,8 +97,10 @@ class HubBidStatusView(views.APIView):
     POST /api/hub/bid-status/: what a dispatcher did on a load that has a driver-app bid.
 
     Called by the email agent when a bid is placed, booked or closed, and by the
-    web app when a dispatcher declines an app bid. The hub target ids come out
-    of the driver bids' notes unless the caller already has them.
+    web app when a dispatcher declines an app bid. The driver-app bids are read
+    from the load (filtered by `driver_id` if given) unless the caller names
+    them: `driver_bid_ids` (their loads-service ids) or, for old bids,
+    `hub_target_ids`.
     """
 
     permission_classes = [IsAuthenticated | IsInternalService]
@@ -142,6 +144,13 @@ class HubBidStatusView(views.APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        driver_bid_ids = data.get("driver_bid_ids") or []
+        if not isinstance(driver_bid_ids, list):
+            return Response(
+                {"error": "driver_bid_ids must be a list"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         reached = relay_bid_status(
             load_id,
             bid_status,
@@ -152,5 +161,6 @@ class HubBidStatusView(views.APIView):
             note=data.get("note"),
             driver_id=data.get("driver_id"),
             target_ids=target_ids,
+            driver_bid_ids=[str(b) for b in driver_bid_ids],
         )
         return Response({"targets": reached})

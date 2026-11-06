@@ -50,7 +50,10 @@ def _place(stop: LoadStop | None) -> str:
 def load_summary(load: Load) -> dict[str, Any]:
     stops = list(load.loadstop_set.order_by("order", "id"))
     pickup = next((s for s in stops if s.load_pickup), stops[0] if stops else None)
-    drop = next((s for s in stops if s.load_drop), stops[-1] if stops else None)
+    # Without a drop stop, the last stop, unless that is the pick-up itself
+    # (a load whose second stop is not saved yet).
+    last = stops[-1] if stops and stops[-1] is not pickup else None
+    drop = next((s for s in stops if s.load_drop), last)
     reference = load.load_number or (f"SH - {load.shipment}" if load.shipment else "")
     return {
         "reference": reference,

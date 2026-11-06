@@ -68,8 +68,14 @@ def _request(method, path, json=None, timeout: float = TIMEOUT):
             code = str(reply.get("code") or "")
         except (ValueError, AttributeError):
             detail = resp.text
-        logger.warning(
-            "driver hub %s %s -> %s: %s", method, path, resp.status_code, detail
+        # A 404 is an answer (no such bid or payout there), not a fault.
+        logger.log(
+            logging.INFO if resp.status_code == 404 else logging.WARNING,
+            "driver hub %s %s -> %s: %s",
+            method,
+            path,
+            resp.status_code,
+            detail,
         )
         raise DriverHubError(resp.status_code, detail, code)
 
@@ -134,6 +140,27 @@ def link_driver(hub_driver_id, tenant_driver_id):
     )
 
 
+def _bid_status_body(
+    status: str,
+    carrier_amount: Any = None,
+    driver_amount: Any = None,
+    placed_by: Any = None,
+    note: Any = None,
+) -> dict[str, Any]:
+    if status not in BID_STATUSES:
+        raise ValueError(f"unknown bid target status {status!r}")
+    body: dict[str, Any] = {"status": status}
+    if carrier_amount is not None:
+        body["carrier_amount"] = float(carrier_amount)
+    if driver_amount is not None:
+        body["driver_amount"] = float(driver_amount)
+    if placed_by:
+        body["placed_by"] = str(placed_by)
+    if note:
+        body["note"] = str(note)
+    return body
+
+
 def update_bid_target(
     target_id,
     status,
@@ -144,20 +171,32 @@ def update_bid_target(
     note=None,
 ):
     """POST /t/v1/bid-targets/{id}/status. The hub notifies the driver on each change."""
-    if status not in BID_STATUSES:
-        raise ValueError(f"unknown bid target status {status!r}")
-    body = {"status": status}
-    if carrier_amount is not None:
-        body["carrier_amount"] = float(carrier_amount)
-    if driver_amount is not None:
-        body["driver_amount"] = float(driver_amount)
-    if placed_by:
-        body["placed_by"] = str(placed_by)
+    body = _bid_status_body(status, carrier_amount, driver_amount, placed_by, note)
     if tenant_bid_id:
         body["tenant_bid_id"] = str(tenant_bid_id)
-    if note:
-        body["note"] = str(note)
     return _request("POST", f"/t/v1/bid-targets/{int(target_id)}/status", json=body)
+
+
+def update_bid_by_tenant_bid(
+    tenant_bid_id: str,
+    status: str,
+    carrier_amount: Any = None,
+    driver_amount: Any = None,
+    placed_by: Any = None,
+    note: Any = None,
+) -> dict[str, Any] | None:
+    """POST /t/v1/bid-targets/by-tenant-bid/status for a driver-app bid.
+
+    `tenant_bid_id` is the bid's id in the loads service (the hub kept it when
+    it placed the bid there). Same effect as update_bid_target; a 404 (code
+    not_found) means the hub has no driver-app bid with that id, for example a
+    driver bid that came from Telegram.
+    """
+    body = {
+        "tenant_bid_id": str(tenant_bid_id),
+        **_bid_status_body(status, carrier_amount, driver_amount, placed_by, note),
+    }
+    return _request("POST", "/t/v1/bid-targets/by-tenant-bid/status", json=body)
 
 
 def upsert_payout(body: dict[str, Any]) -> dict[str, Any] | None:
