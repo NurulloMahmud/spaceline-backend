@@ -117,6 +117,7 @@ async def test_a_refused_password_fails_at_once_and_marks_the_mailbox(session, i
 class FakeBox:
     opened = []
     closed = []
+    refreshed = []
     fail_next = None  # an exception the next command raises
 
     def __init__(self, host, user, password, folder, port=993):
@@ -141,8 +142,11 @@ class FakeBox:
         self.counted += 1
         return 100
 
-    def uids_after(self, last):
+    def refresh(self):
         self._maybe_fail()
+        FakeBox.refreshed.append(self.user)
+
+    def uids_after(self, last):
         return [last + 1]
 
     def fetch(self, uid):
@@ -153,6 +157,7 @@ class FakeBox:
 def boxes(monkeypatch):
     FakeBox.opened.clear()
     FakeBox.closed.clear()
+    FakeBox.refreshed.clear()
     FakeBox.fail_next = None
     shared_inbox._connections.clear()
     monkeypatch.setattr(shared_inbox, "Mailbox", FakeBox)
@@ -171,6 +176,17 @@ def test_the_connection_is_opened_once_and_the_folder_counted_only_at_the_start(
     assert shared_inbox._read_batch((7, 101), src) == (7, 101, [(102, b"raw", None)])
     assert boxes.opened == ["royj@spaceline23llc.com"]
     assert shared_inbox._connections[src.key].counted == 1
+
+
+def test_every_pass_on_a_kept_connection_asks_for_new_mail_first(boxes):
+    # Gmail shows a kept-open session no new mail until it is asked (NOOP);
+    # without it mail waited until Gmail dropped the connection.
+    src = source()
+    shared_inbox._read_batch(None, src)
+    assert boxes.refreshed == []          # the first pass only records the end
+    shared_inbox._read_batch((7, 100), src)
+    shared_inbox._read_batch((7, 101), src)
+    assert boxes.refreshed == ["royj@spaceline23llc.com"] * 2
 
 
 def test_a_dropped_connection_is_replaced_within_the_same_pass(boxes):

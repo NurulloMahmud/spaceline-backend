@@ -37,10 +37,13 @@ def raw_email(
     message_id="<reply-1@acme>",
     in_reply_to="<bid-1@mail.gmail.com>",
     pdf=None,
+    reply_to=None,
 ) -> bytes:
     msg = MimeMessage()
     msg["From"] = f"Acme Broker <{sender}>"
     msg["To"] = to
+    if reply_to:
+        msg["Reply-To"] = reply_to
     if cc:
         msg["Cc"] = cc
     msg["Subject"] = subject
@@ -246,6 +249,32 @@ async def test_our_own_copy_of_a_bid_and_sylectus_alerts_are_skipped(
 
     assert pipeline == []
     assert session.get(models.SharedInboxCursor, SHARED).last_uid == 10
+
+
+async def test_read_tracking_notices_are_skipped_though_they_name_the_broker(
+    session, account, own_account, reader_on, pipeline
+):
+    # Mailsuite reminders and open notices put the broker in Reply-To and
+    # answer the bid's thread, so they used to land as a broker reply.
+    await shared_inbox.handle(
+        11,
+        raw_email(sender="reminders@mailsuite.com", reply_to="broker@acme-logistics.com",
+                  text="Your email to broker@acme-logistics.com has not been opened yet."),
+        None, 1,
+    )
+    await shared_inbox.handle(
+        12,
+        raw_email(sender="notification@mailsuite.com", reply_to="broker@acme-logistics.com"),
+        None, 1,
+    )
+    await shared_inbox.handle(13, raw_email(sender="no-reply@mail.mailtrack.io"), None, 1)
+
+    assert pipeline == []
+    assert session.get(models.SharedInboxCursor, SHARED).last_uid == 13
+
+    # The broker's own answer still goes through.
+    await shared_inbox.handle(14, raw_email(), None, 1)
+    assert len(pipeline) == 1
 
 
 async def test_a_message_handled_once_is_not_handled_again(session, account, reader_on, pipeline):

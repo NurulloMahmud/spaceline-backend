@@ -49,6 +49,12 @@ logger = logging.getLogger(__name__)
 
 ALERT_SENDER_DOMAIN = "sylectus.com"
 
+# Read-tracking add-ons some dispatchers run in Gmail (Mailsuite, formerly
+# Mailtrack). They mail the dispatcher "not opened yet" reminders and "opened"
+# notices on each bid, with the broker as Reply-To, so to the matcher they look
+# like the broker answering.
+TRACKER_DOMAINS = ("mailsuite.com", "mailtrack.io")
+
 # Messages taken from the folder in one pass; the rest wait for the next.
 BATCH_LIMIT = 50
 # Passes a message that keeps failing is given before it is skipped.
@@ -167,6 +173,16 @@ class Mailbox:
         typ, data = self.conn.uid("search", None, "ALL")
         uids = data[0].split() if typ == "OK" and data and data[0] else []
         return int(uids[-1]) if uids else 0
+
+    def refresh(self) -> None:
+        """Bring the session's view of the folder up to date. Gmail does not
+        show a kept-open session new mail on its own: without this, UID SEARCH
+        kept answering from the moment of SELECT, and new mail was only seen
+        when Gmail dropped the connection minutes later and the reader signed
+        in afresh. NOOP is the IMAP way to ask for pending updates."""
+        typ, _ = self.conn.noop()
+        if typ != "OK":
+            raise imaplib.IMAP4.error(f"NOOP on {self.folder!r} failed: {typ}")
 
     def uids_after(self, last: int) -> list[int]:
         """UIDs above `last`, oldest first. The server answers a range past
@@ -305,11 +321,27 @@ def own_addresses(session, company_id: int) -> set[str]:
     return {a for a in out if a}
 
 
+def _in_domain(address: str, domain: str) -> bool:
+    """The address is at `domain` or any host under it."""
+    host = (address or "").strip().lower().rsplit("@", 1)[-1]
+    return host == domain or host.endswith("." + domain)
+
+
 def from_alert_domain(address: str) -> bool:
     """Sent by Sylectus, from its domain or any host under it (alerts come
     from out01.sylectus.com and the like)."""
-    domain = (address or "").strip().lower().rsplit("@", 1)[-1]
-    return domain == ALERT_SENDER_DOMAIN or domain.endswith("." + ALERT_SENDER_DOMAIN)
+    return _in_domain(address, ALERT_SENDER_DOMAIN)
+
+
+def is_tracker_notice(message: dict) -> bool:
+    """A read-tracking add-on writing to the dispatcher, not the broker.
+    Only the From counts: these notices put the broker in Reply-To, which is
+    what made them match the bid."""
+    return any(
+        _in_domain(entry.get("email") or "", domain)
+        for entry in message.get("from") or []
+        for domain in TRACKER_DOMAINS
+    )
 
 
 def is_alert(message: dict) -> bool:
@@ -348,6 +380,7 @@ def _read(box: Mailbox, known: Optional[tuple[int, int]]) -> tuple[int, int, lis
         # starts at its end. Counting the folder is the one slow command, so
         # it runs only here.
         return box.uidvalidity, box.last_uid(), []
+    box.refresh()
     fetched = []
     for uid in box.uids_after(known[1])[:BATCH_LIMIT]:
         raw, thread_id = box.fetch(uid)
@@ -439,6 +472,11 @@ async def handle(
         senders = {e["email"] for e in message["from"]}
         if is_alert(message):
             logger.debug(f"{source.address} UID {uid}: Sylectus alert, skipped")
+        elif is_tracker_notice(message):
+            logger.info(
+                f"{source.address} UID {uid}: read-tracking notice from "
+                f"{sorted(senders)}, skipped"
+            )
         elif senders & own_addresses(session, account.company_id):
             logger.info(
                 f"{source.address} UID {uid}: our own copy of a send from "
