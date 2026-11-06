@@ -138,9 +138,12 @@ if selected box; then
     cd "$REPO_DIR/boxTruck"
     run ./venv/bin/pip install -q -r requirements.txt
     run ./venv/bin/python manage.py migrate --noinput
-    # The driver hub keeps a copy of the broker blacklist; resend it on every
-    # deploy so a change made while the hub was unreachable is not lost.
+    # The driver hub keeps a copy of the broker blacklist, the carrier name
+    # and the drivers' payouts; resend them on every deploy so a change made
+    # while the hub was unreachable is not lost.
     run ./venv/bin/python manage.py sync_hub_blacklist || true
+    run ./venv/bin/python manage.py sync_hub_tenant || true
+    run ./venv/bin/python manage.py sync_hub_payouts || true
 
     # Static files live on S3, so collectstatic is a slow upload rather than a
     # local copy. It is opt-in: most deploys do not change a static asset.

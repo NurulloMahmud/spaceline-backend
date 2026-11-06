@@ -4,46 +4,63 @@ from rest_framework import serializers
 
 from .pdf_generation import fill_w9, generate_contract
 from users.models import Company, CustomUser
-from .models import (Driver, DriverHistory, DriverStatus, Vehicle, VehicleEquipment,
-                     DriverCompany, DriverFile, CompanyFile, VehicleFile,
-                     CompanyHistory, VehicleHistory, Deposit, DepositHistory
-                     )
+from .models import (
+    Driver,
+    DriverHistory,
+    DriverStatus,
+    Vehicle,
+    VehicleEquipment,
+    DriverCompany,
+    DriverFile,
+    CompanyFile,
+    VehicleFile,
+    CompanyHistory,
+    VehicleHistory,
+    Deposit,
+    DepositHistory,
+)
 
 
 class DriverStatusSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DriverStatus
-        fields = '__all__'
+        fields = "__all__"
 
 
 class CompanyFileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CompanyFile
-        fields = '__all__'
+        fields = "__all__"
 
 
 class DriverFileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DriverFile
-        fields = '__all__'
+        fields = "__all__"
 
 
 class VehicleFileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = VehicleFile
-        fields = '__all__'
+        fields = "__all__"
 
 
 class DriverWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Driver
-        fields = '__all__'
-        read_only_fields = ['current_location_updated_at', 'hub_driver_id', 'hub_invite_id', 'hub_invite_status', 'hub_invited_at']
+        fields = "__all__"
+        read_only_fields = [
+            "current_location_updated_at",
+            "hub_driver_id",
+            "hub_invite_id",
+            "hub_invite_status",
+            "hub_invited_at",
+        ]
 
     def validate_phone_number(self, value):
         if not value:
@@ -52,7 +69,9 @@ class DriverWriteSerializer(serializers.ModelSerializer):
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
-            raise serializers.ValidationError('A driver with this phone number already exists.')
+            raise serializers.ValidationError(
+                "A driver with this phone number already exists."
+            )
         return value
 
 
@@ -62,7 +81,7 @@ class DriverViewSerializer(serializers.ModelSerializer):
     status = DriverStatusSerializer()
     manager = serializers.SerializerMethodField()
     referral_by = serializers.SerializerMethodField()
-    documents = DriverFileSerializer(many=True, source='driverfile_set')
+    documents = DriverFileSerializer(many=True, source="driverfile_set")
     vehicle = serializers.SerializerMethodField()
     team = serializers.SerializerMethodField()
     dispatcher = serializers.SerializerMethodField()
@@ -71,24 +90,24 @@ class DriverViewSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Driver
-        fields = '__all__'
-    
+        fields = "__all__"
+
     def get_company(self, obj):
-        if not hasattr(self, '_company'):
+        if not hasattr(self, "_company"):
             company = Company.current()
-            self._company = {'id': company.id, 'name': company.name}
+            self._company = {"id": company.id, "name": company.name}
         return self._company
 
     def get_manager(self, obj):
         if obj.manager:
             return {
-                    "id": obj.manager.id,
-                    "first_name": obj.manager.first_name,
-                    "last_name": obj.manager.last_name,
-                    "username": obj.manager.username,
-                }
+                "id": obj.manager.id,
+                "first_name": obj.manager.first_name,
+                "last_name": obj.manager.last_name,
+                "username": obj.manager.username,
+            }
         return None
-    
+
     def get_team(self, obj):
         if obj.team:
             return {"id": obj.team.id, "name": obj.team.name}
@@ -107,39 +126,39 @@ class DriverViewSerializer(serializers.ModelSerializer):
     def get_referral_by(self, obj):
         if obj.referral_by:
             return {
-                    "id": obj.referral_by.id,
-                    "first_name": obj.referral_by.first_name,
-                    "last_name": obj.referral_by.last_name,
-                    "username": obj.referral_by.username,
-                }
+                "id": obj.referral_by.id,
+                "first_name": obj.referral_by.first_name,
+                "last_name": obj.referral_by.last_name,
+                "username": obj.referral_by.username,
+            }
         return None
-    
+
     def get_vehicle(self, obj):
         vehicle = Vehicle.objects.filter(driver=obj).first()
         if vehicle:
             return {
-                'id': vehicle.id,
-                'vehicle_type': vehicle.vehicle_type,
-                'make': vehicle.make,
-                'model': vehicle.model,
-                'year': vehicle.year,
-                'registration_plate': vehicle.registration_plate,
-                'vin': vehicle.vin,
+                "id": vehicle.id,
+                "vehicle_type": vehicle.vehicle_type,
+                "make": vehicle.make,
+                "model": vehicle.model,
+                "year": vehicle.year,
+                "registration_plate": vehicle.registration_plate,
+                "vin": vehicle.vin,
                 # Cargo box and equipment: quoted to brokers on every bid.
-                'length': vehicle.length,
-                'width': vehicle.width,
-                'height': vehicle.height,
-                'payload': vehicle.payload,
-                'ramps': vehicle.ramps,
-                'dock_height': vehicle.dock_height,
-                'equipments': VehicleEquipmentSerializer(
+                "length": vehicle.length,
+                "width": vehicle.width,
+                "height": vehicle.height,
+                "payload": vehicle.payload,
+                "ramps": vehicle.ramps,
+                "dock_height": vehicle.dock_height,
+                "equipments": VehicleEquipmentSerializer(
                     vehicle.vehicleequipment_set.all(), many=True
                 ).data,
             }
         return None
 
     def get_deposit(self, obj):
-        deposit = getattr(obj, 'deposit', None)
+        deposit = getattr(obj, "deposit", None)
         if deposit:
             return DepositViewSerializer(deposit).data
         return None
@@ -149,16 +168,16 @@ class VehicleEquipmentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = VehicleEquipment
-        fields = '__all__'
+        fields = "__all__"
 
 
 class DriverCompanyViewSerializer(serializers.ModelSerializer):
     drivers = serializers.SerializerMethodField()
-    documents = CompanyFileSerializer(many=True, source='companyfile_set')
+    documents = CompanyFileSerializer(many=True, source="companyfile_set")
 
     class Meta:
         model = DriverCompany
-        fields = '__all__'
+        fields = "__all__"
 
     def get_drivers(self, obj):
         return [
@@ -167,7 +186,11 @@ class DriverCompanyViewSerializer(serializers.ModelSerializer):
                 "full_name": driver.full_name,
                 "phone_number": driver.phone_number,
                 "email": driver.email if driver.email else None,
-                "emergency_phone_number": driver.emergency_phone_number if driver.emergency_phone_number else None,
+                "emergency_phone_number": (
+                    driver.emergency_phone_number
+                    if driver.emergency_phone_number
+                    else None
+                ),
             }
             for driver in obj.drivers.all()
         ]
@@ -177,18 +200,18 @@ class DriverCompanyWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DriverCompany
-        fields = '__all__'
+        fields = "__all__"
 
 
 class VehicleViewSerializer(serializers.ModelSerializer):
     driver = serializers.SerializerMethodField()
     second_driver = serializers.SerializerMethodField()
-    documents = VehicleFileSerializer(many=True, source='vehiclefile_set')
-    equipments = VehicleEquipmentSerializer(many=True, source='vehicleequipment_set')
+    documents = VehicleFileSerializer(many=True, source="vehiclefile_set")
+    equipments = VehicleEquipmentSerializer(many=True, source="vehicleequipment_set")
 
     class Meta:
         model = Vehicle
-        fields = '__all__'
+        fields = "__all__"
 
     def get_driver(self, obj):
         if obj.driver:
@@ -197,15 +220,35 @@ class VehicleViewSerializer(serializers.ModelSerializer):
                 "full_name": obj.driver.full_name,
                 "phone_number": obj.driver.phone_number,
                 "email": obj.driver.email if obj.driver.email else None,
-                "emergency_phone_number": obj.driver.emergency_phone_number if obj.driver.emergency_phone_number else None,
+                "emergency_phone_number": (
+                    obj.driver.emergency_phone_number
+                    if obj.driver.emergency_phone_number
+                    else None
+                ),
                 "status": obj.driver.status.name,
-                "current_address": obj.driver.current_address if obj.driver.current_address else None,
-                "current_city": obj.driver.current_city if obj.driver.current_city else None,
-                "current_state": obj.driver.current_state if obj.driver.current_state else None,
-                "current_zip": obj.driver.current_zip if obj.driver.current_zip else None,
-                "current_longitude": obj.driver.current_longitude if obj.driver.current_longitude else None,
-                "current_latitude": obj.driver.current_latitude if obj.driver.current_latitude else None,
-                "current_address": obj.driver.current_address if obj.driver.current_address else None,
+                "current_address": (
+                    obj.driver.current_address if obj.driver.current_address else None
+                ),
+                "current_city": (
+                    obj.driver.current_city if obj.driver.current_city else None
+                ),
+                "current_state": (
+                    obj.driver.current_state if obj.driver.current_state else None
+                ),
+                "current_zip": (
+                    obj.driver.current_zip if obj.driver.current_zip else None
+                ),
+                "current_longitude": (
+                    obj.driver.current_longitude
+                    if obj.driver.current_longitude
+                    else None
+                ),
+                "current_latitude": (
+                    obj.driver.current_latitude if obj.driver.current_latitude else None
+                ),
+                "current_address": (
+                    obj.driver.current_address if obj.driver.current_address else None
+                ),
             }
         return None
 
@@ -216,8 +259,12 @@ class VehicleViewSerializer(serializers.ModelSerializer):
                 "full_name": obj.second_driver.full_name,
                 "phone_number": obj.second_driver.phone_number,
                 "email": obj.second_driver.email if obj.second_driver.email else None,
-                "emergency_phone_number": obj.second_driver.emergency_phone_number if obj.second_driver.emergency_phone_number else None,
-                "status": obj.second_driver.status.name
+                "emergency_phone_number": (
+                    obj.second_driver.emergency_phone_number
+                    if obj.second_driver.emergency_phone_number
+                    else None
+                ),
+                "status": obj.second_driver.status.name,
             }
         return None
 
@@ -226,14 +273,14 @@ class VehicleWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Vehicle
-        fields = '__all__'
+        fields = "__all__"
 
 
 class DepositWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Deposit
-        fields = '__all__'
+        fields = "__all__"
 
 
 class DepositViewSerializer(serializers.ModelSerializer):
@@ -241,7 +288,7 @@ class DepositViewSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Deposit
-        fields = '__all__'
+        fields = "__all__"
 
     def get_driver(self, obj):
         if obj.driver:
@@ -256,7 +303,7 @@ class DepositHistoryWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DepositHistory
-        fields = '__all__'
+        fields = "__all__"
 
 
 class DepositHistoryViewSerializer(serializers.ModelSerializer):
@@ -264,16 +311,16 @@ class DepositHistoryViewSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DepositHistory
-        fields = '__all__'
+        fields = "__all__"
 
     def get_changed_by(self, obj):
         if obj.changed_by:
             return {
-                    "id": obj.changed_by.id,
-                    "first_name": obj.changed_by.first_name,
-                    "last_name": obj.changed_by.last_name,
-                    "username": obj.changed_by.username,
-                }
+                "id": obj.changed_by.id,
+                "first_name": obj.changed_by.first_name,
+                "last_name": obj.changed_by.last_name,
+                "username": obj.changed_by.username,
+            }
         return None
 
 
@@ -281,7 +328,7 @@ class CompanyHistoryWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CompanyHistory
-        fields = '__all__'
+        fields = "__all__"
 
 
 class CompanyHistoryViewSerializer(serializers.ModelSerializer):
@@ -289,16 +336,16 @@ class CompanyHistoryViewSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CompanyHistory
-        fields = '__all__'
+        fields = "__all__"
 
     def get_changed_by(self, obj):
         if obj.changed_by:
             return {
-                    "id": obj.changed_by.id,
-                    "first_name": obj.changed_by.first_name,
-                    "last_name": obj.changed_by.last_name,
-                    "username": obj.changed_by.username,
-                }
+                "id": obj.changed_by.id,
+                "first_name": obj.changed_by.first_name,
+                "last_name": obj.changed_by.last_name,
+                "username": obj.changed_by.username,
+            }
         return None
 
 
@@ -306,7 +353,7 @@ class DriverHistoryWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DriverHistory
-        fields = '__all__'
+        fields = "__all__"
 
 
 class DriverHistoryViewSerializer(serializers.ModelSerializer):
@@ -314,16 +361,16 @@ class DriverHistoryViewSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DriverHistory
-        fields = '__all__'
+        fields = "__all__"
 
     def get_changed_by(self, obj):
         if obj.changed_by:
             return {
-                    "id": obj.changed_by.id,
-                    "first_name": obj.changed_by.first_name,
-                    "last_name": obj.changed_by.last_name,
-                    "username": obj.changed_by.username,
-                }
+                "id": obj.changed_by.id,
+                "first_name": obj.changed_by.first_name,
+                "last_name": obj.changed_by.last_name,
+                "username": obj.changed_by.username,
+            }
         return None
 
 
@@ -331,7 +378,7 @@ class VehicleHistoryWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = VehicleHistory
-        fields = '__all__'
+        fields = "__all__"
 
 
 class VehicleHistoryViewSerializer(serializers.ModelSerializer):
@@ -339,16 +386,16 @@ class VehicleHistoryViewSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = VehicleHistory
-        fields = '__all__'
+        fields = "__all__"
 
     def get_changed_by(self, obj):
         if obj.changed_by:
             return {
-                    "id": obj.changed_by.id,
-                    "first_name": obj.changed_by.first_name,
-                    "last_name": obj.changed_by.last_name,
-                    "username": obj.changed_by.username,
-                }
+                "id": obj.changed_by.id,
+                "first_name": obj.changed_by.first_name,
+                "last_name": obj.changed_by.last_name,
+                "username": obj.changed_by.username,
+            }
         return None
 
 
@@ -362,31 +409,31 @@ class DriverListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Driver
         fields = [
-            'id',
-            'full_name',
-            'email',
-            'phone_number',
-            'hired_date',
-            'created_at',
-            'status',
-            'manager',
-            'docs_count',
-            'hub_status',
-            'hub_driver_id',
-            'hub_invite_status',
-            'hub_invited_at',
+            "id",
+            "full_name",
+            "email",
+            "phone_number",
+            "hired_date",
+            "created_at",
+            "status",
+            "manager",
+            "docs_count",
+            "hub_status",
+            "hub_driver_id",
+            "hub_invite_status",
+            "hub_invited_at",
         ]
 
     def get_manager(self, obj):
         if obj.manager:
             return {
-                    "id": obj.manager.id,
-                    "first_name": obj.manager.first_name,
-                    "last_name": obj.manager.last_name,
-                    "username": obj.manager.username,
-                }
+                "id": obj.manager.id,
+                "first_name": obj.manager.first_name,
+                "last_name": obj.manager.last_name,
+                "username": obj.manager.username,
+            }
         return None
-    
+
     def get_docs_count(self, obj):
         company = obj.driver_company
         docs_count = company.companyfile_set.count() if company else 0
@@ -397,21 +444,21 @@ class DriverCompanyModalSerializer(serializers.ModelSerializer):
     # A company can now be shared by several drivers, so this is a list, not
     # a single object.
     drivers = serializers.SerializerMethodField()
-    documents = CompanyFileSerializer(many=True, source='companyfile_set')
+    documents = CompanyFileSerializer(many=True, source="companyfile_set")
 
     class Meta:
         model = DriverCompany
         fields = [
-            'id',
-            'name',
-            'employer_id',
-            'drivers',
-            'phone_number',
-            'address',
-            'city',
-            'state',
-            'zipcode',
-            'documents'
+            "id",
+            "name",
+            "employer_id",
+            "drivers",
+            "phone_number",
+            "address",
+            "city",
+            "state",
+            "zipcode",
+            "documents",
         ]
 
     @classmethod
@@ -429,27 +476,37 @@ class DriverCompanyModalSerializer(serializers.ModelSerializer):
             "full_name": driver.full_name,
             "phone_number": driver.phone_number,
             "email": driver.email if driver.email else None,
-            "emergency_phone_number": driver.emergency_phone_number if driver.emergency_phone_number else None,
+            "emergency_phone_number": (
+                driver.emergency_phone_number if driver.emergency_phone_number else None
+            ),
             "status": driver.status.name,
             "city": driver.city if driver.city else None,
             "state": driver.state if driver.state else None,
             "zip_code": driver.zip_code if driver.zip_code else None,
-            'vehicle': self._get_vehicle(driver),
-            "manager": driver.manager.username + " - " + driver.manager.first_name + " " + driver.manager.last_name if driver.manager else None
+            "vehicle": self._get_vehicle(driver),
+            "manager": (
+                driver.manager.username
+                + " - "
+                + driver.manager.first_name
+                + " "
+                + driver.manager.last_name
+                if driver.manager
+                else None
+            ),
         }
-    
+
     def _get_vehicle(self, driver):
         vehicle = driver.vehicles.first()
         if not vehicle:
             return None
         return {
-            'id': vehicle.id,
-            'vehicle_type': vehicle.vehicle_type,
-            'make': vehicle.make,
-            'model': vehicle.model,
-            'year': vehicle.year,
-            'registration_plate': vehicle.registration_plate,
-            'vin': vehicle.vin,
+            "id": vehicle.id,
+            "vehicle_type": vehicle.vehicle_type,
+            "make": vehicle.make,
+            "model": vehicle.model,
+            "year": vehicle.year,
+            "registration_plate": vehicle.registration_plate,
+            "vin": vehicle.vin,
         }
 
 
@@ -462,8 +519,11 @@ class DriverBulkCreateSerializer(serializers.Serializer):
         if not value:
             return value
         if Driver.objects.filter(phone_number=value).exists():
-            raise serializers.ValidationError('A driver with this phone number already exists.')
+            raise serializers.ValidationError(
+                "A driver with this phone number already exists."
+            )
         return value
+
     phone_number = serializers.CharField(required=False, allow_blank=True)
     emergency_phone_number = serializers.CharField(required=False, allow_blank=True)
     medical_exp_date = serializers.DateField(required=False, allow_null=True)
@@ -492,12 +552,18 @@ class DriverBulkCreateSerializer(serializers.Serializer):
     tax_exempt = serializers.BooleanField(required=False)
     payee_code = serializers.CharField(required=False, allow_blank=True)
     fatca_reporting_code = serializers.CharField(required=False, allow_blank=True)
-    referral_by = serializers.PrimaryKeyRelatedField(queryset=CustomUser.objects.all(), required=False, allow_null=True)
-    manager = serializers.PrimaryKeyRelatedField(queryset=CustomUser.objects.all(), required=False, allow_null=True)
+    referral_by = serializers.PrimaryKeyRelatedField(
+        queryset=CustomUser.objects.all(), required=False, allow_null=True
+    )
+    manager = serializers.PrimaryKeyRelatedField(
+        queryset=CustomUser.objects.all(), required=False, allow_null=True
+    )
     # Staff-only: attach this driver to an existing DriverCompany instead of
     # creating a new one. Set from the request in the HR view; explicitly
     # stripped out before validation in the public invite view.
-    driver_company = serializers.PrimaryKeyRelatedField(queryset=DriverCompany.objects.all(), required=False, allow_null=True)
+    driver_company = serializers.PrimaryKeyRelatedField(
+        queryset=DriverCompany.objects.all(), required=False, allow_null=True
+    )
     company__name = serializers.CharField(required=False, allow_blank=True)
     company__mc = serializers.CharField(required=False, allow_blank=True)
     company__employer_id = serializers.CharField(required=False, allow_blank=True)
@@ -514,19 +580,31 @@ class DriverBulkCreateSerializer(serializers.Serializer):
     vehicle__year = serializers.IntegerField()
     vehicle__payload = serializers.IntegerField()
     vehicle__gvw = serializers.IntegerField()
-    vehicle__second_driver = serializers.PrimaryKeyRelatedField(queryset=Driver.objects.all(), required=False, allow_null=True)
-    vehicle__registration_plate = serializers.CharField(required=False, allow_blank=True)
-    vehicle__registration_expiry_date = serializers.DateField(required=False, allow_null=True)
-    vehicle__registration_state = serializers.CharField(required=False, allow_blank=True)
+    vehicle__second_driver = serializers.PrimaryKeyRelatedField(
+        queryset=Driver.objects.all(), required=False, allow_null=True
+    )
+    vehicle__registration_plate = serializers.CharField(
+        required=False, allow_blank=True
+    )
+    vehicle__registration_expiry_date = serializers.DateField(
+        required=False, allow_null=True
+    )
+    vehicle__registration_state = serializers.CharField(
+        required=False, allow_blank=True
+    )
     vehicle__insurance_company = serializers.CharField(required=False, allow_blank=True)
-    vehicle__insurance_expiry_date = serializers.DateField(required=False, allow_null=True)
+    vehicle__insurance_expiry_date = serializers.DateField(
+        required=False, allow_null=True
+    )
     vehicle__policy_number = serializers.CharField(required=False, allow_blank=True)
     vehicle__vin = serializers.CharField(required=False, allow_blank=True)
     vehicle__length = serializers.IntegerField(required=False, allow_null=True)
     vehicle__width = serializers.IntegerField(required=False, allow_null=True)
     vehicle__height = serializers.IntegerField(required=False, allow_null=True)
     vehicle__door_open_width = serializers.IntegerField(required=False, allow_null=True)
-    vehicle__door_open_height = serializers.IntegerField(required=False, allow_null=True)
+    vehicle__door_open_height = serializers.IntegerField(
+        required=False, allow_null=True
+    )
     vehicle__dock_height = serializers.CharField(required=False, allow_blank=True)
     vehicle__ramps = serializers.CharField(required=False, allow_blank=True)
     deposit__company = serializers.CharField(required=False, allow_blank=True)
@@ -538,70 +616,96 @@ class DriverBulkCreateSerializer(serializers.Serializer):
     deposit__routing_number = serializers.CharField(required=False, allow_blank=True)
     deposit__account_number = serializers.CharField(required=False, allow_blank=True)
     driver_files = serializers.ListField(child=serializers.FileField(), required=False)
-    driver_file_names = serializers.ListField(child=serializers.CharField(), required=False)
+    driver_file_names = serializers.ListField(
+        child=serializers.CharField(), required=False
+    )
     company_files = serializers.ListField(child=serializers.FileField(), required=False)
-    company_file_names = serializers.ListField(child=serializers.CharField(), required=False)
+    company_file_names = serializers.ListField(
+        child=serializers.CharField(), required=False
+    )
     vehicle_files = serializers.ListField(child=serializers.FileField(), required=False)
-    vehicle_file_names = serializers.ListField(child=serializers.CharField(), required=False)
+    vehicle_file_names = serializers.ListField(
+        child=serializers.CharField(), required=False
+    )
 
     def validate(self, attrs):
-        driver_files = attrs.get('driver_files', [])
-        driver_file_names = attrs.get('driver_file_names', [])
-        company_files = attrs.get('company_files', [])
-        company_file_names = attrs.get('company_file_names', [])
-        vehicle_files = attrs.get('vehicle_files', [])
-        vehicle_file_names = attrs.get('vehicle_file_names', [])
+        driver_files = attrs.get("driver_files", [])
+        driver_file_names = attrs.get("driver_file_names", [])
+        company_files = attrs.get("company_files", [])
+        company_file_names = attrs.get("company_file_names", [])
+        vehicle_files = attrs.get("vehicle_files", [])
+        vehicle_file_names = attrs.get("vehicle_file_names", [])
 
         if len(driver_files) != len(driver_file_names):
-            raise serializers.ValidationError('driver_files and driver_file_names must have the same count.')
+            raise serializers.ValidationError(
+                "driver_files and driver_file_names must have the same count."
+            )
         if len(company_files) != len(company_file_names):
-            raise serializers.ValidationError('company_files and company_file_names must have the same count.')
+            raise serializers.ValidationError(
+                "company_files and company_file_names must have the same count."
+            )
         if len(vehicle_files) != len(vehicle_file_names):
-            raise serializers.ValidationError('vehicle_files and vehicle_file_names must have the same count.')
+            raise serializers.ValidationError(
+                "vehicle_files and vehicle_file_names must have the same count."
+            )
 
         company = Company.current()
         if not company.contract_template_text:
             raise serializers.ValidationError(
-                {'company': f"Company '{company.name}' has no contract_template_text configured."}
+                {
+                    "company": f"Company '{company.name}' has no contract_template_text configured."
+                }
             )
 
         # Either attach to an existing DriverCompany, or provide enough to
         # create a new one — not neither, and not partially one or the other.
-        new_company_required = ['company__name', 'company__mc', 'company__employer_id', 'company__phone_number']
-        if attrs.get('driver_company'):
+        new_company_required = [
+            "company__name",
+            "company__mc",
+            "company__employer_id",
+            "company__phone_number",
+        ]
+        if attrs.get("driver_company"):
             provided = [f for f in new_company_required if attrs.get(f)]
             if provided:
                 raise serializers.ValidationError(
-                    'Provide either driver_company or new company details, not both.'
+                    "Provide either driver_company or new company details, not both."
                 )
         else:
             missing = [f for f in new_company_required if not attrs.get(f)]
             if missing:
                 raise serializers.ValidationError(
-                    {f: 'This field is required when driver_company is not provided.' for f in missing}
+                    {
+                        f: "This field is required when driver_company is not provided."
+                        for f in missing
+                    }
                 )
         return attrs
 
     def create(self, validated_data):
         from django.db import transaction
-        driver_files = validated_data.pop('driver_files', [])
-        driver_file_names = validated_data.pop('driver_file_names', [])
-        company_files = validated_data.pop('company_files', [])
-        company_file_names = validated_data.pop('company_file_names', [])
-        vehicle_files = validated_data.pop('vehicle_files', [])
-        vehicle_file_names = validated_data.pop('vehicle_file_names', [])
-        existing_company = validated_data.pop('driver_company', None)
+
+        driver_files = validated_data.pop("driver_files", [])
+        driver_file_names = validated_data.pop("driver_file_names", [])
+        company_files = validated_data.pop("company_files", [])
+        company_file_names = validated_data.pop("company_file_names", [])
+        vehicle_files = validated_data.pop("vehicle_files", [])
+        vehicle_file_names = validated_data.pop("vehicle_file_names", [])
+        existing_company = validated_data.pop("driver_company", None)
         company_data = {
-            k.replace('company__', ''): validated_data.pop(k)
-            for k in list(validated_data.keys()) if k.startswith('company__')
+            k.replace("company__", ""): validated_data.pop(k)
+            for k in list(validated_data.keys())
+            if k.startswith("company__")
         }
         vehicle_data = {
-            k.replace('vehicle__', ''): validated_data.pop(k)
-            for k in list(validated_data.keys()) if k.startswith('vehicle__')
+            k.replace("vehicle__", ""): validated_data.pop(k)
+            for k in list(validated_data.keys())
+            if k.startswith("vehicle__")
         }
         deposit_data = {
-            k.replace('deposit__', ''): validated_data.pop(k)
-            for k in list(validated_data.keys()) if k.startswith('deposit__')
+            k.replace("deposit__", ""): validated_data.pop(k)
+            for k in list(validated_data.keys())
+            if k.startswith("deposit__")
         }
 
         with transaction.atomic():
@@ -612,67 +716,88 @@ class DriverBulkCreateSerializer(serializers.Serializer):
                 # use that for the generated paperwork below instead of the
                 # (empty) company__* fields.
                 company_fields = {
-                    'name': driver_company.name,
-                    'business_as': driver_company.business_as,
-                    'address': driver_company.address,
-                    'city': driver_company.city,
-                    'state': driver_company.state,
-                    'zipcode': driver_company.zipcode,
-                    'employer_id': driver_company.employer_id,
-                    'business_type': driver_company.business_type,
+                    "name": driver_company.name,
+                    "business_as": driver_company.business_as,
+                    "address": driver_company.address,
+                    "city": driver_company.city,
+                    "state": driver_company.state,
+                    "zipcode": driver_company.zipcode,
+                    "employer_id": driver_company.employer_id,
+                    "business_type": driver_company.business_type,
                 }
             else:
                 driver_company = DriverCompany.objects.create(**company_data)
                 company_fields = company_data
             driver.driver_company = driver_company
-            driver.save(update_fields=['driver_company'])
+            driver.save(update_fields=["driver_company"])
             vehicle = Vehicle.objects.create(driver=driver, **vehicle_data)
             Deposit.objects.create(driver=driver, **deposit_data)
-            contractor_address = ', '.join(
-                part for part in [
-                    company_fields.get('address'), company_fields.get('city'),
-                    company_fields.get('state'), company_fields.get('zipcode'),
-                ] if part
+            contractor_address = ", ".join(
+                part
+                for part in [
+                    company_fields.get("address"),
+                    company_fields.get("city"),
+                    company_fields.get("state"),
+                    company_fields.get("zipcode"),
+                ]
+                if part
             )
-            w9_bytes = fill_w9({
-                'company_name': company_fields.get('name') or '',
-                'company_doing_business': company_fields.get('business_as') or '',
-                'company_address': company_fields.get('address') or '',
-                'company_city': company_fields.get('city') or '',
-                'company_state': company_fields.get('state') or '',
-                'company_zip': company_fields.get('zipcode') or '',
-                'company_employer_id': company_fields.get('employer_id') or '',
-                'company_type': company_fields.get('business_type') or '',
-                'payee_code': driver.payee_code,
-                'fatca_reporting_code': driver.fatca_reporting_code,
-            }).getvalue()
+            w9_bytes = fill_w9(
+                {
+                    "company_name": company_fields.get("name") or "",
+                    "company_doing_business": company_fields.get("business_as") or "",
+                    "company_address": company_fields.get("address") or "",
+                    "company_city": company_fields.get("city") or "",
+                    "company_state": company_fields.get("state") or "",
+                    "company_zip": company_fields.get("zipcode") or "",
+                    "company_employer_id": company_fields.get("employer_id") or "",
+                    "company_type": company_fields.get("business_type") or "",
+                    "payee_code": driver.payee_code,
+                    "fatca_reporting_code": driver.fatca_reporting_code,
+                }
+            ).getvalue()
             today = timezone.now()
-            contract_bytes = generate_contract(Company.current(), {
-                'effective_day': today.strftime('%d'),
-                'effective_month': today.strftime('%B'),
-                'effective_year': today.strftime('%y'),
-                'contractor_name': company_fields.get('name') or '',
-                'contractor_address': contractor_address,
-                'contractor_email': driver.email or '',
-            }).getvalue()
-            w9_file = DriverFile(driver=driver, name='W-9 (Generated)')
-            w9_file.document.save(f'w9_{driver.id}.pdf', ContentFile(w9_bytes), save=True)
-            contract_file = DriverFile(driver=driver, name='Contractor Agreement (Generated)')
-            contract_file.document.save(f'contract_{driver.id}.pdf', ContentFile(contract_bytes), save=True)
-            DriverFile.objects.bulk_create([
-                DriverFile(driver=driver, name=name, document=file)
-                for file, name in zip(driver_files, driver_file_names)
-            ])
+            contract_bytes = generate_contract(
+                Company.current(),
+                {
+                    "effective_day": today.strftime("%d"),
+                    "effective_month": today.strftime("%B"),
+                    "effective_year": today.strftime("%y"),
+                    "contractor_name": company_fields.get("name") or "",
+                    "contractor_address": contractor_address,
+                    "contractor_email": driver.email or "",
+                },
+            ).getvalue()
+            w9_file = DriverFile(driver=driver, name="W-9 (Generated)")
+            w9_file.document.save(
+                f"w9_{driver.id}.pdf", ContentFile(w9_bytes), save=True
+            )
+            contract_file = DriverFile(
+                driver=driver, name="Contractor Agreement (Generated)"
+            )
+            contract_file.document.save(
+                f"contract_{driver.id}.pdf", ContentFile(contract_bytes), save=True
+            )
+            DriverFile.objects.bulk_create(
+                [
+                    DriverFile(driver=driver, name=name, document=file)
+                    for file, name in zip(driver_files, driver_file_names)
+                ]
+            )
 
-            CompanyFile.objects.bulk_create([
-                CompanyFile(company=driver_company, name=name, document=file)
-                for file, name in zip(company_files, company_file_names)
-            ])
+            CompanyFile.objects.bulk_create(
+                [
+                    CompanyFile(company=driver_company, name=name, document=file)
+                    for file, name in zip(company_files, company_file_names)
+                ]
+            )
 
-            VehicleFile.objects.bulk_create([
-                VehicleFile(vehicle=vehicle, name=name, document=file)
-                for file, name in zip(vehicle_files, vehicle_file_names)
-            ])
+            VehicleFile.objects.bulk_create(
+                [
+                    VehicleFile(vehicle=vehicle, name=name, document=file)
+                    for file, name in zip(vehicle_files, vehicle_file_names)
+                ]
+            )
 
         return driver
 
@@ -685,33 +810,33 @@ class NearbyDriverSerializer(serializers.ModelSerializer):
     class Meta:
         model = Driver
         fields = [
-            'id',
-            'full_name',
-            'unit_number',
-            'phone_number',
-            'note',
-            'telegram_group_id',
-            'current_latitude',
-            'current_longitude',
-            'current_city',
-            'current_state',
-            'current_zip',
-            'current_address',
-            'current_location_updated_at',
-            'available_at',
-            'availability_note',
-            'available_at',
-            'availability_note',
-            'status',
-            'vehicle',
-            'miles_out',
+            "id",
+            "full_name",
+            "unit_number",
+            "phone_number",
+            "note",
+            "telegram_group_id",
+            "current_latitude",
+            "current_longitude",
+            "current_city",
+            "current_state",
+            "current_zip",
+            "current_address",
+            "current_location_updated_at",
+            "available_at",
+            "availability_note",
+            "available_at",
+            "availability_note",
+            "status",
+            "vehicle",
+            "miles_out",
         ]
 
     def get_status(self, obj):
         if obj.status:
             return {
-                'id': obj.status.id,
-                'name': obj.status.name,
+                "id": obj.status.id,
+                "name": obj.status.name,
             }
         return None
 
@@ -720,25 +845,25 @@ class NearbyDriverSerializer(serializers.ModelSerializer):
         if not vehicle:
             return None
         return {
-            'id': vehicle.id,
-            'vehicle_type': vehicle.vehicle_type,
-            'make': vehicle.make,
-            'model': vehicle.model,
-            'year': vehicle.year,
-            'length': vehicle.length,
-            'width': vehicle.width,
-            'height': vehicle.height,
-            'payload': vehicle.payload,
-            'ramps': vehicle.ramps,
-            'registration_plate': vehicle.registration_plate,
-            'equipments': VehicleEquipmentSerializer(
+            "id": vehicle.id,
+            "vehicle_type": vehicle.vehicle_type,
+            "make": vehicle.make,
+            "model": vehicle.model,
+            "year": vehicle.year,
+            "length": vehicle.length,
+            "width": vehicle.width,
+            "height": vehicle.height,
+            "payload": vehicle.payload,
+            "ramps": vehicle.ramps,
+            "registration_plate": vehicle.registration_plate,
+            "equipments": VehicleEquipmentSerializer(
                 vehicle.vehicleequipment_set.all(), many=True
             ).data,
         }
 
     def get_miles_out(self, obj):
-        return getattr(obj, '_miles_out', None)
-    
+        return getattr(obj, "_miles_out", None)
+
 
 class VehicleDropdownSerializer(serializers.ModelSerializer):
     driver = serializers.SerializerMethodField()
@@ -746,10 +871,10 @@ class VehicleDropdownSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Vehicle
-        fields = ['id', 'driver', 'second_driver', 'vin']
+        fields = ["id", "driver", "second_driver", "vin"]
 
     def _address_updated(self, driver):
-        requested_date = self.context.get('requested_date')
+        requested_date = self.context.get("requested_date")
         if not requested_date:
             return None
         return driver.updated_at.date() >= requested_date
@@ -759,13 +884,27 @@ class VehicleDropdownSerializer(serializers.ModelSerializer):
             return {
                 "id": obj.driver.id,
                 "full_name": obj.driver.full_name,
-                "current_address": obj.driver.current_address if obj.driver.current_address else None,
-                "current_city": obj.driver.current_city if obj.driver.current_city else None,
-                "current_state": obj.driver.current_state if obj.driver.current_state else None,
-                "current_zip": obj.driver.current_zip if obj.driver.current_zip else None,
-                "current_longitude": obj.driver.current_longitude if obj.driver.current_longitude else None,
-                "current_latitude": obj.driver.current_latitude if obj.driver.current_latitude else None,
-                "address_updated": self._address_updated(obj.driver)
+                "current_address": (
+                    obj.driver.current_address if obj.driver.current_address else None
+                ),
+                "current_city": (
+                    obj.driver.current_city if obj.driver.current_city else None
+                ),
+                "current_state": (
+                    obj.driver.current_state if obj.driver.current_state else None
+                ),
+                "current_zip": (
+                    obj.driver.current_zip if obj.driver.current_zip else None
+                ),
+                "current_longitude": (
+                    obj.driver.current_longitude
+                    if obj.driver.current_longitude
+                    else None
+                ),
+                "current_latitude": (
+                    obj.driver.current_latitude if obj.driver.current_latitude else None
+                ),
+                "address_updated": self._address_updated(obj.driver),
             }
         return None
 
@@ -774,27 +913,59 @@ class VehicleDropdownSerializer(serializers.ModelSerializer):
             return {
                 "id": obj.second_driver.id,
                 "full_name": obj.second_driver.full_name,
-                "current_address": obj.second_driver.current_address if obj.second_driver.current_address else None,
-                "current_city": obj.second_driver.current_city if obj.second_driver.current_city else None,
-                "current_state": obj.second_driver.current_state if obj.second_driver.current_state else None,
-                "current_zip": obj.second_driver.current_zip if obj.second_driver.current_zip else None,
-                "current_longitude": obj.second_driver.current_longitude if obj.second_driver.current_longitude else None,
-                "current_latitude": obj.second_driver.current_latitude if obj.second_driver.current_latitude else None,
-                "address_updated": self._address_updated(obj.second_driver)
+                "current_address": (
+                    obj.second_driver.current_address
+                    if obj.second_driver.current_address
+                    else None
+                ),
+                "current_city": (
+                    obj.second_driver.current_city
+                    if obj.second_driver.current_city
+                    else None
+                ),
+                "current_state": (
+                    obj.second_driver.current_state
+                    if obj.second_driver.current_state
+                    else None
+                ),
+                "current_zip": (
+                    obj.second_driver.current_zip
+                    if obj.second_driver.current_zip
+                    else None
+                ),
+                "current_longitude": (
+                    obj.second_driver.current_longitude
+                    if obj.second_driver.current_longitude
+                    else None
+                ),
+                "current_latitude": (
+                    obj.second_driver.current_latitude
+                    if obj.second_driver.current_latitude
+                    else None
+                ),
+                "address_updated": self._address_updated(obj.second_driver),
             }
         return None
 
 
 class UnassignedDriverSerializer(serializers.ModelSerializer):
     """The worklist row: who they are and which assignment is missing."""
-    status_name = serializers.CharField(source='status.name', read_only=True)
+
+    status_name = serializers.CharField(source="status.name", read_only=True)
     team = serializers.SerializerMethodField()
     dispatcher = serializers.SerializerMethodField()
 
     class Meta:
         model = Driver
-        fields = ['id', 'full_name', 'phone_number', 'unit_number',
-                  'status_name', 'team', 'dispatcher']
+        fields = [
+            "id",
+            "full_name",
+            "phone_number",
+            "unit_number",
+            "status_name",
+            "team",
+            "dispatcher",
+        ]
 
     def get_team(self, obj):
         return {"id": obj.team.id, "name": obj.team.name} if obj.team else None
@@ -808,6 +979,7 @@ class UnassignedDriverSerializer(serializers.ModelSerializer):
 
 class DriverAssignSerializer(serializers.Serializer):
     """Bulk assignment of drivers to a team and/or a dispatcher."""
+
     driver_ids = serializers.ListField(
         child=serializers.IntegerField(), allow_empty=False
     )
@@ -815,7 +987,7 @@ class DriverAssignSerializer(serializers.Serializer):
     dispatcher = serializers.IntegerField(required=False, allow_null=True)
 
     def validate(self, attrs):
-        if 'team' not in attrs and 'dispatcher' not in attrs:
+        if "team" not in attrs and "dispatcher" not in attrs:
             raise serializers.ValidationError(
                 "Provide team, dispatcher, or both. Send null to clear one."
             )
@@ -830,31 +1002,55 @@ class TrackingDriverSerializer(serializers.ModelSerializer):
     handful of fields the page shows, read off select_related/prefetch_related
     so a page of rows costs a fixed number of queries.
     """
+
     status = DriverStatusSerializer()
     dispatcher = serializers.SerializerMethodField()
     vehicle = serializers.SerializerMethodField()
     hub_status = serializers.ReadOnlyField()
+    # True or False from the driver-app lookup, None when the hub was not asked.
+    hub_registered = serializers.ReadOnlyField()
 
     class Meta:
         model = Driver
         fields = [
-            'id', 'full_name', 'unit_number', 'phone_number', 'email', 'note',
-            'hired_date', 'terminated_date', 'city', 'state', 'zip_code',
-            'status', 'dispatcher', 'vehicle',
-            'current_zip', 'current_city', 'current_state', 'current_address',
-            'current_latitude', 'current_longitude', 'current_location_updated_at',
-            'available_at', 'availability_note',
-            'hub_status', 'hub_driver_id', 'hub_invite_status', 'hub_invited_at',
-            'updated_at',
+            "id",
+            "full_name",
+            "unit_number",
+            "phone_number",
+            "email",
+            "note",
+            "hired_date",
+            "terminated_date",
+            "city",
+            "state",
+            "zip_code",
+            "status",
+            "dispatcher",
+            "vehicle",
+            "current_zip",
+            "current_city",
+            "current_state",
+            "current_address",
+            "current_latitude",
+            "current_longitude",
+            "current_location_updated_at",
+            "available_at",
+            "availability_note",
+            "hub_status",
+            "hub_registered",
+            "hub_driver_id",
+            "hub_invite_status",
+            "hub_invited_at",
+            "updated_at",
         ]
 
     def get_dispatcher(self, obj):
         if obj.dispatcher:
             return {
-                'id': obj.dispatcher.id,
-                'first_name': obj.dispatcher.first_name,
-                'last_name': obj.dispatcher.last_name,
-                'username': obj.dispatcher.username,
+                "id": obj.dispatcher.id,
+                "first_name": obj.dispatcher.first_name,
+                "last_name": obj.dispatcher.last_name,
+                "username": obj.dispatcher.username,
             }
         return None
 
@@ -865,12 +1061,12 @@ class TrackingDriverSerializer(serializers.ModelSerializer):
             return None
         vehicle = vehicles[0]
         return {
-            'id': vehicle.id,
-            'vehicle_type': vehicle.vehicle_type,
-            'make': vehicle.make,
-            'model': vehicle.model,
-            'year': vehicle.year,
-            'length': vehicle.length,
-            'width': vehicle.width,
-            'height': vehicle.height,
+            "id": vehicle.id,
+            "vehicle_type": vehicle.vehicle_type,
+            "make": vehicle.make,
+            "model": vehicle.model,
+            "year": vehicle.year,
+            "length": vehicle.length,
+            "width": vehicle.width,
+            "height": vehicle.height,
         }

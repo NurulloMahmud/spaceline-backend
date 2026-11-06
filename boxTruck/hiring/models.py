@@ -8,11 +8,11 @@ class DriverStatus(models.Model):
 
     def __str__(self):
         return self.name
-    
+
     class Meta:
-        verbose_name = 'Driver Status'
-        verbose_name_plural = 'Driver Statuses'
-        db_table = 'driver_statuses'
+        verbose_name = "Driver Status"
+        verbose_name_plural = "Driver Statuses"
+        db_table = "driver_statuses"
 
 
 class Driver(models.Model):
@@ -48,20 +48,38 @@ class Driver(models.Model):
     tax_exempt = models.BooleanField(default=False)
     payee_code = models.CharField(max_length=255, null=True, blank=True)
     fatca_reporting_code = models.CharField(max_length=255, null=True, blank=True)
-    referral_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='referral_by')
-    manager = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='manager')
+    referral_by = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="referral_by",
+    )
+    manager = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="manager",
+    )
     team = models.ForeignKey(
-        Team, on_delete=models.SET_NULL, null=True, blank=True, related_name='drivers'
+        Team, on_delete=models.SET_NULL, null=True, blank=True, related_name="drivers"
     )
     dispatcher = models.ForeignKey(
-        CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='assigned_drivers',
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="assigned_drivers",
     )
     # SET_NULL, not CASCADE: several drivers can share one DriverCompany, so
     # deleting one driver must not delete a company the others still use.
     driver_company = models.ForeignKey(
-        'DriverCompany', on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='drivers',
+        "DriverCompany",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="drivers",
     )
     current_state = models.CharField(max_length=255, null=True, blank=True)
     current_city = models.CharField(max_length=255, null=True, blank=True)
@@ -76,7 +94,7 @@ class Driver(models.Model):
     # When the driver is free to take a load again: null means now. Set with
     # the location when the driver is on a load, off duty, or says "after X".
     available_at = models.DateTimeField(null=True, blank=True)
-    availability_note = models.CharField(max_length=200, blank=True, default='')
+    availability_note = models.CharField(max_length=200, blank=True, default="")
     # Driver Hub (the shared driver app). hub_driver_id is set once the driver
     # accepted this carrier's invite and the hub pushed the profile here; the
     # invite fields track the invite the Drivers page sent before that.
@@ -87,44 +105,64 @@ class Driver(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    HUB_CONNECTED = 'connected'
-    HUB_INVITED = 'invited'
-    HUB_DECLINED = 'declined'
-    HUB_NOT_INVITED = 'not_invited'
+    HUB_CONNECTED = "connected"
+    HUB_INVITED = "invited"
+    HUB_DECLINED = "declined"
+    HUB_LEFT = "left"
+    HUB_NOT_REGISTERED = "not_registered"
+    HUB_NOT_INVITED = "not_invited"
+
+    # Not a column: whether the driver's email has a driver-app account, set
+    # by hub.registry.apply_registrations for a list request (True or False),
+    # None when nobody asked the hub or it could not answer.
+    hub_registered: bool | None = None
 
     @property
-    def hub_status(self):
+    def hub_status(self) -> str:
         if self.hub_driver_id:
             return self.HUB_CONNECTED
-        if self.hub_invite_status == 'declined':
+        if self.hub_registered is False:
+            # Only a registered driver can be invited, so nothing else applies.
+            return self.HUB_NOT_REGISTERED
+        if self.hub_invite_status == "declined":
             return self.HUB_DECLINED
-        if self.hub_invite_id or self.hub_invite_status in ('pending', 'accepted', 'active'):
+        if self.hub_invite_status == "left":
+            return self.HUB_LEFT
+        if self.hub_invite_id or self.hub_invite_status in (
+            "pending",
+            "accepted",
+            "active",
+        ):
             return self.HUB_INVITED
         return self.HUB_NOT_INVITED
 
     def __str__(self):
         return self.full_name
-    
+
     class Meta:
-        verbose_name = 'Driver'
-        verbose_name_plural = 'Drivers'
-        db_table = 'drivers'
+        verbose_name = "Driver"
+        verbose_name_plural = "Drivers"
+        db_table = "drivers"
 
 
 class DriverFile(models.Model):
     driver = models.ForeignKey(Driver, on_delete=models.CASCADE)
     name = models.CharField(max_length=255)
-    document = models.FileField(upload_to='driver_files/')
+    document = models.FileField(upload_to="driver_files/")
+    # The driver-app document kind (license, medical_card, other) when the
+    # Driver Hub sync stored this file; empty for files a dispatcher uploaded.
+    # The sync replaces or removes only files it stored itself.
+    hub_kind = models.CharField(max_length=40, blank=True, default="", editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.driver.full_name
-    
+
     class Meta:
-        verbose_name = 'Driver File'
-        verbose_name_plural = 'Driver Files'
-        db_table = 'driver_files'
+        verbose_name = "Driver File"
+        verbose_name_plural = "Driver Files"
+        db_table = "driver_files"
 
 
 class DriverCompany(models.Model):
@@ -144,32 +182,40 @@ class DriverCompany(models.Model):
 
     def __str__(self):
         return self.name
-    
+
     class Meta:
-        verbose_name = 'Driver Company'
-        verbose_name_plural = 'Driver Companies'
-        db_table = 'driver_companies'
+        verbose_name = "Driver Company"
+        verbose_name_plural = "Driver Companies"
+        db_table = "driver_companies"
 
 
 class CompanyFile(models.Model):
     company = models.ForeignKey(DriverCompany, on_delete=models.CASCADE)
     name = models.CharField(max_length=255)
-    document = models.FileField(upload_to='driver_files/')
+    document = models.FileField(upload_to="driver_files/")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.company.name
-    
+
     class Meta:
-        verbose_name = 'Company File'
-        verbose_name_plural = 'Company Files'
-        db_table = 'company_files'
+        verbose_name = "Company File"
+        verbose_name_plural = "Company Files"
+        db_table = "company_files"
 
 
 class Vehicle(models.Model):
-    driver = models.ForeignKey(Driver, on_delete=models.CASCADE, related_name='vehicles')
-    second_driver = models.ForeignKey(Driver, on_delete=models.SET_NULL, null=True, blank=True, related_name='second_driver')
+    driver = models.ForeignKey(
+        Driver, on_delete=models.CASCADE, related_name="vehicles"
+    )
+    second_driver = models.ForeignKey(
+        Driver,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="second_driver",
+    )
     vehicle_type = models.CharField(max_length=255, null=True, blank=True)
     make = models.CharField(max_length=255)
     model = models.CharField(max_length=255)
@@ -196,11 +242,11 @@ class Vehicle(models.Model):
 
     def __str__(self):
         return self.driver.full_name
-    
+
     class Meta:
-        verbose_name = 'Vehicle'
-        verbose_name_plural = 'Vehicles'
-        db_table = 'vehicles'
+        verbose_name = "Vehicle"
+        verbose_name_plural = "Vehicles"
+        db_table = "vehicles"
 
 
 class VehicleEquipment(models.Model):
@@ -211,30 +257,32 @@ class VehicleEquipment(models.Model):
 
     def __str__(self):
         return self.name
-    
+
     class Meta:
-        verbose_name = 'Vehicle Equipment'
-        verbose_name_plural = 'Vehicle Equipments'
-        db_table = 'vehicle_equipments'
+        verbose_name = "Vehicle Equipment"
+        verbose_name_plural = "Vehicle Equipments"
+        db_table = "vehicle_equipments"
 
 
 class VehicleFile(models.Model):
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE)
     name = models.CharField(max_length=255)
-    document = models.FileField(upload_to='vehicle_files/')
+    document = models.FileField(upload_to="vehicle_files/")
+    # Same as DriverFile.hub_kind: insurance or registration from the driver app.
+    hub_kind = models.CharField(max_length=40, blank=True, default="", editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.vehicle.driver.full_name
-    
+
     class Meta:
-        verbose_name = 'Vehicle File'
-        verbose_name_plural = 'Vehicle Files'
-        db_table = 'vehicle_files'
+        verbose_name = "Vehicle File"
+        verbose_name_plural = "Vehicle Files"
+        db_table = "vehicle_files"
 
 
-class CompanyHistory(models.Model): 
+class CompanyHistory(models.Model):
     company = models.ForeignKey(DriverCompany, on_delete=models.CASCADE)
     changed_by = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
     description = models.TextField(null=True, blank=True)
@@ -242,23 +290,29 @@ class CompanyHistory(models.Model):
 
     def __str__(self):
         return self.company.name
-    
+
     class Meta:
-        verbose_name = 'Company History'
-        verbose_name_plural = 'Company Histories'
-        db_table = 'company_histories'
+        verbose_name = "Company History"
+        verbose_name_plural = "Company Histories"
+        db_table = "company_histories"
 
 
 class DriverInviteLink(models.Model):
     token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     created_by = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
     manager = models.ForeignKey(
-        CustomUser, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='managed_invite_links',
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="managed_invite_links",
     )
     driver = models.ForeignKey(
-        Driver, on_delete=models.CASCADE, null=True, blank=True,
-        related_name='sign_links',
+        Driver,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="sign_links",
     )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -266,6 +320,7 @@ class DriverInviteLink(models.Model):
 
     def is_valid(self):
         from django.utils import timezone
+
         if not self.is_active:
             return False
         if self.expires_at and self.expires_at < timezone.now():
@@ -273,12 +328,12 @@ class DriverInviteLink(models.Model):
         return True
 
     class Meta:
-        db_table = 'driver_invite_links'
-        verbose_name = 'Driver Invite Link'
-        verbose_name_plural = 'Driver Invite Links'
+        db_table = "driver_invite_links"
+        verbose_name = "Driver Invite Link"
+        verbose_name_plural = "Driver Invite Links"
 
 
-class DriverHistory(models.Model): 
+class DriverHistory(models.Model):
     driver = models.ForeignKey(Driver, on_delete=models.CASCADE)
     changed_by = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
     description = models.TextField(null=True, blank=True)
@@ -286,14 +341,14 @@ class DriverHistory(models.Model):
 
     def __str__(self):
         return self.driver.full_name
-    
+
     class Meta:
-        verbose_name = 'Driver History'
-        verbose_name_plural = 'Driver Histories'
-        db_table = 'driver_histories'
+        verbose_name = "Driver History"
+        verbose_name_plural = "Driver Histories"
+        db_table = "driver_histories"
 
 
-class VehicleHistory(models.Model): 
+class VehicleHistory(models.Model):
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE)
     changed_by = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
     description = models.TextField(null=True, blank=True)
@@ -301,11 +356,11 @@ class VehicleHistory(models.Model):
 
     def __str__(self):
         return self.vehicle.vehicle_type
-    
+
     class Meta:
-        verbose_name = 'Vehicle History'
-        verbose_name_plural = 'Vehicle Histories'
-        db_table = 'vehicle_histories'
+        verbose_name = "Vehicle History"
+        verbose_name_plural = "Vehicle Histories"
+        db_table = "vehicle_histories"
 
 
 class Deposit(models.Model):
@@ -325,9 +380,9 @@ class Deposit(models.Model):
         return f"Deposit for {self.driver.full_name}"
 
     class Meta:
-        verbose_name = 'Deposit'
-        verbose_name_plural = 'Deposits'
-        db_table = 'deposits'
+        verbose_name = "Deposit"
+        verbose_name_plural = "Deposits"
+        db_table = "deposits"
 
 
 class DepositHistory(models.Model):
@@ -340,7 +395,34 @@ class DepositHistory(models.Model):
         return f"Deposit history for {self.deposit.driver.full_name}"
 
     class Meta:
-        verbose_name = 'Deposit History'
-        verbose_name_plural = 'Deposit Histories'
-        db_table = 'deposit_histories'
+        verbose_name = "Deposit History"
+        verbose_name_plural = "Deposit Histories"
+        db_table = "deposit_histories"
 
+
+class ZipLocation(models.Model):
+    """The centre of a ZIP code as Google geocoded it for this server.
+
+    Every successful geocode_zip call (a ZIP typed on the Tracking page, the
+    Telegram check-in, drivers-nearby) is kept here, so a GPS position from the
+    driver app can be named after the nearest known ZIP without a paid reverse
+    geocode. See hiring.places.
+    """
+
+    zip_code = models.CharField(max_length=10, unique=True)
+    city = models.CharField(max_length=255, blank=True, default="")
+    state = models.CharField(max_length=55, blank=True, default="")
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return self.zip_code
+
+    class Meta:
+        verbose_name = "ZIP Location"
+        verbose_name_plural = "ZIP Locations"
+        db_table = "zip_locations"
+        indexes = [
+            models.Index(fields=["latitude", "longitude"], name="zip_locations_lat_lng")
+        ]

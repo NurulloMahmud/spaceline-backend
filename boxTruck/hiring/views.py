@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 from datetime import timedelta
 import json
 from django.utils import timezone
@@ -7,6 +8,7 @@ import copy
 from django.db import transaction
 from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
+from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import ValidationError
@@ -21,25 +23,74 @@ from hiring.haversine import haversine
 from mobile.models import DriverLocation
 from mobile.serializers import DriverLocationViewSerializer
 from users.pagination import CustomPagination
-from users.permissions import IsAdminUser, IsDispatch, IsDispatchManager, IsInternalService, IsUpdater
-from .utils import build_change_description, DEPOSIT_FK_DISPLAY, DRIVER_COMPANY_FK_DISPLAY, DRIVER_FK_DISPLAY, VEHICLE_FK_DISPLAY
+from users.permissions import (
+    IsAdminUser,
+    IsDispatch,
+    IsDispatchManager,
+    IsInternalService,
+    IsUpdater,
+)
+from .utils import (
+    build_change_description,
+    DEPOSIT_FK_DISPLAY,
+    DRIVER_COMPANY_FK_DISPLAY,
+    DRIVER_FK_DISPLAY,
+    VEHICLE_FK_DISPLAY,
+)
 from .pdf_generation import fill_w9, generate_contract
 from .document_ai import MAX_FILES_PER_REQUEST, build_prefill, parse_document
 from users.models import CustomUser, Team, Company
-from .models import (CompanyFile, Deposit, DepositHistory, Driver, DriverCompany, DriverFile, DriverHistory, DriverInviteLink,
-                     DriverStatus, Vehicle, VehicleEquipment, VehicleFile,
-                     CompanyHistory, VehicleHistory
-                     )
-from .serializers import (DriverAssignSerializer, UnassignedDriverSerializer, CompanyFileSerializer, DepositHistoryViewSerializer, DepositHistoryWriteSerializer, DepositViewSerializer, DepositWriteSerializer,
-                          DriverBulkCreateSerializer, DriverCompanyModalSerializer, DriverFileSerializer, DriverHistoryViewSerializer, DriverHistoryWriteSerializer, DriverListSerializer, DriverViewSerializer,
-                          DriverWriteSerializer, DriverStatusSerializer, NearbyDriverSerializer, VehicleDropdownSerializer, VehicleFileSerializer, VehicleHistoryViewSerializer, VehicleHistoryWriteSerializer,
-                          VehicleViewSerializer, VehicleWriteSerializer, TrackingDriverSerializer,
-                          DriverCompanyViewSerializer, DriverCompanyWriteSerializer,
-                          VehicleEquipmentSerializer, CompanyHistoryWriteSerializer, CompanyHistoryViewSerializer)
+from .models import (
+    CompanyFile,
+    Deposit,
+    DepositHistory,
+    Driver,
+    DriverCompany,
+    DriverFile,
+    DriverHistory,
+    DriverInviteLink,
+    DriverStatus,
+    Vehicle,
+    VehicleEquipment,
+    VehicleFile,
+    CompanyHistory,
+    VehicleHistory,
+)
+from .serializers import (
+    DriverAssignSerializer,
+    UnassignedDriverSerializer,
+    CompanyFileSerializer,
+    DepositHistoryViewSerializer,
+    DepositHistoryWriteSerializer,
+    DepositViewSerializer,
+    DepositWriteSerializer,
+    DriverBulkCreateSerializer,
+    DriverCompanyModalSerializer,
+    DriverFileSerializer,
+    DriverHistoryViewSerializer,
+    DriverHistoryWriteSerializer,
+    DriverListSerializer,
+    DriverViewSerializer,
+    DriverWriteSerializer,
+    DriverStatusSerializer,
+    NearbyDriverSerializer,
+    VehicleDropdownSerializer,
+    VehicleFileSerializer,
+    VehicleHistoryViewSerializer,
+    VehicleHistoryWriteSerializer,
+    VehicleViewSerializer,
+    VehicleWriteSerializer,
+    TrackingDriverSerializer,
+    DriverCompanyViewSerializer,
+    DriverCompanyWriteSerializer,
+    VehicleEquipmentSerializer,
+    CompanyHistoryWriteSerializer,
+    CompanyHistoryViewSerializer,
+)
 
 
 class DriverStatusViewSet(viewsets.ModelViewSet):
-    queryset = DriverStatus.objects.all().order_by('id')
+    queryset = DriverStatus.objects.all().order_by("id")
     serializer_class = DriverStatusSerializer
     permission_classes = [IsAuthenticated]
 
@@ -49,33 +100,47 @@ class DriverViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated | IsInternalService]
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['status', 'telegram_group_id', 'team', 'dispatcher']
-    search_fields = ['full_name', 'ssn', 'phone_number', 'email', 'driver_id', 'address', 'unit_number']
+    filterset_fields = ["status", "telegram_group_id", "team", "dispatcher"]
+    search_fields = [
+        "full_name",
+        "ssn",
+        "phone_number",
+        "email",
+        "driver_id",
+        "address",
+        "unit_number",
+    ]
 
     def get_serializer_class(self):
-        if self.request.method in ['POST', 'PATCH']:
+        if self.request.method in ["POST", "PATCH"]:
             return DriverWriteSerializer
         else:
             return DriverViewSerializer
 
     def get_queryset(self):
-        if self.request.headers.get('X-Internal-Secret'):
+        if self.request.headers.get("X-Internal-Secret"):
             qs = Driver.objects.all()
-            telegram_group_id = self.request.query_params.get('telegram_group_id')
+            telegram_group_id = self.request.query_params.get("telegram_group_id")
             if telegram_group_id:
                 qs = qs.filter(telegram_group_id=telegram_group_id)
             return qs
         return Driver.objects.all()
 
     def perform_create(self, serializer):
-        if self.request.user.department.name.lower() in ['management', 'developer', 'billing', 'payroll']:
+        if self.request.user.department.name.lower() in [
+            "management",
+            "developer",
+            "billing",
+            "payroll",
+        ]:
             serializer.save()
         else:
             serializer.save(referral_by=self.request.user)
-    
+
     def partial_update(self, request, *args, **kwargs):
         from .google_maps import geocode_zip
-        is_internal = bool(request.headers.get('X-Internal-Secret'))
+
+        is_internal = bool(request.headers.get("X-Internal-Secret"))
         driver = self.get_object()
         old_instance = copy.deepcopy(driver)
         old_instance.status = driver.status
@@ -90,18 +155,21 @@ class DriverViewSet(viewsets.ModelViewSet):
         updated_driver.manager
         updated_driver.referral_by
         updated_driver.driver_company
-        if 'current_zip' in request.data and request.data['current_zip']:
-            geo = geocode_zip(request.data['current_zip'])
+        if "current_zip" in request.data and request.data["current_zip"]:
+            geo = geocode_zip(request.data["current_zip"])
             if geo:
                 Driver.objects.filter(pk=updated_driver.pk).update(
-                    current_city=geo['city'],
-                    current_state=geo['state'],
-                    current_address=geo['address'],
-                    current_longitude=geo['lng'],
-                    current_latitude=geo['lat'],
+                    current_city=geo["city"],
+                    current_state=geo["state"],
+                    current_address=geo["address"],
+                    current_longitude=geo["lng"],
+                    current_latitude=geo["lat"],
                 )
                 updated_driver.refresh_from_db()
-        if any(k in request.data for k in ('current_zip', 'current_latitude', 'current_longitude')):
+        if any(
+            k in request.data
+            for k in ("current_zip", "current_latitude", "current_longitude")
+        ):
             Driver.objects.filter(pk=updated_driver.pk).update(
                 current_location_updated_at=timezone.now(),
             )
@@ -123,14 +191,22 @@ class DriverViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         from billing.models import Load
+
         driver = self.get_object()
         if Load.objects.filter(driver=driver).exists():
-            raise ValidationError({"detail": "Cannot delete driver: driver has loads on file."})
+            raise ValidationError(
+                {"detail": "Cannot delete driver: driver has loads on file."}
+            )
         with transaction.atomic():
             driver.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    @action(detail=True, methods=['post'], url_path='invite-app', permission_classes=[IsAuthenticated])
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="invite-app",
+        permission_classes=[IsAuthenticated],
+    )
     def invite_app(self, request, pk=None):
         """
         Invite the driver to the driver app through the Driver Hub.
@@ -139,51 +215,94 @@ class DriverViewSet(viewsets.ModelViewSet):
         with the invite id and whether the driver already works with us
         (`status: active`), both kept on the driver so the Drivers page can
         show Connected / Invited / Declined.
+
+        Invites go only to drivers with a driver-app account: for any other
+        email the hub answers 409 `not_registered`, passed on as is, and
+        nothing on the driver changes.
         """
+        from hub.payouts import push_driver_payouts_later
+        from hub.registry import forget
         from hub.services import driver_hub
 
         driver = self.get_object()
-        email = (request.data.get('email') or driver.email or '').strip()
+        email = (request.data.get("email") or driver.email or "").strip()
         if not email:
-            return Response({'error': 'The driver has no email address.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "The driver has no email address."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not driver_hub.configured():
-            return Response({'error': 'The driver app is not configured on this server.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response(
+                {"error": "The driver app is not configured on this server."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         user = request.user
-        invited_by = f'{user.first_name} {user.last_name}'.strip() or user.username
+        invited_by = f"{user.first_name} {user.last_name}".strip() or user.username
         try:
             result = driver_hub.invite(email, invited_by) or {}
         except driver_hub.DriverHubError as exc:
-            code = status.HTTP_502_BAD_GATEWAY if exc.status_code >= 500 else status.HTTP_400_BAD_REQUEST
-            return Response({'error': f'The driver app did not accept the invite: {exc.detail}'}, status=code)
+            if exc.status_code == 409 and exc.code == driver_hub.NOT_REGISTERED:
+                return Response(
+                    {"error": exc.detail, "code": driver_hub.NOT_REGISTERED},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            code = (
+                status.HTTP_502_BAD_GATEWAY
+                if exc.status_code >= 500
+                else status.HTTP_400_BAD_REQUEST
+            )
+            return Response(
+                {"error": f"The driver app did not accept the invite: {exc.detail}"},
+                status=code,
+            )
 
+        linked_before = driver.hub_driver_id
         driver.email = email
-        driver.hub_invite_id = result.get('invite_id') or driver.hub_invite_id
-        driver.hub_invite_status = result.get('status') or 'pending'
+        driver.hub_invite_id = result.get("invite_id") or driver.hub_invite_id
+        driver.hub_invite_status = result.get("status") or "pending"
         driver.hub_invited_at = timezone.now()
-        hub_driver_id = result.get('hub_driver_id')
-        if driver.hub_invite_status == 'active' and hub_driver_id:
-            if not Driver.objects.filter(hub_driver_id=hub_driver_id).exclude(pk=driver.pk).exists():
+        hub_driver_id = result.get("hub_driver_id")
+        if driver.hub_invite_status == "active" and hub_driver_id:
+            if (
+                not Driver.objects.filter(hub_driver_id=hub_driver_id)
+                .exclude(pk=driver.pk)
+                .exists()
+            ):
                 driver.hub_driver_id = hub_driver_id
                 try:
                     driver_hub.link_driver(hub_driver_id, driver.id)
                 except driver_hub.DriverHubError:
                     pass
-        driver.save(update_fields=['email', 'hub_invite_id', 'hub_invite_status', 'hub_invited_at', 'hub_driver_id'])
+        driver.save(
+            update_fields=[
+                "email",
+                "hub_invite_id",
+                "hub_invite_status",
+                "hub_invited_at",
+                "hub_driver_id",
+            ]
+        )
+        if driver.hub_driver_id and driver.hub_driver_id != linked_before:
+            # Linked at once: the app shows the payouts the driver has here.
+            push_driver_payouts_later(driver.pk)
         DriverHistory.objects.create(
             driver=driver,
             changed_by=user,
-            description=f'Invited to the driver app at {email}',
+            description=f"Invited to the driver app at {email}",
         )
-        return Response({
-            **result,
-            'driver_id': driver.id,
-            'email': email,
-            'hub_status': driver.hub_status,
-            'hub_invite_status': driver.hub_invite_status,
-            'hub_invited_at': driver.hub_invited_at,
-            'hub_driver_id': driver.hub_driver_id,
-        })
+        forget(email)
+        return Response(
+            {
+                **result,
+                "driver_id": driver.id,
+                "email": email,
+                "hub_status": driver.hub_status,
+                "hub_invite_status": driver.hub_invite_status,
+                "hub_invited_at": driver.hub_invited_at,
+                "hub_driver_id": driver.hub_driver_id,
+            }
+        )
 
 
 class DriverDropdownAPIView(generics.ListAPIView):
@@ -200,8 +319,8 @@ class DriverFileViewSet(viewsets.ModelViewSet):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def get_queryset(self):
-        qs = DriverFile.objects.select_related('driver')
-        driver_id = self.request.query_params.get('driver')
+        qs = DriverFile.objects.select_related("driver")
+        driver_id = self.request.query_params.get("driver")
         if driver_id:
             qs = qs.filter(driver_id=driver_id)
         return qs
@@ -213,8 +332,8 @@ class CompanyFileViewSet(viewsets.ModelViewSet):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def get_queryset(self):
-        qs = CompanyFile.objects.select_related('company')
-        company_id = self.request.query_params.get('company')
+        qs = CompanyFile.objects.select_related("company")
+        company_id = self.request.query_params.get("company")
         if company_id:
             qs = qs.filter(company_id=company_id)
         return qs
@@ -226,8 +345,8 @@ class VehicleFileViewSet(viewsets.ModelViewSet):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def get_queryset(self):
-        qs = VehicleFile.objects.select_related('vehicle')
-        vehicle_id = self.request.query_params.get('vehicle')
+        qs = VehicleFile.objects.select_related("vehicle")
+        vehicle_id = self.request.query_params.get("vehicle")
         if vehicle_id:
             qs = qs.filter(vehicle_id=vehicle_id)
         return qs
@@ -245,18 +364,18 @@ class VehicleViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['driver__status']
-    search_fields = ['driver__full_name', 'make', 'model', 'vin', 'note']
+    filterset_fields = ["driver__status"]
+    search_fields = ["driver__full_name", "make", "model", "vin", "note"]
 
     def get_serializer_class(self):
-        if self.request.method in ['POST', 'PATCH']:
+        if self.request.method in ["POST", "PATCH"]:
             return VehicleWriteSerializer
         else:
             return VehicleViewSerializer
-        
+
     def get_queryset(self):
         return Vehicle.objects.all()
-    
+
     def partial_update(self, request, *args, **kwargs):
         vehicle = self.get_object()
         old_instance = copy.deepcopy(vehicle)
@@ -288,11 +407,11 @@ class DriverCompanyViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['drivers']
-    search_fields = ['name', 'mc', 'business_type']
+    filterset_fields = ["drivers"]
+    search_fields = ["name", "mc", "business_type"]
 
     def get_serializer_class(self):
-        if self.request.method in ['POST', 'PATCH']:
+        if self.request.method in ["POST", "PATCH"]:
             return DriverCompanyWriteSerializer
         else:
             return DriverCompanyViewSerializer
@@ -303,7 +422,9 @@ class DriverCompanyViewSet(viewsets.ModelViewSet):
     def partial_update(self, request, *args, **kwargs):
         driver_company = self.get_object()
         old_instance = copy.deepcopy(driver_company)
-        serializer = self.get_serializer(driver_company, data=request.data, partial=True)
+        serializer = self.get_serializer(
+            driver_company, data=request.data, partial=True
+        )
         serializer.is_valid(raise_exception=True)
         updated_company = serializer.save()
         updated_company.refresh_from_db()
@@ -327,7 +448,7 @@ class DriverCompanyViewSet(viewsets.ModelViewSet):
         # first so that's never an accident.
         if instance.drivers.exists():
             raise ValidationError(
-                'This company still has drivers attached. Detach them before deleting it.'
+                "This company still has drivers attached. Detach them before deleting it."
             )
         instance.delete()
 
@@ -336,10 +457,10 @@ class DepositViewSet(viewsets.ModelViewSet):
     queryset = Deposit.objects.all()
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['driver']
+    filterset_fields = ["driver"]
 
     def get_serializer_class(self):
-        if self.request.method in ['POST', 'PATCH']:
+        if self.request.method in ["POST", "PATCH"]:
             return DepositWriteSerializer
         else:
             return DepositViewSerializer
@@ -377,49 +498,46 @@ class DriverListView(generics.ListAPIView):
     pagination_class = CustomPagination
 
     ALLOWED_SORT_FIELDS = {
-        'created_at',
-        'full_name',
-        'hired_date',
-        'terminated_date',
-        'dob',
+        "created_at",
+        "full_name",
+        "hired_date",
+        "terminated_date",
+        "dob",
     }
 
     def get_queryset(self):
         qs = Driver.objects.all()
 
-        status_id = self.request.query_params.get('status')
-        search = self.request.query_params.get('search')
-        manager_id = self.request.query_params.get('manager')
+        status_id = self.request.query_params.get("status")
+        search = self.request.query_params.get("search")
+        manager_id = self.request.query_params.get("manager")
         if manager_id:
             qs = qs.filter(manager_id=manager_id)
         if status_id:
             qs = qs.filter(status_id=status_id)
         if search:
             qs = qs.filter(
-                Q(full_name__icontains=search) |
-                Q(phone_number__icontains=search) |
-                Q(email__icontains=search)
+                Q(full_name__icontains=search)
+                | Q(phone_number__icontains=search)
+                | Q(email__icontains=search)
             )
 
-        sort = self.request.query_params.get('sort', '-created_at')
-        sort_field = sort.lstrip('-')
+        sort = self.request.query_params.get("sort", "-created_at")
+        sort_field = sort.lstrip("-")
         if sort_field in self.ALLOWED_SORT_FIELDS:
             qs = qs.order_by(sort)
         else:
-            qs = qs.order_by('-created_at')
-        return qs.select_related(
-            'status',
-            'manager'
-        )
+            qs = qs.order_by("-created_at")
+        return qs.select_related("status", "manager")
 
 
 class DriverCompanyModalView(views.APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        driver_id = request.query_params.get('driver')
+        driver_id = request.query_params.get("driver")
         if not driver_id:
-            return Response({'detail': 'driver query param is required.'}, status=400)
+            return Response({"detail": "driver query param is required."}, status=400)
 
         driver = get_object_or_404(Driver, pk=driver_id)
         # Imported and quick-created drivers have no company yet, but they are
@@ -429,21 +547,21 @@ class DriverCompanyModalView(views.APIView):
 
         company = get_object_or_404(
             DriverCompany.objects.prefetch_related(
-                'drivers__status',
-                'drivers__vehicles',
-                'companyfile_set',
+                "drivers__status",
+                "drivers__vehicles",
+                "companyfile_set",
             ),
-            pk=driver.driver_company_id
+            pk=driver.driver_company_id,
         )
         serializer = DriverCompanyModalSerializer(company)
         return Response(serializer.data)
-    
+
 
 class GenerateInviteLinkView(views.APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        manager_id = request.data.get('manager')
+        manager_id = request.data.get("manager")
         manager = None
         if manager_id:
             manager = get_object_or_404(CustomUser, id=manager_id)
@@ -451,24 +569,25 @@ class GenerateInviteLinkView(views.APIView):
         invite = DriverInviteLink.objects.create(
             created_by=request.user,
             manager=manager,
-            expires_at=timezone.now() + timedelta(days=7)
+            expires_at=timezone.now() + timedelta(days=7),
         )
         link = f"https://spaceline.boxtruckmanage.com/driver-form/?token={invite.token}"
-        return Response({'link': link}, status=201)
+        return Response({"link": link}, status=201)
 
 
-SIGN_FILE_NAMES = ('W-9 (Generated)', 'Contractor Agreement (Generated)')
+SIGN_FILE_NAMES = ("W-9 (Generated)", "Contractor Agreement (Generated)")
 
 
 class GenerateDriverSignLinkView(views.APIView):
     """Staff-facing: mint a one-shot, unauthenticated link for an existing
     driver to review and sign their W-9 and contractor agreement."""
+
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        driver_id = request.data.get('driver_id')
+        driver_id = request.data.get("driver_id")
         if not driver_id:
-            return Response({'detail': 'driver_id is required.'}, status=400)
+            return Response({"detail": "driver_id is required."}, status=400)
 
         driver = get_object_or_404(Driver, id=driver_id)
 
@@ -478,72 +597,85 @@ class GenerateDriverSignLinkView(views.APIView):
             expires_at=timezone.now() + timedelta(days=7),
         )
         link = f"https://spaceline.boxtruckmanage.com/driver-sign/?token={invite.token}"
-        return Response({'link': link}, status=201)
+        return Response({"link": link}, status=201)
 
 
 class DriverSignInfoView(views.APIView):
     """Public, token-based. Curated driver/vehicle/company info plus the
     W-9 and contract files, for the signing page — deliberately excludes
     SSN and banking (Deposit) fields since this endpoint carries no auth."""
+
     permission_classes = []
 
     def get(self, request):
-        token = request.query_params.get('token')
+        token = request.query_params.get("token")
         if not token:
-            return Response({'detail': 'Token is required.'}, status=400)
+            return Response({"detail": "Token is required."}, status=400)
 
         try:
-            invite = DriverInviteLink.objects.select_related('driver').get(token=token)
+            invite = DriverInviteLink.objects.select_related("driver").get(token=token)
         except DriverInviteLink.DoesNotExist:
-            return Response({'detail': 'Invalid token.'}, status=400)
+            return Response({"detail": "Invalid token."}, status=400)
 
         if not invite.is_valid():
-            return Response({'detail': 'Link has expired or is inactive.'}, status=400)
+            return Response({"detail": "Link has expired or is inactive."}, status=400)
 
         driver = invite.driver
         if not driver:
-            return Response({'detail': 'This link is not a document-signing link.'}, status=400)
+            return Response(
+                {"detail": "This link is not a document-signing link."}, status=400
+            )
 
         vehicle = driver.vehicles.first()
         driver_company = driver.driver_company
         sign_files = DriverFile.objects.filter(driver=driver, name__in=SIGN_FILE_NAMES)
 
-        return Response({
-            'driver': {
-                'id': driver.id,
-                'full_name': driver.full_name,
-                'phone_number': driver.phone_number,
-                'email': driver.email,
-                'address': driver.address,
-                'unit_number': driver.unit_number,
-                'city': driver.city,
-                'state': driver.state,
-                'zip_code': driver.zip_code,
-            },
-            'vehicle': {
-                'id': vehicle.id,
-                'vehicle_type': vehicle.vehicle_type,
-                'make': vehicle.make,
-                'model': vehicle.model,
-                'year': vehicle.year,
-            } if vehicle else None,
-            'company': {
-                'name': driver_company.name,
-                'mc': driver_company.mc,
-                'address': driver_company.address,
-                'city': driver_company.city,
-                'state': driver_company.state,
-                'zipcode': driver_company.zipcode,
-            } if driver_company else None,
-            'files': [
-                {'id': f.id, 'name': f.name, 'url': f.document.url}
-                for f in sign_files
-            ],
-        })
+        return Response(
+            {
+                "driver": {
+                    "id": driver.id,
+                    "full_name": driver.full_name,
+                    "phone_number": driver.phone_number,
+                    "email": driver.email,
+                    "address": driver.address,
+                    "unit_number": driver.unit_number,
+                    "city": driver.city,
+                    "state": driver.state,
+                    "zip_code": driver.zip_code,
+                },
+                "vehicle": (
+                    {
+                        "id": vehicle.id,
+                        "vehicle_type": vehicle.vehicle_type,
+                        "make": vehicle.make,
+                        "model": vehicle.model,
+                        "year": vehicle.year,
+                    }
+                    if vehicle
+                    else None
+                ),
+                "company": (
+                    {
+                        "name": driver_company.name,
+                        "mc": driver_company.mc,
+                        "address": driver_company.address,
+                        "city": driver_company.city,
+                        "state": driver_company.state,
+                        "zipcode": driver_company.zipcode,
+                    }
+                    if driver_company
+                    else None
+                ),
+                "files": [
+                    {"id": f.id, "name": f.name, "url": f.document.url}
+                    for f in sign_files
+                ],
+            }
+        )
 
 
 def mutable_request_data(data):
-    copied = QueryDict('', mutable=True)
+    copied = QueryDict("", mutable=True)
     for key in data:
         copied.setlist(key, data.getlist(key))
     return copied
@@ -554,18 +686,18 @@ def mutable_request_data(data):
 # DriverBulkCreateSerializer already uses, so a frontend that moves between
 # the two flows keeps the same field names.
 INVITE_FILE_GROUPS = (
-    ('driver', 'driver_files', 'driver_file_names'),
-    ('company', 'company_files', 'company_file_names'),
-    ('vehicle', 'vehicle_files', 'vehicle_file_names'),
+    ("driver", "driver_files", "driver_file_names"),
+    ("company", "company_files", "company_file_names"),
+    ("vehicle", "vehicle_files", "vehicle_file_names"),
 )
 
 
 def form_list(data, key):
     """Repeated keys: a list under multipart, already a list under JSON."""
-    if hasattr(data, 'getlist'):
+    if hasattr(data, "getlist"):
         return data.getlist(key)
     value = data.get(key)
-    if value in (None, ''):
+    if value in (None, ""):
         return []
     return value if isinstance(value, list) else [value]
 
@@ -573,7 +705,7 @@ def form_list(data, key):
 def form_bool(value):
     """Multipart has no booleans — 'false' is a non-empty string, i.e. True."""
     if isinstance(value, str):
-        return value.strip().lower() in ('true', '1', 'yes', 'on')
+        return value.strip().lower() in ("true", "1", "yes", "on")
     return bool(value)
 
 
@@ -604,7 +736,7 @@ def collect_invite_uploads(request):
         files = request.FILES.getlist(files_key)
         names = [str(name) for name in form_list(request.data, names_key)]
         if len(files) != len(names):
-            return None, f'{files_key} and {names_key} must have the same count.'
+            return None, f"{files_key} and {names_key} must have the same count."
         uploads[group] = list(zip(files, names))
     return uploads, None
 
@@ -618,13 +750,15 @@ class DriverBulkCreateHRView(views.APIView):
         #     return Response({'detail': 'Not allowed.'}, status=403)
 
         data = mutable_request_data(request.data)
-        pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
-        data['status'] = pending_status.id
-        data['referral_by'] = request.user.id
+        pending_status = get_object_or_404(DriverStatus, name__iexact="pending")
+        data["status"] = pending_status.id
+        data["referral_by"] = request.user.id
         serializer = DriverBulkCreateSerializer(data=data)
         if serializer.is_valid():
             driver = serializer.save()
-            return Response({'detail': 'Driver created.', 'driver_id': driver.id}, status=201)
+            return Response(
+                {"detail": "Driver created.", "driver_id": driver.id}, status=201
+            )
         return Response(serializer.errors, status=400)
 
 
@@ -633,36 +767,38 @@ class DriverBulkCreateInviteView(views.APIView):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request):
-        token = request.query_params.get('token')
+        token = request.query_params.get("token")
         if not token:
-            return Response({'detail': 'Token is required.'}, status=400)
+            return Response({"detail": "Token is required."}, status=400)
 
         try:
-            invite = DriverInviteLink.objects.select_related(
-                'created_by'
-            ).get(token=token)
+            invite = DriverInviteLink.objects.select_related("created_by").get(
+                token=token
+            )
         except DriverInviteLink.DoesNotExist:
-            return Response({'detail': 'Invalid token.'}, status=400)
+            return Response({"detail": "Invalid token."}, status=400)
 
         if not invite.is_valid():
-            return Response({'detail': 'Link has expired or is inactive.'}, status=400)
+            return Response({"detail": "Link has expired or is inactive."}, status=400)
         data = mutable_request_data(request.data)
         # driver_company links to an existing business by internal id — a
         # public applicant has no business knowing those ids, so this is a
         # staff-only capability (see DriverBulkCreateHRView) and is always
         # stripped here regardless of what's submitted.
-        data.pop('driver_company', None)
-        pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
-        data['status'] = pending_status.id
-        data['referral_by'] = invite.created_by.id
+        data.pop("driver_company", None)
+        pending_status = get_object_or_404(DriverStatus, name__iexact="pending")
+        data["status"] = pending_status.id
+        data["referral_by"] = invite.created_by.id
         if invite.manager_id:
-            data['manager'] = invite.manager_id
+            data["manager"] = invite.manager_id
         serializer = DriverBulkCreateSerializer(data=data)
         if serializer.is_valid():
             driver = serializer.save()
             invite.is_active = False
-            invite.save(update_fields=['is_active'])
-            return Response({'detail': 'Driver created.', 'driver_id': driver.id}, status=201)
+            invite.save(update_fields=["is_active"])
+            return Response(
+                {"detail": "Driver created.", "driver_id": driver.id}, status=201
+            )
         return Response(serializer.errors, status=400)
 
 
@@ -670,11 +806,13 @@ class DriverExistsCheckView(views.APIView):
     permission_classes = []
 
     def post(self, request):
-        email = (request.data.get('email') or '').strip()
-        phone_number = (request.data.get('phone_number') or '').strip()
+        email = (request.data.get("email") or "").strip()
+        phone_number = (request.data.get("phone_number") or "").strip()
 
         if not email and not phone_number:
-            return Response({'detail': 'email or phone_number is required.'}, status=400)
+            return Response(
+                {"detail": "email or phone_number is required."}, status=400
+            )
 
         email_exists = False
         if email:
@@ -684,7 +822,9 @@ class DriverExistsCheckView(views.APIView):
         if phone_number:
             phone_exists = Driver.objects.filter(phone_number=phone_number).exists()
 
-        return Response({'email_exists': email_exists, 'phone_exists': phone_exists}, status=200)
+        return Response(
+            {"email_exists": email_exists, "phone_exists": phone_exists}, status=200
+        )
 
 
 class DriverInviteSubmitView(views.APIView):
@@ -704,76 +844,83 @@ class DriverInviteSubmitView(views.APIView):
     multipart the `driver` and `vehicle` objects come across as JSON strings;
     a plain JSON body (no files) keeps working exactly as before.
     """
+
     permission_classes = []
     parser_classes = [parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request):
-        token = request.query_params.get('token')
+        token = request.query_params.get("token")
         if not token:
-            return Response({'detail': 'Token is required.'}, status=400)
+            return Response({"detail": "Token is required."}, status=400)
 
         try:
-            invite = DriverInviteLink.objects.select_related('created_by').get(token=token)
+            invite = DriverInviteLink.objects.select_related("created_by").get(
+                token=token
+            )
         except DriverInviteLink.DoesNotExist:
-            return Response({'detail': 'Invalid token.'}, status=400)
+            return Response({"detail": "Invalid token."}, status=400)
 
         if not invite.is_valid():
-            return Response({'detail': 'Link has expired or is inactive.'}, status=400)
+            return Response({"detail": "Link has expired or is inactive."}, status=400)
 
         # A link carrying a driver has already done its registration (or was
         # minted as a sign-link for an existing driver). Registering again
         # would create a second driver from one invite.
         if invite.driver_id:
             return Response(
-                {'detail': 'This link has already been used to register a driver.'},
+                {"detail": "This link has already been used to register a driver."},
                 status=409,
             )
 
         company = Company.current()
         if not company.contract_template_text:
             return Response(
-                {'detail': f"Company '{company.name}' has no contract_template_text configured."},
+                {
+                    "detail": f"Company '{company.name}' has no contract_template_text configured."
+                },
                 status=422,
             )
 
         data = request.data
-        driver_data = nested_object(data, 'driver')
-        vehicle_data = nested_object(data, 'vehicle')
+        driver_data = nested_object(data, "driver")
+        vehicle_data = nested_object(data, "vehicle")
 
         # Paired up before anything is created, so a miscounted upload is a
         # plain 400 rather than a driver saved with half its documents.
         uploads, upload_error = collect_invite_uploads(request)
         if upload_error:
-            return Response({'detail': upload_error}, status=400)
+            return Response({"detail": upload_error}, status=400)
 
-        def pick(*sources_and_keys, default=''):
+        def pick(*sources_and_keys, default=""):
             for source, key in sources_and_keys:
                 value = source.get(key)
-                if value not in (None, ''):
+                if value not in (None, ""):
                     return value
             return default
 
-        full_name = pick((driver_data, 'driver_full_name'), (data, 'driver_full_name'))
-        phone_number = pick((driver_data, 'phone'), (data, 'phone'))
-        company_name = data.get('company_name') or ''
+        full_name = pick((driver_data, "driver_full_name"), (data, "driver_full_name"))
+        phone_number = pick((driver_data, "phone"), (data, "phone"))
+        company_name = data.get("company_name") or ""
 
         if not full_name or not company_name:
             return Response(
-                {'detail': 'driver_full_name and company_name are required.'}, status=400
+                {"detail": "driver_full_name and company_name are required."},
+                status=400,
             )
 
         if phone_number and Driver.objects.filter(phone_number=phone_number).exists():
             return Response(
-                {'detail': 'A driver with this phone number already exists.'}, status=400
+                {"detail": "A driver with this phone number already exists."},
+                status=400,
             )
 
-        pending_status = get_object_or_404(DriverStatus, name__iexact='pending')
+        pending_status = get_object_or_404(DriverStatus, name__iexact="pending")
 
-        dock = vehicle_data.get('dock') or form_list(data, 'dock')
+        dock = vehicle_data.get("dock") or form_list(data, "dock")
         if isinstance(dock, list):
-            dock = ', '.join(str(d) for d in dock if d)
+            dock = ", ".join(str(d) for d in dock if d)
 
-        equipment = vehicle_data.get('equipment') or form_list(data, 'equipment')
+        equipment = vehicle_data.get("equipment") or form_list(data, "equipment")
         if not isinstance(equipment, list):
             equipment = [equipment]
 
@@ -781,94 +928,118 @@ class DriverInviteSubmitView(views.APIView):
             driver = Driver.objects.create(
                 full_name=full_name,
                 phone_number=phone_number,
-                emergency_phone_number=data.get('company_emergency_phone') or '',
+                emergency_phone_number=data.get("company_emergency_phone") or "",
                 status=pending_status,
                 referral_by=invite.created_by,
                 manager=invite.manager,
-                tax_exempt=form_bool(data.get('tax_exempt')),
-                payee_code=data.get('payee_code') or '',
-                fatca_reporting_code=data.get('fatca_reporting_code') or '',
+                tax_exempt=form_bool(data.get("tax_exempt")),
+                payee_code=data.get("payee_code") or "",
+                fatca_reporting_code=data.get("fatca_reporting_code") or "",
             )
             driver_company = DriverCompany.objects.create(
                 name=company_name,
-                mc=data.get('company_mc') or '',
-                employer_id=data.get('company_employer_id') or '',
-                phone_number=data.get('company_phone') or '',
-                business_as=data.get('company_doing_business') or '',
-                business_type=str(data.get('company_type') or ''),
-                zipcode=pick((data, 'company_zip'), (data, 'company_zipcode')),
-                state=data.get('company_state') or '',
-                city=data.get('company_city') or '',
-                address=data.get('company_address') or '',
-                email=data.get('company_email') or None,
-                applicant_first_name=data.get('company_applicant_first_name') or '',
-                applicant_last_name=data.get('company_applicant_last_name') or '',
+                mc=data.get("company_mc") or "",
+                employer_id=data.get("company_employer_id") or "",
+                phone_number=data.get("company_phone") or "",
+                business_as=data.get("company_doing_business") or "",
+                business_type=str(data.get("company_type") or ""),
+                zipcode=pick((data, "company_zip"), (data, "company_zipcode")),
+                state=data.get("company_state") or "",
+                city=data.get("company_city") or "",
+                address=data.get("company_address") or "",
+                email=data.get("company_email") or None,
+                applicant_first_name=data.get("company_applicant_first_name") or "",
+                applicant_last_name=data.get("company_applicant_last_name") or "",
             )
             driver.driver_company = driver_company
-            driver.save(update_fields=['driver_company'])
+            driver.save(update_fields=["driver_company"])
             vehicle = Vehicle.objects.create(
                 driver=driver,
-                make=vehicle_data.get('make') or '',
-                model=vehicle_data.get('model') or '',
-                length=vehicle_data.get('useful_cargo_length') or None,
-                width=vehicle_data.get('useful_cargo_width') or None,
-                height=vehicle_data.get('useful_cargo_height') or None,
-                gvw=vehicle_data.get('GVW_lbs') or 0,
-                payload=vehicle_data.get('payload_lbs') or 0,
-                door_open_width=vehicle_data.get('door_width') or None,
-                door_open_height=vehicle_data.get('door_height') or None,
-                dock_height=dock or '',
+                make=vehicle_data.get("make") or "",
+                model=vehicle_data.get("model") or "",
+                length=vehicle_data.get("useful_cargo_length") or None,
+                width=vehicle_data.get("useful_cargo_width") or None,
+                height=vehicle_data.get("useful_cargo_height") or None,
+                gvw=vehicle_data.get("GVW_lbs") or 0,
+                payload=vehicle_data.get("payload_lbs") or 0,
+                door_open_width=vehicle_data.get("door_width") or None,
+                door_open_height=vehicle_data.get("door_height") or None,
+                dock_height=dock or "",
             )
-            VehicleEquipment.objects.bulk_create([
-                VehicleEquipment(vehicle=vehicle, name=str(name))
-                for name in equipment if name
-            ])
+            VehicleEquipment.objects.bulk_create(
+                [
+                    VehicleEquipment(vehicle=vehicle, name=str(name))
+                    for name in equipment
+                    if name
+                ]
+            )
 
-            uploaded_driver_files = DriverFile.objects.bulk_create([
-                DriverFile(driver=driver, name=name, document=file)
-                for file, name in uploads['driver']
-            ])
-            uploaded_company_files = CompanyFile.objects.bulk_create([
-                CompanyFile(company=driver_company, name=name, document=file)
-                for file, name in uploads['company']
-            ])
-            uploaded_vehicle_files = VehicleFile.objects.bulk_create([
-                VehicleFile(vehicle=vehicle, name=name, document=file)
-                for file, name in uploads['vehicle']
-            ])
+            uploaded_driver_files = DriverFile.objects.bulk_create(
+                [
+                    DriverFile(driver=driver, name=name, document=file)
+                    for file, name in uploads["driver"]
+                ]
+            )
+            uploaded_company_files = CompanyFile.objects.bulk_create(
+                [
+                    CompanyFile(company=driver_company, name=name, document=file)
+                    for file, name in uploads["company"]
+                ]
+            )
+            uploaded_vehicle_files = VehicleFile.objects.bulk_create(
+                [
+                    VehicleFile(vehicle=vehicle, name=name, document=file)
+                    for file, name in uploads["vehicle"]
+                ]
+            )
 
-            w9_bytes = fill_w9({
-                'company_name': company_name,
-                'company_doing_business': data.get('company_doing_business') or '',
-                'company_address': data.get('company_address') or '',
-                'company_city': data.get('company_city') or '',
-                'company_state': data.get('company_state') or '',
-                'company_zip': driver_company.zipcode,
-                'company_employer_id': data.get('company_employer_id') or '',
-                'company_type': data.get('company_type') or '',
-                'payee_code': driver.payee_code,
-                'fatca_reporting_code': driver.fatca_reporting_code,
-            }).getvalue()
+            w9_bytes = fill_w9(
+                {
+                    "company_name": company_name,
+                    "company_doing_business": data.get("company_doing_business") or "",
+                    "company_address": data.get("company_address") or "",
+                    "company_city": data.get("company_city") or "",
+                    "company_state": data.get("company_state") or "",
+                    "company_zip": driver_company.zipcode,
+                    "company_employer_id": data.get("company_employer_id") or "",
+                    "company_type": data.get("company_type") or "",
+                    "payee_code": driver.payee_code,
+                    "fatca_reporting_code": driver.fatca_reporting_code,
+                }
+            ).getvalue()
 
-            contractor_address = ', '.join(
-                part for part in [
-                    data.get('company_address'), data.get('company_city'),
-                    data.get('company_state'), driver_company.zipcode,
-                ] if part
+            contractor_address = ", ".join(
+                part
+                for part in [
+                    data.get("company_address"),
+                    data.get("company_city"),
+                    data.get("company_state"),
+                    driver_company.zipcode,
+                ]
+                if part
             )
             today = timezone.now()
-            contract_bytes = generate_contract(company, {
-                'effective_day': today.strftime('%d'),
-                'effective_month': today.strftime('%B'),
-                'effective_year': today.strftime('%y'),
-                'contractor_name': company_name,
-                'contractor_address': contractor_address,
-                'contractor_email': data.get('company_email') or '',
-            }).getvalue()
-            w9_file = DriverFile(driver=driver, name='W-9 (Generated)')
-            w9_file.document.save(f'w9_{driver.id}.pdf', ContentFile(w9_bytes), save=True)
-            contract_file = DriverFile(driver=driver, name='Contractor Agreement (Generated)')
-            contract_file.document.save(f'contract_{driver.id}.pdf', ContentFile(contract_bytes), save=True)
+            contract_bytes = generate_contract(
+                company,
+                {
+                    "effective_day": today.strftime("%d"),
+                    "effective_month": today.strftime("%B"),
+                    "effective_year": today.strftime("%y"),
+                    "contractor_name": company_name,
+                    "contractor_address": contractor_address,
+                    "contractor_email": data.get("company_email") or "",
+                },
+            ).getvalue()
+            w9_file = DriverFile(driver=driver, name="W-9 (Generated)")
+            w9_file.document.save(
+                f"w9_{driver.id}.pdf", ContentFile(w9_bytes), save=True
+            )
+            contract_file = DriverFile(
+                driver=driver, name="Contractor Agreement (Generated)"
+            )
+            contract_file.document.save(
+                f"contract_{driver.id}.pdf", ContentFile(contract_bytes), save=True
+            )
 
             # The link deliberately stays active. Registration is only half the
             # flow: the driver still has to sign the two PDFs generated above
@@ -880,24 +1051,25 @@ class DriverInviteSubmitView(views.APIView):
             # it being re-registered — spent for this step, still usable for the
             # next. The upload endpoint is what finally deactivates it.
             invite.driver = driver
-            invite.save(update_fields=['driver'])
+            invite.save(update_fields=["driver"])
 
         def described(files):
-            return [
-                {'id': f.id, 'name': f.name, 'url': f.document.url} for f in files
-            ]
+            return [{"id": f.id, "name": f.name, "url": f.document.url} for f in files]
 
-        return Response({
-            'detail': 'Driver created.',
-            'driver_id': driver.id,
-            'w9_url': w9_file.document.url,
-            'contract_url': contract_file.document.url,
-            'files': {
-                'driver': described(uploaded_driver_files),
-                'company': described(uploaded_company_files),
-                'vehicle': described(uploaded_vehicle_files),
+        return Response(
+            {
+                "detail": "Driver created.",
+                "driver_id": driver.id,
+                "w9_url": w9_file.document.url,
+                "contract_url": contract_file.document.url,
+                "files": {
+                    "driver": described(uploaded_driver_files),
+                    "company": described(uploaded_company_files),
+                    "vehicle": described(uploaded_vehicle_files),
+                },
             },
-        }, status=201)
+            status=201,
+        )
 
 
 class DriverInviteDocumentUploadView(views.APIView):
@@ -905,17 +1077,17 @@ class DriverInviteDocumentUploadView(views.APIView):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request):
-        token = request.query_params.get('token')
+        token = request.query_params.get("token")
         if not token:
-            return Response({'detail': 'Token is required.'}, status=400)
+            return Response({"detail": "Token is required."}, status=400)
 
         try:
-            invite = DriverInviteLink.objects.select_related('driver').get(token=token)
+            invite = DriverInviteLink.objects.select_related("driver").get(token=token)
         except DriverInviteLink.DoesNotExist:
-            return Response({'detail': 'Invalid token.'}, status=400)
+            return Response({"detail": "Invalid token."}, status=400)
 
         if not invite.is_valid():
-            return Response({'detail': 'Link has expired or is inactive.'}, status=400)
+            return Response({"detail": "Link has expired or is inactive."}, status=400)
 
         # The driver comes from the invite, not the request body. This endpoint
         # is unauthenticated, so a token holder who could name any driver_id
@@ -923,35 +1095,48 @@ class DriverInviteDocumentUploadView(views.APIView):
         driver = invite.driver
         if driver is None:
             return Response(
-                {'detail': 'Submit the registration form before uploading documents.'},
+                {"detail": "Submit the registration form before uploading documents."},
                 status=409,
             )
 
         # driver_id is still accepted for the documented request shape, but it
         # only ever confirms what the token already decided.
-        requested_id = request.data.get('driver_id')
-        if requested_id not in (None, '') and str(requested_id) != str(driver.id):
+        requested_id = request.data.get("driver_id")
+        if requested_id not in (None, "") and str(requested_id) != str(driver.id):
             return Response(
-                {'detail': 'driver_id does not match this link.'}, status=400
+                {"detail": "driver_id does not match this link."}, status=400
             )
 
-        files = request.FILES.getlist('files')
-        names = request.data.getlist('names') if hasattr(request.data, 'getlist') else request.data.get('names', [])
+        files = request.FILES.getlist("files")
+        names = (
+            request.data.getlist("names")
+            if hasattr(request.data, "getlist")
+            else request.data.get("names", [])
+        )
         if len(files) != len(names):
-            return Response({'detail': 'files and names must have the same count.'}, status=400)
+            return Response(
+                {"detail": "files and names must have the same count."}, status=400
+            )
 
-        created = DriverFile.objects.bulk_create([
-            DriverFile(driver=driver, name=name, document=file)
-            for file, name in zip(files, names)
-        ])
+        created = DriverFile.objects.bulk_create(
+            [
+                DriverFile(driver=driver, name=name, document=file)
+                for file, name in zip(files, names)
+            ]
+        )
 
         invite.is_active = False
-        invite.save(update_fields=['is_active'])
+        invite.save(update_fields=["is_active"])
 
-        return Response({
-            'detail': 'Documents uploaded.',
-            'files': [{'id': f.id, 'name': f.name, 'url': f.document.url} for f in created],
-        }, status=201)
+        return Response(
+            {
+                "detail": "Documents uploaded.",
+                "files": [
+                    {"id": f.id, "name": f.name, "url": f.document.url} for f in created
+                ],
+            },
+            status=201,
+        )
 
 
 class DriverDocumentParseView(views.APIView):
@@ -966,127 +1151,126 @@ class DriverDocumentParseView(views.APIView):
     and the existing create/update endpoints are what persist anything. That
     also means a bad extraction costs nothing but a retry.
     """
+
     permission_classes = [IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request):
-        files = request.FILES.getlist('files') or request.FILES.getlist('file')
+        files = request.FILES.getlist("files") or request.FILES.getlist("file")
         if not files:
-            return Response({'detail': 'At least one file is required.'}, status=400)
+            return Response({"detail": "At least one file is required."}, status=400)
         if len(files) > MAX_FILES_PER_REQUEST:
             return Response(
-                {'detail': f'At most {MAX_FILES_PER_REQUEST} files per request.'},
+                {"detail": f"At most {MAX_FILES_PER_REQUEST} files per request."},
                 status=400,
             )
 
         # Optional per-file hints, positional against `files`. Fewer hints than
         # files is fine — the model identifies the rest on its own.
         hints = (
-            request.data.getlist('document_types')
-            if hasattr(request.data, 'getlist') else []
+            request.data.getlist("document_types")
+            if hasattr(request.data, "getlist")
+            else []
         )
         hints += [None] * (len(files) - len(hints))
 
         # Documents are read concurrently: a batch of five otherwise costs five
         # round trips end to end, which is the difference between a recruiter
         # waiting and a recruiter walking away.
-        with ThreadPoolExecutor(max_workers=min(len(files), MAX_FILES_PER_REQUEST)) as pool:
-            results = list(pool.map(
-                lambda pair: parse_document(pair[0], pair[1] or None),
-                zip(files, hints[:len(files)]),
-            ))
+        with ThreadPoolExecutor(
+            max_workers=min(len(files), MAX_FILES_PER_REQUEST)
+        ) as pool:
+            results = list(
+                pool.map(
+                    lambda pair: parse_document(pair[0], pair[1] or None),
+                    zip(files, hints[: len(files)]),
+                )
+            )
 
         prefill, conflicts, sensitive_fields = build_prefill(
-            [r for r in results if not r['error']]
+            [r for r in results if not r["error"]]
         )
 
-        return Response({
-            'results': results,
-            'prefill': prefill,
-            'conflicts': conflicts,
-            'sensitive_fields': sensitive_fields,
-        }, status=200)
+        return Response(
+            {
+                "results": results,
+                "prefill": prefill,
+                "conflicts": conflicts,
+                "sensitive_fields": sensitive_fields,
+            },
+            status=200,
+        )
 
 
 class CompanyHistoryViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['company']
+    filterset_fields = ["company"]
 
     def get_serializer_class(self):
-        if self.request.method in ['POST', 'PATCH']:
+        if self.request.method in ["POST", "PATCH"]:
             return CompanyHistoryWriteSerializer
         else:
             return CompanyHistoryViewSerializer
-        
+
     def get_queryset(self):
-        return CompanyHistory.objects.select_related(
-            'changed_by', 'company'
-        ).all()
+        return CompanyHistory.objects.select_related("changed_by", "company").all()
 
 
 class DriverHistoryViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['driver']
+    filterset_fields = ["driver"]
 
     def get_serializer_class(self):
-        if self.request.method in ['POST', 'PATCH']:
+        if self.request.method in ["POST", "PATCH"]:
             return DriverHistoryWriteSerializer
         else:
             return DriverHistoryViewSerializer
-        
+
     def get_queryset(self):
-        return DriverHistory.objects.select_related(
-            'changed_by', 'driver'
-        ).all()
-        
+        return DriverHistory.objects.select_related("changed_by", "driver").all()
+
 
 class VehicleHistoryViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['vehicle']
+    filterset_fields = ["vehicle"]
 
     def get_serializer_class(self):
-        if self.request.method in ['POST', 'PATCH']:
+        if self.request.method in ["POST", "PATCH"]:
             return VehicleHistoryWriteSerializer
         else:
             return VehicleHistoryViewSerializer
-        
+
     def get_queryset(self):
-        return VehicleHistory.objects.select_related(
-            'changed_by', 'vehicle'
-        ).all()
+        return VehicleHistory.objects.select_related("changed_by", "vehicle").all()
 
 
 class DepositHistoryViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['deposit']
+    filterset_fields = ["deposit"]
 
     def get_serializer_class(self):
-        if self.request.method in ['POST', 'PATCH']:
+        if self.request.method in ["POST", "PATCH"]:
             return DepositHistoryWriteSerializer
         else:
             return DepositHistoryViewSerializer
 
     def get_queryset(self):
-        return DepositHistory.objects.select_related(
-            'changed_by', 'deposit'
-        ).all()
+        return DepositHistory.objects.select_related("changed_by", "deposit").all()
 
 
 class DriverBulkView(views.APIView):
     permission_classes = [IsInternalService]
 
     def get(self, request):
-        ids = request.query_params.get('ids', '')
+        ids = request.query_params.get("ids", "")
         if not ids:
             return Response([])
-        id_list = [i for i in ids.split(',') if i.strip().isdigit()]
-        drivers = Driver.objects.filter(id__in=id_list).values(
-            'id', 'full_name'
-        )
+        id_list = [i for i in ids.split(",") if i.strip().isdigit()]
+        drivers = Driver.objects.filter(id__in=id_list).values("id", "full_name")
         return Response(list(drivers))
 
 
@@ -1098,35 +1282,38 @@ class DriverLocationsView(views.APIView):
     near every row without a geocoding round-trip per load (which is what
     drivers-nearby would cost).
     """
+
     permission_classes = [IsInternalService]
 
     def get(self, request):
         qs = Driver.objects.filter(
-            status__name__iexact='active',
+            status__name__iexact="active",
             current_latitude__isnull=False,
             current_longitude__isnull=False,
-        ).prefetch_related('vehicles')
+        ).prefetch_related("vehicles")
 
         company_id = Company.current().id
         drivers = []
         for driver in qs:
             vehicle = driver.vehicles.first()
-            drivers.append({
-                'id': driver.id,
-                'full_name': driver.full_name,
-                'unit_number': driver.unit_number,
-                'phone_number': driver.phone_number,
-                'company_id': company_id,
-                'current_latitude': driver.current_latitude,
-                'current_longitude': driver.current_longitude,
-                'current_city': driver.current_city,
-                'current_state': driver.current_state,
-                'current_zip': driver.current_zip,
-                'current_location_updated_at': driver.current_location_updated_at,
-                'available_at': driver.available_at,
-                'availability_note': driver.availability_note,
-                'vehicle_type': vehicle.vehicle_type if vehicle else None,
-            })
+            drivers.append(
+                {
+                    "id": driver.id,
+                    "full_name": driver.full_name,
+                    "unit_number": driver.unit_number,
+                    "phone_number": driver.phone_number,
+                    "company_id": company_id,
+                    "current_latitude": driver.current_latitude,
+                    "current_longitude": driver.current_longitude,
+                    "current_city": driver.current_city,
+                    "current_state": driver.current_state,
+                    "current_zip": driver.current_zip,
+                    "current_location_updated_at": driver.current_location_updated_at,
+                    "available_at": driver.available_at,
+                    "availability_note": driver.availability_note,
+                    "vehicle_type": vehicle.vehicle_type if vehicle else None,
+                }
+            )
         return Response(drivers)
 
 
@@ -1135,7 +1322,7 @@ class DriverLocationByIDAPIView(generics.ListAPIView):
     serializer_class = DriverLocationViewSerializer
 
     def get_queryset(self):
-        driver = self.kwargs.get('pk')
+        driver = self.kwargs.get("pk")
         return DriverLocation.objects.filter(driver=driver)
 
 
@@ -1143,51 +1330,62 @@ class DriverNearbyView(views.APIView):
     permission_classes = [IsAuthenticated | IsInternalService]
 
     def get(self, request):
-        zip_code = request.query_params.get('zip')
-        radius = float(request.query_params.get('radius', 100))
+        zip_code = request.query_params.get("zip")
+        radius = float(request.query_params.get("radius", 100))
         if not zip_code:
-            return Response({'detail': 'zip is required.'}, status=400)
+            return Response({"detail": "zip is required."}, status=400)
 
         geo = geocode_zip(zip_code)
         if not geo:
-            return Response({'detail': 'Could not geocode the provided zip code.'}, status=400)
+            return Response(
+                {"detail": "Could not geocode the provided zip code."}, status=400
+            )
 
-        pickup_lat = geo['lat']
-        pickup_lng = geo['lng']
+        pickup_lat = geo["lat"]
+        pickup_lng = geo["lng"]
 
-        qs = Driver.objects.filter(
-            status__name__iexact='active',
-            current_latitude__isnull=False,
-            current_longitude__isnull=False,
-        ).select_related(
-            'status'
-        ).prefetch_related(
-            'vehicles',
-            'vehicles__vehicleequipment_set',
+        qs = (
+            Driver.objects.filter(
+                status__name__iexact="active",
+                current_latitude__isnull=False,
+                current_longitude__isnull=False,
+            )
+            .select_related("status")
+            .prefetch_related(
+                "vehicles",
+                "vehicles__vehicleequipment_set",
+            )
         )
 
         nearby = []
         for driver in qs:
-            miles = haversine(pickup_lat, pickup_lng, driver.current_latitude, driver.current_longitude)
+            miles = haversine(
+                pickup_lat,
+                pickup_lng,
+                driver.current_latitude,
+                driver.current_longitude,
+            )
             if miles <= radius:
                 driver._miles_out = miles
                 nearby.append(driver)
 
         nearby.sort(key=lambda d: d._miles_out)
         serializer = NearbyDriverSerializer(nearby, many=True)
-        return Response({
-            'pickup': {
-                'zip': zip_code,
-                'lat': pickup_lat,
-                'lng': pickup_lng,
-                'city': geo['city'],
-                'state': geo['state'],
-            },
-            'radius_miles': radius,
-            'count': len(nearby),
-            'drivers': serializer.data,
-        })
-    
+        return Response(
+            {
+                "pickup": {
+                    "zip": zip_code,
+                    "lat": pickup_lat,
+                    "lng": pickup_lng,
+                    "city": geo["city"],
+                    "state": geo["state"],
+                },
+                "radius_miles": radius,
+                "count": len(nearby),
+                "drivers": serializer.data,
+            }
+        )
+
 
 class VehicleDropdownView(generics.ListAPIView):
     serializer_class = VehicleDropdownSerializer
@@ -1198,12 +1396,14 @@ class VehicleDropdownView(generics.ListAPIView):
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
-        requested_date = self.request.query_params.get('requested_date')
+        requested_date = self.request.query_params.get("requested_date")
         if requested_date:
             requested_date_parsed = parse_date(requested_date)
             if not requested_date_parsed:
-                raise ValidationError({"error": "Invalid requested_date format. Use YYYY-MM-DD."})
-            context['requested_date'] = requested_date_parsed
+                raise ValidationError(
+                    {"error": "Invalid requested_date format. Use YYYY-MM-DD."}
+                )
+            context["requested_date"] = requested_date_parsed
         return context
 
 
@@ -1215,51 +1415,60 @@ class DriverAssignmentView(views.APIView):
     the caller's company are skipped rather than silently reassigned, and the
     response names them so the UI can say what did not happen.
     """
+
     permission_classes = [IsAdminUser | IsDispatchManager | IsDispatch | IsUpdater]
 
     def post(self, request):
         serializer = DriverAssignSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        driver_ids = data['driver_ids']
+        driver_ids = data["driver_ids"]
 
         drivers = Driver.objects.filter(id__in=driver_ids)
 
-        found = set(drivers.values_list('id', flat=True))
+        found = set(drivers.values_list("id", flat=True))
         rejected = [d for d in driver_ids if d not in found]
 
         updates = {}
 
-        if 'team' in data:
-            team_id = data['team']
+        if "team" in data:
+            team_id = data["team"]
             if team_id is None:
-                updates['team'] = None
+                updates["team"] = None
             else:
                 team = Team.objects.filter(id=team_id).first()
                 if not team:
-                    return Response({"team": "Team not found."},
-                                    status=status.HTTP_400_BAD_REQUEST)
-                updates['team'] = team
+                    return Response(
+                        {"team": "Team not found."}, status=status.HTTP_400_BAD_REQUEST
+                    )
+                updates["team"] = team
 
-        if 'dispatcher' in data:
-            dispatcher_id = data['dispatcher']
+        if "dispatcher" in data:
+            dispatcher_id = data["dispatcher"]
             if dispatcher_id is None:
-                updates['dispatcher'] = None
+                updates["dispatcher"] = None
             else:
                 dispatcher = CustomUser.objects.filter(id=dispatcher_id).first()
                 if not dispatcher:
-                    return Response({"dispatcher": "User not found."},
-                                    status=status.HTTP_400_BAD_REQUEST)
-                updates['dispatcher'] = dispatcher
+                    return Response(
+                        {"dispatcher": "User not found."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                updates["dispatcher"] = dispatcher
 
         updated = drivers.update(**updates) if updates else 0
 
-        return Response({
-            "updated": updated,
-            "rejected_driver_ids": rejected,
-            "detail": ("Drivers outside your company were skipped."
-                       if rejected else "All drivers updated."),
-        })
+        return Response(
+            {
+                "updated": updated,
+                "rejected_driver_ids": rejected,
+                "detail": (
+                    "Drivers outside your company were skipped."
+                    if rejected
+                    else "All drivers updated."
+                ),
+            }
+        )
 
 
 class UnassignedDriversAPIView(generics.ListAPIView):
@@ -1267,6 +1476,7 @@ class UnassignedDriversAPIView(generics.ListAPIView):
     Drivers missing a team or a dispatcher — the worklist for finishing
     assignment. `?missing=team|dispatcher|either` (default either).
     """
+
     serializer_class = UnassignedDriverSerializer
     permission_classes = [IsAdminUser | IsDispatchManager | IsDispatch | IsUpdater]
     pagination_class = CustomPagination
@@ -1274,19 +1484,22 @@ class UnassignedDriversAPIView(generics.ListAPIView):
     def get_queryset(self):
         queryset = Driver.objects.all()
 
-        missing = self.request.query_params.get('missing', 'either')
-        if missing == 'team':
+        missing = self.request.query_params.get("missing", "either")
+        if missing == "team":
             queryset = queryset.filter(team__isnull=True)
-        elif missing == 'dispatcher':
+        elif missing == "dispatcher":
             queryset = queryset.filter(dispatcher__isnull=True)
         else:
             queryset = queryset.filter(
                 Q(team__isnull=True) | Q(dispatcher__isnull=True)
             )
-        return queryset.select_related('status', 'team', 'dispatcher').order_by('full_name')
+        return queryset.select_related("status", "team", "dispatcher").order_by(
+            "full_name"
+        )
 
 
 # --- Tracking page --------------------------------------------------------
+
 
 def _tracking_queryset(request, with_located_before=True):
     """The drivers this user may track, under the page's filters.
@@ -1300,14 +1513,14 @@ def _tracking_queryset(request, with_located_before=True):
     qs = Driver.objects.all()
 
     params = request.query_params
-    for name in ('status', 'dispatcher'):
-        value = params.get(name, '')
+    for name in ("status", "dispatcher"):
+        value = params.get(name, "")
         if value:
             if not value.isdigit():
-                raise ValidationError({name: 'Must be a number.'})
-            qs = qs.filter(**{f'{name}_id': int(value)})
+                raise ValidationError({name: "Must be a number."})
+            qs = qs.filter(**{f"{name}_id": int(value)})
 
-    search = params.get('search', '').strip()
+    search = params.get("search", "").strip()
     if search:
         qs = qs.filter(
             Q(full_name__icontains=search)
@@ -1316,11 +1529,11 @@ def _tracking_queryset(request, with_located_before=True):
             | Q(email__icontains=search)
         )
 
-    located_before = params.get('located_before', '') if with_located_before else ''
+    located_before = params.get("located_before", "") if with_located_before else ""
     if located_before:
         moment = parse_datetime(located_before)
         if moment is None:
-            raise ValidationError({'located_before': 'Must be an ISO 8601 date-time.'})
+            raise ValidationError({"located_before": "Must be an ISO 8601 date-time."})
         if timezone.is_naive(moment):
             moment = timezone.make_aware(moment)
         qs = qs.filter(
@@ -1341,21 +1554,48 @@ class TrackingDriverListView(generics.ListAPIView):
     Filters: status, company, dispatcher (ids), search, located_before.
     Ordering: `full_name` (default) or `current_location_updated_at`, which
     puts the drivers who were never located first, then the oldest location.
+
+    Each row says whether the driver has a driver-app account
+    (`hub_registered`, None when the hub could not be asked) and shows
+    `hub_status` "not_registered" for those who do not: one hub lookup per page.
     """
+
     permission_classes = [IsAuthenticated]
     serializer_class = TrackingDriverSerializer
     pagination_class = TrackingPagination
 
+    def list(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        from hub.registry import apply_registrations
+
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        rows = list(page if page is not None else queryset)
+        apply_registrations(rows)
+        data = self.get_serializer(rows, many=True).data
+        if page is not None:
+            return self.get_paginated_response(data)
+        return Response(data)
+
     def get_queryset(self):
-        qs = _tracking_queryset(self.request).select_related(
-            'status', 'dispatcher'
-        ).prefetch_related('vehicles')
-        ordering = self.request.query_params.get('ordering', 'full_name')
-        if ordering == 'current_location_updated_at':
-            return qs.order_by(F('current_location_updated_at').asc(nulls_first=True), 'full_name', 'id')
-        if ordering == '-current_location_updated_at':
-            return qs.order_by(F('current_location_updated_at').desc(nulls_last=True), 'full_name', 'id')
-        return qs.order_by('full_name', 'id')
+        qs = (
+            _tracking_queryset(self.request)
+            .select_related("status", "dispatcher")
+            .prefetch_related("vehicles")
+        )
+        ordering = self.request.query_params.get("ordering", "full_name")
+        if ordering == "current_location_updated_at":
+            return qs.order_by(
+                F("current_location_updated_at").asc(nulls_first=True),
+                "full_name",
+                "id",
+            )
+        if ordering == "-current_location_updated_at":
+            return qs.order_by(
+                F("current_location_updated_at").desc(nulls_last=True),
+                "full_name",
+                "id",
+            )
+        return qs.order_by("full_name", "id")
 
 
 class TrackingSummaryView(views.APIView):
@@ -1366,33 +1606,46 @@ class TrackingSummaryView(views.APIView):
     `needs_status` (the Active status id) and `located_before` for the needs
     count. Answers {by_status: {id: n}, total, needs_update}.
     """
+
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.query_params.get('status'):
-            raise ValidationError({'status': 'Every status is counted; use needs_status for the needs-update count.'})
+        if request.query_params.get("status"):
+            raise ValidationError(
+                {
+                    "status": "Every status is counted; use needs_status for the needs-update count."
+                }
+            )
         qs = _tracking_queryset(request, with_located_before=False)
         by_status = {
-            str(row['status_id']): row['n']
-            for row in qs.values('status_id').annotate(n=Count('id')).order_by()
+            str(row["status_id"]): row["n"]
+            for row in qs.values("status_id").annotate(n=Count("id")).order_by()
         }
         needs_update = None
-        needs_status = request.query_params.get('needs_status', '')
-        located_before = request.query_params.get('located_before', '')
+        needs_status = request.query_params.get("needs_status", "")
+        located_before = request.query_params.get("located_before", "")
         if needs_status and located_before:
             if not needs_status.isdigit():
-                raise ValidationError({'needs_status': 'Must be a number.'})
+                raise ValidationError({"needs_status": "Must be a number."})
             moment = parse_datetime(located_before)
             if moment is None:
-                raise ValidationError({'located_before': 'Must be an ISO 8601 date-time.'})
+                raise ValidationError(
+                    {"located_before": "Must be an ISO 8601 date-time."}
+                )
             if timezone.is_naive(moment):
                 moment = timezone.make_aware(moment)
-            needs_update = qs.filter(status_id=int(needs_status)).filter(
-                Q(current_location_updated_at__lt=moment)
-                | Q(current_location_updated_at__isnull=True)
-            ).count()
-        return Response({
-            'by_status': by_status,
-            'total': sum(by_status.values()),
-            'needs_update': needs_update,
-        })
+            needs_update = (
+                qs.filter(status_id=int(needs_status))
+                .filter(
+                    Q(current_location_updated_at__lt=moment)
+                    | Q(current_location_updated_at__isnull=True)
+                )
+                .count()
+            )
+        return Response(
+            {
+                "by_status": by_status,
+                "total": sum(by_status.values()),
+                "needs_update": needs_update,
+            }
+        )
