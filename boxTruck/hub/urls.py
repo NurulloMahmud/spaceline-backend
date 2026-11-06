@@ -4,6 +4,7 @@ from .views import (
     HubBidStatusView,
     HubDriverRemoveView,
     HubDriverView,
+    HubDriverBidDecisionsView,
     HubInviteStatusView,
 )
 
@@ -12,4 +13,9 @@ urlpatterns = [
     path("drivers/remove/", HubDriverRemoveView.as_view(), name="hub-drivers-remove"),
     path("invites/status/", HubInviteStatusView.as_view(), name="hub-invites-status"),
     path("bid-status/", HubBidStatusView.as_view(), name="hub-bid-status"),
+    path(
+        "driver-bid-decisions/",
+        HubDriverBidDecisionsView.as_view(),
+        name="hub-driver-bid-decisions",
+    ),
 ]

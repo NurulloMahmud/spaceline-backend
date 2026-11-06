@@ -1,5 +1,6 @@
 import logging
 
+from django.db.models import Q
 from rest_framework import status, views
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
@@ -7,7 +8,9 @@ from rest_framework.response import Response
 
 from users.permissions import IsInternalService
 
-from .bids import relay_bid_status
+from .bids import relay_bid_status, resolve_app_bids
+from .decisions import decision_dict, record_declines
+from .models import DriverBidDecision
 from .permissions import IsHubService
 from .services.driver_hub import BID_STATUSES
 from .sync import INVITE_STATUSES, remove_driver, set_invite_status, upsert_driver
@@ -100,7 +103,8 @@ class HubBidStatusView(views.APIView):
     web app when a dispatcher declines an app bid. The driver-app bids are read
     from the load (filtered by `driver_id` if given) unless the caller names
     them: `driver_bid_ids` (their loads-service ids) or, for old bids,
-    `hub_target_ids`.
+    `hub_target_ids`. A decline is also kept here (DriverBidDecision), before
+    and whatever the hub answers; the response lists those bids.
     """
 
     permission_classes = [IsAuthenticated | IsInternalService]
@@ -121,13 +125,14 @@ class HubBidStatusView(views.APIView):
 
         placed_by = data.get("placed_by")
         user = getattr(request, "user", None)
-        if not placed_by and data.get("placed_by_user_id"):
+        who = None
+        if data.get("placed_by_user_id"):
             # The email agent knows the dispatcher only by id.
             from users.models import CustomUser
 
             who = CustomUser.objects.filter(id=data.get("placed_by_user_id")).first()
-            if who:
-                placed_by = f"{who.first_name} {who.last_name}".strip() or who.username
+        if not placed_by and who:
+            placed_by = f"{who.first_name} {who.last_name}".strip() or who.username
         if (
             not placed_by
             and user is not None
@@ -150,6 +155,36 @@ class HubBidStatusView(views.APIView):
                 {"error": "driver_bid_ids must be a list"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        driver_bid_ids = [str(b) for b in driver_bid_ids]
+        driver_id = data.get("driver_id")
+        if driver_id not in (None, ""):
+            try:
+                driver_id = int(driver_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {"error": "driver_id must be an integer"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            driver_id = None
+
+        app_bids = None
+        declined: list[DriverBidDecision] = []
+        if bid_status == "declined":
+            # Ours first, whatever the hub then says: the decision is made here.
+            app_bids = resolve_app_bids(load_id, driver_id, target_ids, driver_bid_ids)
+            decider = (
+                user
+                if user is not None and getattr(user, "is_authenticated", False)
+                else who
+            )
+            declined = record_declines(
+                load_id,
+                app_bids,
+                note=data.get("note"),
+                user=decider,
+                driver_id=driver_id,
+            )
 
         reached = relay_bid_status(
             load_id,
@@ -159,8 +194,50 @@ class HubBidStatusView(views.APIView):
             placed_by=placed_by,
             tenant_bid_id=data.get("tenant_bid_id"),
             note=data.get("note"),
-            driver_id=data.get("driver_id"),
+            driver_id=driver_id,
             target_ids=target_ids,
-            driver_bid_ids=[str(b) for b in driver_bid_ids],
+            driver_bid_ids=driver_bid_ids,
+            app_bids=app_bids,
         )
-        return Response({"targets": reached})
+        return Response(
+            {"targets": reached, "declined_bid_ids": [d.bid_id for d in declined]}
+        )
+
+
+MAX_DECISION_IDS = 500
+
+
+def _id_list(value: str | None) -> list[str]:
+    return list(dict.fromkeys(v.strip() for v in (value or "").split(",") if v.strip()))
+
+
+class HubDriverBidDecisionsView(views.APIView):
+    """
+    GET /api/hub/driver-bid-decisions/?load_ids=a,b or ?bid_ids=x,y (both: either matches).
+
+    The declines kept by bid-status, for the Load board's Bid history: one row
+    per declined driver bid, newest first. At most 500 ids per parameter.
+    """
+
+    permission_classes = [IsAuthenticated | IsInternalService]
+
+    def get(self, request: Request) -> Response:
+        load_ids = _id_list(request.query_params.get("load_ids"))
+        bid_ids = _id_list(request.query_params.get("bid_ids"))
+        if not load_ids and not bid_ids:
+            return Response(
+                {"error": "load_ids or bid_ids is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(load_ids) > MAX_DECISION_IDS or len(bid_ids) > MAX_DECISION_IDS:
+            return Response(
+                {"error": f"at most {MAX_DECISION_IDS} ids per parameter"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        match = Q()
+        if load_ids:
+            match |= Q(load_id__in=load_ids)
+        if bid_ids:
+            match |= Q(bid_id__in=bid_ids)
+        rows = DriverBidDecision.objects.filter(match).select_related("decided_by")
+        return Response([decision_dict(row) for row in rows])

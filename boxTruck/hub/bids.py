@@ -25,11 +25,16 @@ HUB_TARGET_RE = re.compile(r"hub target #(\d+)")
 
 
 class AppBid(NamedTuple):
-    """One driver bid on a load: by hub target id (old tagged bids) or by its loads-service id."""
+    """One driver bid on a load: by hub target id (old tagged bids) or by its loads-service id.
+
+    `bid_id` is the loads-service id whenever it is known, also for tagged bids;
+    it is what a dispatcher's decision is kept under (see hub.decisions).
+    """
 
     target_id: int | None
     tenant_bid_id: str | None
     driver_id: Any = None
+    bid_id: str | None = None
 
 
 def hub_target_id(note):
@@ -79,10 +84,26 @@ def driver_bid_targets(load_id: str, driver_id: Any = None) -> list[AppBid]:
         target = hub_target_id(bid.get("note"))
         bid_id = str(bid.get("id") or "").strip() or None
         if target:
-            out.append(AppBid(target, None, bid_driver))
+            out.append(AppBid(target, None, bid_driver, bid_id))
         elif bid_id:
-            out.append(AppBid(None, bid_id, bid_driver))
+            out.append(AppBid(None, bid_id, bid_driver, bid_id))
     return out
+
+
+def resolve_app_bids(
+    load_id: str,
+    driver_id: Any = None,
+    target_ids: list[int] | None = None,
+    driver_bid_ids: list[str] | None = None,
+) -> list[AppBid]:
+    """The app bids a status is about: the ones named, else the load's (one driver's)."""
+    named = [AppBid(int(t), None) for t in target_ids or []]
+    named += [
+        AppBid(None, str(b).strip(), driver_id, str(b).strip())
+        for b in driver_bid_ids or []
+        if str(b).strip()
+    ]
+    return named or driver_bid_targets(load_id, driver_id)
 
 
 def relay_bid_status(
@@ -96,23 +117,24 @@ def relay_bid_status(
     driver_id: Any = None,
     target_ids: list[int] | None = None,
     driver_bid_ids: list[str] | None = None,
+    app_bids: list[AppBid] | None = None,
 ) -> list[int | str]:
     """Tell the hub about every app bid on the load.
 
     `target_ids` (hub target ids) and `driver_bid_ids` (loads-service ids of
     driver bids, taken as `driver_id`'s) name the bids outright; otherwise
-    they are read from the load. `tenant_bid_id` is the dispatcher's own bid, sent with the old
-    by-target call only. Returns the hub target ids reached (the driver bid id
-    when the hub did not say which target).
+    they are read from the load. `app_bids` skips that when the caller has
+    already resolved them. `tenant_bid_id` is the dispatcher's own bid, sent
+    with the old by-target call only. Returns the hub target ids reached (the
+    driver bid id when the hub did not say which target).
     """
     if not driver_hub.configured():
         return []
-    bids = [AppBid(int(t), None) for t in target_ids or []]
-    bids += [
-        AppBid(None, str(b), driver_id) for b in driver_bid_ids or [] if str(b).strip()
-    ]
-    if not bids:
-        bids = driver_bid_targets(load_id, driver_id)
+    bids = (
+        app_bids
+        if app_bids is not None
+        else resolve_app_bids(load_id, driver_id, target_ids, driver_bid_ids)
+    )
     amounts = {
         "carrier_amount": carrier_amount,
         "driver_amount": driver_amount,

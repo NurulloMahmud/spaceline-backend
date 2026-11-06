@@ -28,6 +28,7 @@ from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework.response import Response
 from rest_framework.test import APIClient
 
@@ -45,6 +46,7 @@ from hiring.models import (
     ZipLocation,
 )
 from hub import bids, blacklist, payouts, registry, sync
+from hub.models import DriverBidDecision
 from hub.services import driver_hub
 from mobile.models import DriverLocation
 from accounting.models import Payout, PayoutExpense
@@ -614,7 +616,7 @@ class BidStatusRelayTests(TestCase):
                 HTTP_X_INTERNAL_SECRET=settings.INTERNAL_SERVICE_SECRET,
             )
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(response.json(), {"targets": [12]})
+        self.assertEqual(response.json(), {"targets": [12], "declined_bid_ids": []})
         self.assertEqual(update.call_args.args, (12, "won"))
 
     def test_endpoint_names_the_dispatcher_and_takes_target_ids(self):
@@ -637,7 +639,8 @@ class BidStatusRelayTests(TestCase):
                 format="json",
             )
         self.assertEqual(response.status_code, 200, response.content)
-        load_bids.assert_not_called()
+        # Read once, only to keep the decline under the bid's own id.
+        load_bids.assert_called_once_with(self.LOAD)
         update.assert_called_once_with(
             12,
             "declined",
@@ -2724,7 +2727,13 @@ class BidRelayByBidIdTests(TestCase):
                 format="json",
             )
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(response.json(), {"targets": [31]})
+        self.assertEqual(
+            response.json(),
+            {
+                "targets": [31],
+                "declined_bid_ids": ["6f1c2a90-aaaa-4bbb-8ccc-000000000002"],
+            },
+        )
         load_bids.assert_not_called()
         self.assertEqual(
             self.calls[0][2],
@@ -2743,3 +2752,246 @@ class BidRelayByBidIdTests(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 400)
+
+
+@override_settings(**HUB)
+class DriverBidDecisionTests(TestCase):
+    """A dispatcher's decline is kept here too, so Bid history stops asking for a review."""
+
+    LOAD = "8d1e4f2a-0000-4000-8000-000000000003"
+    OTHER_LOAD = "8d1e4f2a-0000-4000-8000-000000000004"
+
+    def setUp(self) -> None:
+        Company.objects.create(name="Space Line LLC")
+        active = DriverStatus.objects.create(name="Active")
+        self.kwame = Driver.objects.create(full_name="Kwame Osei", status=active)
+        self.jin = Driver.objects.create(full_name="Jin Park", status=active)
+        self.maria = CustomUser.objects.create_user(
+            username="maria", password="x", first_name="Maria", last_name="Lopez"
+        )
+        self.dylan = CustomUser.objects.create_user(username="dylan", password="x")
+        self.bids = [
+            {
+                "id": "bid-a",
+                "action": "driver_bid",
+                "note": "TEST bid from QA",
+                "driver": {"id": self.kwame.id},
+            },
+            {
+                "id": "old-1",
+                "action": "driver_bid",
+                "note": "hub target #12",
+                "driver": {"id": self.kwame.id},
+            },
+            {
+                "id": "bid-c",
+                "action": "driver_bid",
+                "note": "Driver app bid",
+                "driver": {"id": self.jin.id},
+            },
+            {
+                "id": "disp-1",
+                "action": "dispatcher_bid",
+                "note": "Bid emailed",
+                "driver": {"id": self.kwame.id},
+            },
+        ]
+        self.calls: list[tuple[str, str, dict | None]] = []
+
+    def hub(
+        self, method: str, url: str, json: dict | None = None, **kwargs: object
+    ) -> MagicMock:
+        self.calls.append((method, url.replace("https://hub.test", ""), json))
+        return _response(
+            200, {"id": 31 if "by-tenant-bid" in url else 12, "status": json["status"]}
+        )
+
+    def post(
+        self,
+        body: dict,
+        user: CustomUser | None = None,
+        reply: Callable[..., MagicMock] | None = None,
+    ) -> Response:
+        client = APIClient()
+        client.force_authenticate(user or self.maria)
+        with patch("hub.bids.load_bids", return_value=self.bids), patch(
+            "hub.services.driver_hub.requests.request", side_effect=reply or self.hub
+        ):
+            return client.post(
+                reverse("hub-bid-status"),
+                {"load_id": self.LOAD, "status": "declined", **body},
+                format="json",
+            )
+
+    def test_a_named_decline_is_kept_and_relayed(self) -> None:
+        response = self.post(
+            {
+                "driver_id": self.kwame.id,
+                "driver_bid_ids": ["bid-a"],
+                "note": "Declined by dispatch",
+            }
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(
+            response.json(), {"targets": [31], "declined_bid_ids": ["bid-a"]}
+        )
+        row = DriverBidDecision.objects.get()
+        self.assertEqual(
+            (
+                row.bid_id,
+                row.load_id,
+                row.driver_id,
+                row.status,
+                row.note,
+                row.decided_by_id,
+            ),
+            (
+                "bid-a",
+                self.LOAD,
+                self.kwame.id,
+                "declined",
+                "Declined by dispatch",
+                self.maria.id,
+            ),
+        )
+        self.assertEqual(
+            [p for _, p, _ in self.calls], ["/t/v1/bid-targets/by-tenant-bid/status"]
+        )
+
+    def test_a_decline_by_load_and_driver_keeps_each_of_that_drivers_bids(self) -> None:
+        response = self.post({"driver_id": self.kwame.id})
+        self.assertEqual(
+            sorted(response.json()["declined_bid_ids"]), ["bid-a", "old-1"]
+        )
+        self.assertEqual(
+            sorted(DriverBidDecision.objects.values_list("bid_id", flat=True)),
+            ["bid-a", "old-1"],
+        )
+        # The tagged bid still goes to its target; the other by its id.
+        self.assertEqual(
+            sorted(p for _, p, _ in self.calls),
+            ["/t/v1/bid-targets/12/status", "/t/v1/bid-targets/by-tenant-bid/status"],
+        )
+
+    def test_old_target_ids_are_kept_under_their_bid_id(self) -> None:
+        response = self.post({"driver_id": self.kwame.id, "hub_target_ids": [12]})
+        self.assertEqual(
+            response.json(), {"targets": [12], "declined_bid_ids": ["old-1"]}
+        )
+
+    def test_declining_again_updates_the_same_row(self) -> None:
+        self.post(
+            {"driver_bid_ids": ["bid-c"], "driver_id": self.jin.id, "note": "Too low"}
+        )
+        first = DriverBidDecision.objects.get()
+        response = self.post(
+            {
+                "driver_bid_ids": ["bid-c"],
+                "driver_id": self.jin.id,
+                "note": "Broker is blacklisted",
+            },
+            user=self.dylan,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(DriverBidDecision.objects.count(), 1)
+        row = DriverBidDecision.objects.get()
+        self.assertEqual(
+            (row.pk, row.note, row.decided_by_id),
+            (first.pk, "Broker is blacklisted", self.dylan.id),
+        )
+        self.assertGreaterEqual(row.decided_at, first.decided_at)
+
+    def test_the_decision_is_kept_when_the_hub_is_down_says_404_or_is_off(self) -> None:
+        down = self.post(
+            {"driver_bid_ids": ["bid-a"]}, reply=requests.ConnectionError("refused")
+        )
+        missing = self.post(
+            {"driver_bid_ids": ["bid-c"]},
+            reply=lambda *a, **kw: _response(
+                404, {"error": "no such bid", "code": "not_found"}
+            ),
+        )
+        with override_settings(DRIVER_HUB_TOKEN=""):
+            off = self.post({"driver_bid_ids": ["old-1"]})
+        for response, bid in ((down, "bid-a"), (missing, "bid-c"), (off, "old-1")):
+            self.assertEqual(response.status_code, 200, response.content)
+            self.assertEqual(
+                response.json(), {"targets": [], "declined_bid_ids": [bid]}
+            )
+        self.assertEqual(
+            sorted(DriverBidDecision.objects.values_list("bid_id", flat=True)),
+            ["bid-a", "bid-c", "old-1"],
+        )
+
+    def test_a_new_bid_after_a_decline_is_not_declined(self) -> None:
+        self.bids = self.bids[:1]
+        self.post({"driver_id": self.kwame.id})
+        # The driver bids again on the same load: a new bid id.
+        self.bids.append(
+            {
+                "id": "bid-a2",
+                "action": "driver_bid",
+                "note": "Can do 1300",
+                "driver": {"id": self.kwame.id},
+            }
+        )
+        client = APIClient()
+        client.force_authenticate(self.maria)
+        rows = client.get(
+            reverse("hub-driver-bid-decisions"), {"load_ids": self.LOAD}
+        ).json()
+        self.assertEqual([r["bid_id"] for r in rows], ["bid-a"])
+
+    def test_other_statuses_keep_nothing(self) -> None:
+        response = self.post({"status": "lost"})
+        self.assertEqual(response.json()["declined_bid_ids"], [])
+        self.assertFalse(DriverBidDecision.objects.exists())
+
+    def test_a_bad_driver_id_is_a_400(self) -> None:
+        self.assertEqual(self.post({"driver_id": "kwame"}).status_code, 400)
+
+    def test_the_list_for_the_web_app(self) -> None:
+        self.post(
+            {
+                "driver_bid_ids": ["bid-a"],
+                "driver_id": self.kwame.id,
+                "note": "Declined by dispatch",
+            }
+        )
+        DriverBidDecision.objects.create(
+            bid_id="bid-z", load_id=self.OTHER_LOAD, note=""
+        )
+        DriverBidDecision.objects.create(bid_id="bid-y", load_id="elsewhere")
+        client = APIClient()
+        url = reverse("hub-driver-bid-decisions")
+        self.assertEqual(url, "/api/hub/driver-bid-decisions/")
+        self.assertEqual(client.get(url, {"load_ids": self.LOAD}).status_code, 401)
+
+        client.force_authenticate(self.dylan)
+        rows = client.get(url, {"load_ids": f"{self.LOAD}, {self.OTHER_LOAD},"}).json()
+        self.assertEqual(sorted(r["bid_id"] for r in rows), ["bid-a", "bid-z"])
+        row = next(r for r in rows if r["bid_id"] == "bid-a")
+        saved = DriverBidDecision.objects.get(bid_id="bid-a")
+        self.assertEqual(
+            {k: v for k, v in row.items() if k != "decided_at"},
+            {
+                "bid_id": "bid-a",
+                "load_id": self.LOAD,
+                "driver_id": self.kwame.id,
+                "status": "declined",
+                "note": "Declined by dispatch",
+                "decided_by": {"id": self.maria.id, "name": "Maria Lopez"},
+            },
+        )
+        self.assertEqual(parse_datetime(row["decided_at"]), saved.decided_at)
+        self.assertIsNone(next(r for r in rows if r["bid_id"] == "bid-z")["decided_by"])
+
+        self.assertEqual(
+            [r["bid_id"] for r in client.get(url, {"bid_ids": "bid-y"}).json()],
+            ["bid-y"],
+        )
+        both = client.get(url, {"load_ids": self.OTHER_LOAD, "bid_ids": "bid-y"}).json()
+        self.assertEqual(sorted(r["bid_id"] for r in both), ["bid-y", "bid-z"])
+        self.assertEqual(client.get(url).status_code, 400)
+        too_many = ",".join(f"load-{n}" for n in range(501))
+        self.assertEqual(client.get(url, {"load_ids": too_many}).status_code, 400)
