@@ -100,15 +100,17 @@ def relay_bid_status(
     """Tell the hub about every app bid on the load.
 
     `target_ids` (hub target ids) and `driver_bid_ids` (loads-service ids of
-    driver bids) name the bids outright; otherwise they are read from the
-    load. `tenant_bid_id` is the dispatcher's own bid, sent with the old
+    driver bids, taken as `driver_id`'s) name the bids outright; otherwise
+    they are read from the load. `tenant_bid_id` is the dispatcher's own bid, sent with the old
     by-target call only. Returns the hub target ids reached (the driver bid id
     when the hub did not say which target).
     """
     if not driver_hub.configured():
         return []
     bids = [AppBid(int(t), None) for t in target_ids or []]
-    bids += [AppBid(None, str(b)) for b in driver_bid_ids or [] if str(b).strip()]
+    bids += [
+        AppBid(None, str(b), driver_id) for b in driver_bid_ids or [] if str(b).strip()
+    ]
     if not bids:
         bids = driver_bid_targets(load_id, driver_id)
     amounts = {
@@ -127,8 +129,13 @@ def relay_bid_status(
                 )
                 reached.append(bid.target_id)
                 continue
+            # The load and driver let the hub find the bid if it never got its id.
             reply = driver_hub.update_bid_by_tenant_bid(
-                bid.tenant_bid_id, status, **amounts
+                bid.tenant_bid_id,
+                status,
+                load_id=load_id,
+                tenant_driver_id=bid.driver_id,
+                **amounts,
             )
         except driver_hub.DriverHubError as exc:
             if exc.status_code == 404:

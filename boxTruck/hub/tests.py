@@ -562,6 +562,13 @@ class BidStatusRelayTests(TestCase):
         self.assertEqual(update.call_count, 2)
         # The Telegram bid is asked about by its id; the hub has no such app bid.
         self.assertEqual(by_bid.call_args.args, ("b4", "lost"))
+        self.assertEqual(
+            (
+                by_bid.call_args.kwargs["load_id"],
+                by_bid.call_args.kwargs["tenant_driver_id"],
+            ),
+            (self.LOAD, 300),
+        )
 
     def test_a_hub_failure_on_one_target_does_not_stop_the_rest(self):
         with patch("hub.bids.load_bids", return_value=self.BIDS), patch(
@@ -2611,6 +2618,8 @@ class BidRelayByBidIdTests(TestCase):
                         "driver_amount": 1250.0,
                         "placed_by": "Dylan Brooks",
                         "note": "Bid emailed",
+                        "load_id": self.LOAD,
+                        "tenant_driver_id": 214,
                     },
                 )
             ],
@@ -2649,6 +2658,34 @@ class BidRelayByBidIdTests(TestCase):
             [(None, "6f1c2a90-aaaa-4bbb-8ccc-000000000001", 214), (12, None, 214)],
         )
 
+    def test_the_driver_filter_bodies_carry_the_load_and_driver(self) -> None:
+        with patch("hub.bids.load_bids", return_value=self.BIDS), patch(
+            "hub.services.driver_hub.requests.request", side_effect=self.hub
+        ):
+            bids.relay_bid_status(self.LOAD, "lost", driver_id=188)
+        self.assertEqual(
+            self.calls[0][2],
+            {
+                "tenant_bid_id": "6f1c2a90-aaaa-4bbb-8ccc-000000000002",
+                "status": "lost",
+                "load_id": self.LOAD,
+                "tenant_driver_id": 188,
+            },
+        )
+
+    def test_the_client_leaves_out_a_driver_it_does_not_know(self) -> None:
+        with patch(
+            "hub.services.driver_hub.requests.request",
+            return_value=_response(200, {"id": 31}),
+        ) as req:
+            driver_hub.update_bid_by_tenant_bid(
+                "abc", "declined", load_id=self.LOAD, tenant_driver_id=None
+            )
+        self.assertEqual(
+            req.call_args.kwargs["json"],
+            {"tenant_bid_id": "abc", "status": "declined", "load_id": self.LOAD},
+        )
+
     def test_a_404_is_quiet_and_the_rest_carry_on(self) -> None:
         replies = [
             _response(404, {"error": "no such driver-app bid", "code": "not_found"}),
@@ -2680,6 +2717,7 @@ class BidRelayByBidIdTests(TestCase):
                 {
                     "load_id": self.LOAD,
                     "status": "declined",
+                    "driver_id": 188,
                     "driver_bid_ids": ["6f1c2a90-aaaa-4bbb-8ccc-000000000002"],
                     "note": "Declined by dispatch",
                 },
@@ -2695,6 +2733,8 @@ class BidRelayByBidIdTests(TestCase):
                 "status": "declined",
                 "placed_by": "Maria Lopez",
                 "note": "Declined by dispatch",
+                "load_id": self.LOAD,
+                "tenant_driver_id": 188,
             },
         )
         response = client.post(

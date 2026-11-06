@@ -184,18 +184,29 @@ def update_bid_by_tenant_bid(
     driver_amount: Any = None,
     placed_by: Any = None,
     note: Any = None,
+    load_id: str | None = None,
+    tenant_driver_id: Any = None,
 ) -> dict[str, Any] | None:
     """POST /t/v1/bid-targets/by-tenant-bid/status for a driver-app bid.
 
-    `tenant_bid_id` is the bid's id in the loads service (the hub kept it when
-    it placed the bid there). Same effect as update_bid_target; a 404 (code
-    not_found) means the hub has no driver-app bid with that id, for example a
-    driver bid that came from Telegram.
+    `tenant_bid_id` is the bid's id in the loads service. The hub may not have
+    it (the loads service did not always return it), so `load_id` and
+    `tenant_driver_id` (our Driver id) let it fall back to the newest target
+    for that load and driver. Same effect as update_bid_target; a 404 (code
+    not_found) means the hub has no such driver-app bid, for example a driver
+    bid that came from Telegram.
     """
-    body = {
+    body: dict[str, Any] = {
         "tenant_bid_id": str(tenant_bid_id),
         **_bid_status_body(status, carrier_amount, driver_amount, placed_by, note),
     }
+    if load_id:
+        body["load_id"] = str(load_id)
+    try:
+        if tenant_driver_id is not None and int(tenant_driver_id) > 0:
+            body["tenant_driver_id"] = int(tenant_driver_id)
+    except (TypeError, ValueError):
+        pass
     return _request("POST", "/t/v1/bid-targets/by-tenant-bid/status", json=body)
 
 
