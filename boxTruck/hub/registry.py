@@ -164,14 +164,30 @@ def reconcile_member(driver: Driver, row: dict[str, Any]) -> None:
 
     Unlinked when the account was deleted (`exists` false; the hub's remove
     call normally got here first, this is the safety net) or the driver left
-    this carrier. Anything else, "active" above all, keeps the driver connected.
+    this carrier. Anything else, "active" above all, keeps the driver connected. Ends in the
+    same state as sync.remove_driver, including the out-of-service status.
     """
     gone = row.get("exists") is False
     if not gone and str(row.get("status") or "") != "left":
         return
+    from .sync import out_of_service_status  # sync imports this module
+
+    changes: dict[str, Any] = {
+        "hub_driver_id": None,
+        "hub_invite_id": None,
+        "hub_invite_status": "left",
+    }
+    out_of_service = out_of_service_status()
+    if out_of_service:
+        changes["status"] = out_of_service
+    else:
+        logger.warning(
+            "No out-of-service driver status exists; driver %s keeps its status",
+            driver.pk,
+        )
     _store(
         driver,
-        {"hub_driver_id": None, "hub_invite_id": None, "hub_invite_status": "left"},
+        changes,
         "account deleted in the app" if gone else "left this carrier in the app",
     )
 

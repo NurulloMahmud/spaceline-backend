@@ -29,3 +29,7 @@ __pycache__
 .cursorrules
 .aider*
 node_modules/
+
+# Ignore every dotfile except this one
+.*
+!.gitignore

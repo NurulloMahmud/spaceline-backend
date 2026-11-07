@@ -289,6 +289,58 @@ class HubDriverEndpointTests(TestCase):
         )
         self.assertEqual(response.json()["removed"], False)
 
+    def remove(self, hub_driver_id=7):
+        return self.client.post(
+            self.remove_url,
+            {"hub_driver_id": hub_driver_id},
+            format="json",
+            HTTP_X_HUB_TOKEN="tenant-token",
+        )
+
+    def test_remove_sets_the_out_of_service_status(self):
+        DriverStatus.objects.create(name="Active")
+        oos = DriverStatus.objects.create(name="Out-of-Service")
+        driver_id = self.push()[0].json()["driver_id"]
+        self.assertEqual(self.remove().status_code, 200)
+        driver = Driver.objects.get(id=driver_id)
+        self.assertEqual(driver.status_id, oos.id)
+        self.assertEqual(driver.hub_status, "left")
+
+    def test_remove_matches_the_status_name_loosely(self):
+        for name in ("out of service", "OUT-OF-SERVICE", "Out Of Service"):
+            DriverStatus.objects.all().exclude(name="Pending").delete()
+            oos = DriverStatus.objects.create(name=name)
+            driver = Driver.objects.filter(hub_driver_id__isnull=False).first()
+            if driver is None:
+                driver_id = self.push()[0].json()["driver_id"]
+            else:
+                driver_id = driver.id
+            self.remove()
+            self.assertEqual(Driver.objects.get(id=driver_id).status_id, oos.id, name)
+            Driver.objects.filter(id=driver_id).update(hub_driver_id=7)
+
+    def test_remove_without_such_a_status_warns_and_keeps_the_status(self):
+        driver_id = self.push()[0].json()["driver_id"]
+        before = Driver.objects.get(id=driver_id).status_id
+        count = DriverStatus.objects.count()
+        with self.assertLogs("hub.sync", level="WARNING") as logs:
+            self.assertEqual(self.remove().status_code, 200)
+        self.assertIn("out-of-service", logs.output[0])
+        driver = Driver.objects.get(id=driver_id)
+        self.assertEqual(driver.status_id, before)
+        self.assertEqual(driver.hub_status, "left")
+        self.assertEqual(DriverStatus.objects.count(), count)
+
+    def test_a_deleted_app_account_also_sets_out_of_service(self):
+        # The hub reports a deleted account through the same remove call.
+        oos = DriverStatus.objects.create(name="Out of Service")
+        driver_id = self.push()[0].json()["driver_id"]
+        self.assertEqual(self.remove().json()["removed"], True)
+        driver = Driver.objects.get(id=driver_id)
+        self.assertEqual(driver.status_id, oos.id)
+        self.assertIsNone(driver.hub_driver_id)
+        self.assertEqual(driver.hub_status, "left")
+
 
 @override_settings(**HUB)
 class DriverHubClientTests(TestCase):
@@ -1698,6 +1750,34 @@ class RegistrationLookupTests(TestCase):
             r["full_name"]: (r["hub_registered"], r["hub_status"])
             for r in response.json()["results"]
         }
+
+    def test_the_safety_net_also_sets_out_of_service(self) -> None:
+        oos = DriverStatus.objects.create(name="Out of service")
+        for row in ({"exists": True, "status": "left"}, {"exists": False}):
+            driver = Driver.objects.create(
+                full_name="Net Case",
+                email="net@x.test",
+                hub_driver_id=77,
+                hub_invite_status="active",
+                status=DriverStatus.objects.get_or_create(name="Active")[0],
+            )
+            registry.reconcile_member(driver, row)
+            driver.refresh_from_db()
+            self.assertEqual(driver.status_id, oos.id, row)
+            self.assertEqual(driver.hub_status, "left", row)
+            self.assertIsNone(driver.hub_driver_id)
+            driver.delete()
+
+    def test_the_safety_net_without_the_status_keeps_the_status(self) -> None:
+        active = DriverStatus.objects.get_or_create(name="Active")[0]
+        driver = Driver.objects.create(
+            full_name="Net Case", hub_driver_id=78, status=active
+        )
+        with self.assertLogs("hub.registry", level="WARNING"):
+            registry.reconcile_member(driver, {"exists": False})
+        driver.refresh_from_db()
+        self.assertEqual(driver.status_id, active.id)
+        self.assertEqual(driver.hub_status, "left")
 
     def test_one_lookup_per_page_shows_who_is_registered_and_corrects_the_rest(
         self,

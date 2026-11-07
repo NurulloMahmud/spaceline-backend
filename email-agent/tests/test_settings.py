@@ -12,12 +12,12 @@ import config.settings as settings_module
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ("https://boxmanage.smartfleetllc.com", "https://boxmanage.smartfleetllc.com"),
-        ("https://boxmanage.smartfleetllc.com/", "https://boxmanage.smartfleetllc.com"),
-        ("https://boxmanage.smartfleetllc.com/api", "https://boxmanage.smartfleetllc.com"),
-        ("https://boxmanage.smartfleetllc.com/api/", "https://boxmanage.smartfleetllc.com"),
-        ("https://boxmanage.smartfleetllc.com/api/v1", "https://boxmanage.smartfleetllc.com"),
-        ("https://boxmanage.smartfleetllc.com/api/v1/", "https://boxmanage.smartfleetllc.com"),
+        ("https://spaceline.boxtruckmanage.com", "https://spaceline.boxtruckmanage.com"),
+        ("https://spaceline.boxtruckmanage.com/", "https://spaceline.boxtruckmanage.com"),
+        ("https://spaceline.boxtruckmanage.com/api", "https://spaceline.boxtruckmanage.com"),
+        ("https://spaceline.boxtruckmanage.com/api/", "https://spaceline.boxtruckmanage.com"),
+        ("https://spaceline.boxtruckmanage.com/api/v1", "https://spaceline.boxtruckmanage.com"),
+        ("https://spaceline.boxtruckmanage.com/api/v1/", "https://spaceline.boxtruckmanage.com"),
         ("http://localhost:8080", "http://localhost:8080"),
         ("", ""),
     ],

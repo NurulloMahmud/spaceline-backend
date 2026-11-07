@@ -226,9 +226,9 @@ SIMPLE_JWT = {
 JAZZMIN_SETTINGS = {
     "show_ui_builder": True,
     "theme": 'default',
-    "site_title": "Smart Fleet Admin Panel",
-    "site_header": "Smart Fleet",
-    "welcome_sign": "Welcome to Smart Fleet Admin Panel",
+    "site_title": "Box Truck Manage",
+    "site_header": "Box Truck Manage",
+    "welcome_sign": "Welcome to Box Truck Manage",
 }
 
 AUTHENTICATION_BACKENDS = [
@@ -303,13 +303,12 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 
 # email
-EMAIL_BACKEND = 'anymail.backends.mailgun.EmailBackend'
+EMAIL_BACKEND = 'anymail.backends.resend.EmailBackend'
 ANYMAIL = {
-    'MAILGUN_API_KEY': config('MAILGUN_API_KEY'),
-    'MAILGUN_SENDER_DOMAIN': config('MAILGUN_DOMAIN'),
+    'RESEND_API_KEY': config('RESEND_API_KEY', default=''),
 }
 
-DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', 'noreply@boxmanage.smartfleetllc.com')
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', 'support@boxtruckmanage.com')
 
 # assistant
 INTERNAL_SERVICE_SECRET = config('INTERNAL_SERVICE_SECRET')

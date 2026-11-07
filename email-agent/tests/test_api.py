@@ -148,7 +148,7 @@ def test_a_confirmed_second_bid_goes_through(client, auth_headers, account, stub
 
 def test_negotiations_are_company_scoped(client, auth_headers, session, negotiation):
     """A dispatcher at company 2 cannot see company 1's negotiation."""
-    other = {"Authorization": f"Bearer {make_token(company='Smart Fleet LLC', company_id=2)}"}
+    other = {"Authorization": f"Bearer {make_token(company='Other Carrier LLC', company_id=2)}"}
 
     assert client.get("/api/v1/negotiations", headers=auth_headers).json()["total"] == 1
     assert client.get("/api/v1/negotiations", headers=other).json()["total"] == 0
@@ -168,7 +168,7 @@ def test_suggestions_are_company_scoped(client, auth_headers, session, negotiati
     session.add(suggestion)
     session.commit()
 
-    other = {"Authorization": f"Bearer {make_token(company='Smart Fleet LLC', company_id=2)}"}
+    other = {"Authorization": f"Bearer {make_token(company='Other Carrier LLC', company_id=2)}"}
     assert client.get("/api/v1/suggestions", headers=auth_headers).json()["total"] == 1
     assert client.get("/api/v1/suggestions", headers=other).json()["total"] == 0
 
@@ -580,7 +580,7 @@ def test_stats_ignore_mail_from_every_company_mailbox(client, auth_headers, sess
 
 
 def test_stats_respect_the_period_and_company(client, auth_headers, session, negotiation):
-    other = {"Authorization": f"Bearer {make_token(company='Smart Fleet LLC', company_id=2)}"}
+    other = {"Authorization": f"Bearer {make_token(company='Other Carrier LLC', company_id=2)}"}
 
     assert client.get("/api/v1/negotiations/stats", headers=other).json()["bids_sent"] == 0
 

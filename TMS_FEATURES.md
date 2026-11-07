@@ -687,7 +687,7 @@ booleans, discrepancies, outcome, error) · `processed_webhooks`.
 
 ## 8. Deployment
 
-All four services run on one host behind nginx at `boxmanage.smartfleetllc.com`,
+All four services run on one host behind nginx at `spaceline.boxtruckmanage.com`,
 under supervisor.
 
 | Service | Path | Process | Route |
@@ -699,7 +699,7 @@ under supervisor.
 
 The email-agent nginx location disables buffering and allows 3600 s reads so SSE
 works. `EMAIL_AGENT_BASE_URL` for the frontend is
-`https://boxmanage.smartfleetllc.com/email-agent`.
+`https://spaceline.boxtruckmanage.com/email-agent`.
 
 ---
 

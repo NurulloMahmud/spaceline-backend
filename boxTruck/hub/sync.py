@@ -611,8 +611,22 @@ def set_invite_status(invite_id: Any, email: Any, invite_status: str) -> Driver 
     return driver
 
 
+def _squash(name):
+    """"Out of Service", "out-of-service" and "OUT OF SERVICE" all read "outofservice"."""
+    return re.sub(r"[\s\-]+", "", str(name or "")).lower()
+
+
+def out_of_service_status():
+    """The existing out-of-service driver status, or None (never created here)."""
+    for status in DriverStatus.objects.order_by("id"):
+        if _squash(status.name) == "outofservice":
+            return status
+    return None
+
+
 def remove_driver(hub_driver_id):
-    """The driver left this carrier in the app: keep the record, drop the link."""
+    """The driver left this carrier (or deleted the app account): keep the record,
+    drop the link and mark the driver out of service."""
     driver = Driver.objects.filter(hub_driver_id=_int(hub_driver_id)).first()
     if not driver:
         return None
@@ -620,6 +634,16 @@ def remove_driver(hub_driver_id):
     driver.hub_driver_id = None
     driver.hub_invite_status = "left"
     driver.hub_invite_id = None
-    driver.save(update_fields=["hub_driver_id", "hub_invite_status", "hub_invite_id"])
+    fields = ["hub_driver_id", "hub_invite_status", "hub_invite_id"]
+    out_of_service = out_of_service_status()
+    if out_of_service:
+        driver.status = out_of_service
+        fields.append("status")
+    else:
+        logger.warning(
+            "No out-of-service driver status exists; driver %s keeps its status",
+            driver.pk,
+        )
+    driver.save(update_fields=fields)
     registry.forget(driver.email)
     return driver

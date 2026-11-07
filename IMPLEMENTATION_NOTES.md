@@ -111,7 +111,7 @@ FastAPI + SQLAlchemy + Postgres. See its `README.md`. Roughly:
 ## Deployment (live as of 2026-07-23)
 
 Server `95.169.205.181`, all processes under supervisor, all behind nginx on
-`boxmanage.smartfleetllc.com`.
+`spaceline.boxtruckmanage.com`.
 
 | Service | Path | Process | Route |
 |---|---|---|---|
@@ -121,7 +121,7 @@ Server `95.169.205.181`, all processes under supervisor, all behind nginx on
 | **email-agent** | `/home/api/email-agent` | `email_agent` (:8100) | `/email-agent/` |
 
 `EMAIL_AGENT_BASE_URL` for the frontend is
-`https://boxmanage.smartfleetllc.com/email-agent`, which maps 1:1 onto the paths
+`https://spaceline.boxtruckmanage.com/email-agent`, which maps 1:1 onto the paths
 in `FRONTEND_API_GUIDE.md` (`/email-agent/api/v1/negotiations`, and so on).
 The nginx location disables buffering and allows 3600s reads so SSE works.
 
