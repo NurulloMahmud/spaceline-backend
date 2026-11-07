@@ -23,6 +23,7 @@ from users.models import Company, CustomUser
 from .models import (Broker, BrokerBlacklist, LoadStatus, Load, LoadHistory, LoadFile, LoadStop,
                      Batch, BatchLoad, PaymentType, Tag, LoadTag
                      )
+from .load_days import filter_by_day, parse_date_zone
 from .serializers import (BrokersSerializer, BrokerBlacklistSerializer, BatchUseSerializer,
                           LoadStopViewSerializer, LoadStatusesSerializer,
                           LoadsViewSerializer, LoadByDriverSerializer,
@@ -123,22 +124,24 @@ class LoadsViewSet(viewsets.ModelViewSet):
 
         if date_type not in ['pickup_date', 'drop_date']:
             raise ValidationError({"error": "Invalid date_type. Must be 'pickup_date' or 'drop_date'."})
+        start_date_parsed = end_date_parsed = None
         if start_date:
             try:
                 start_date_parsed = parse_date(start_date)
-                if not start_date_parsed:
-                    raise ValueError
-                queryset = queryset.filter(**{f"{date_type}__date__gte": start_date_parsed})
             except ValueError:
+                start_date_parsed = None
+            if not start_date_parsed:
                 raise ValidationError({"error": "Invalid start_date format. Use YYYY-MM-DD."})
         if end_date:
             try:
                 end_date_parsed = parse_date(end_date)
-                if not end_date_parsed:
-                    raise ValueError
-                queryset = queryset.filter(**{f"{date_type}__date__lte": end_date_parsed})
             except ValueError:
+                end_date_parsed = None
+            if not end_date_parsed:
                 raise ValidationError({"error": "Invalid end_date format. Use YYYY-MM-DD."})
+        if start_date_parsed or end_date_parsed:
+            date_zone = parse_date_zone(self.request.query_params.get('date_zone'))
+            queryset = filter_by_day(queryset, date_type, start_date_parsed, end_date_parsed, date_zone)
         return queryset.order_by('-created_at')
 
     def get_serializer_class(self):
@@ -1017,19 +1020,19 @@ class LoadsPaySummaryAPIView(views.APIView):
         if date_type not in ['pickup_date', 'drop_date']:
             return Response({'message': 'Invalid date_type. Use "pickup_date" or "drop_date".'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if start_date and end_date:
+        if start_date or end_date:
             try:
-                start_date_parsed = parse_date(start_date)
-                end_date_parsed = parse_date(end_date)
-                if not start_date_parsed or not end_date_parsed:
+                start_date_parsed = parse_date(start_date) if start_date else None
+                end_date_parsed = parse_date(end_date) if end_date else None
+                if (start_date and not start_date_parsed) or (end_date and not end_date_parsed):
                     raise ValueError
-                date_filter = {
-                    f"{date_type}__date__gte": start_date_parsed,
-                    f"{date_type}__date__lte": end_date_parsed
-                }
-                queryset = queryset.filter(**date_filter)
             except ValueError:
                 return Response({'message': 'Invalid date format. Use YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                date_zone = parse_date_zone(request.query_params.get('date_zone'))
+            except ValidationError as e:
+                return Response(e.detail, status=status.HTTP_400_BAD_REQUEST)
+            queryset = filter_by_day(queryset, date_type, start_date_parsed, end_date_parsed, date_zone)
 
         result = queryset.aggregate(
             total_loads=Count('id'),

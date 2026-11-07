@@ -322,3 +322,75 @@ class InternalBookedLoadsCountTests(TestCase):
     def test_rejects_a_bad_window(self):
         self.assertEqual(self.get(start="nope").status_code, 400)
         self.assertEqual(self.get(start="2026-10-26T05:00:00").status_code, 400)
+
+
+class LoadDayFilterTests(TestCase):
+    """A date filter counts days the way the Loads page shows the times: on "Local"
+    each load in its facility's zone, otherwise in the zone the page picked."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from billing.models import LoadStop
+        Company.objects.create(name="A", shipment_number="1000")
+        cls.user = CustomUser.objects.create_user(
+            username="u", password="x", first_name="U", last_name="S",
+            department=Department.objects.create(name="Management"), is_active=True)
+
+        def load(number, when_utc, state=None, zipcode=None):
+            ld = Load.objects.create(load_number=number, carrier_pay=100, driver_pay=50,
+                                     pickup_date=when_utc, drop_date=when_utc)
+            if state:
+                LoadStop.objects.create(load=ld, order=1, state=state, zipcode=zipcode, load_pickup=True)
+                LoadStop.objects.create(load=ld, order=2, state="IL", zipcode="60601", load_drop=True)
+            return ld
+
+        utc = dt_timezone.utc
+        # 00:00 Eastern on Nov 6, which is still Nov 5 in Central.
+        load("ny-midnight", datetime(2026, 11, 6, 5, 0, tzinfo=utc), "NY", "10001")
+        # 23:00 Pacific on Nov 6, already Nov 7 in Central.
+        load("la-late", datetime(2026, 11, 7, 7, 0, tzinfo=utc), "CA", "90001")
+        # 23:30 Central in Pensacola (FL panhandle), Nov 7 in Eastern.
+        load("pensacola-late", datetime(2026, 11, 7, 5, 30, tzinfo=utc), "FL", "32501")
+        # Midday, Nov 6 everywhere.
+        load("chicago-noon", datetime(2026, 11, 6, 18, 0, tzinfo=utc), "IL", "60601")
+        # No stops: Central, so 23:30 on Nov 5.
+        load("no-stops", datetime(2026, 11, 6, 5, 30, tzinfo=utc))
+
+    def numbers(self, **params):
+        c = APIClient()
+        c.force_authenticate(self.user)
+        r = c.get("/api/billing/loads/", {"start_date": "2026-11-06", "end_date": "2026-11-06",
+                                           "page_size": 100, **params})
+        self.assertEqual(r.status_code, 200, r.data)
+        rows = r.data["results"] if isinstance(r.data, dict) else r.data
+        return {x["load_number"] for x in rows}
+
+    def test_local_uses_the_facility_zone(self):
+        self.assertEqual(self.numbers(date_zone="local"),
+                         {"ny-midnight", "la-late", "pensacola-late", "chicago-noon"})
+
+    def test_drop_date_uses_the_receiver_zone(self):
+        # Every drop is in Chicago, so Nov 6 Central.
+        self.assertEqual(self.numbers(date_zone="local", date_type="drop_date"),
+                         {"pensacola-late", "chicago-noon"})
+
+    def test_fixed_zone(self):
+        self.assertEqual(self.numbers(date_zone="America/New_York"), {"ny-midnight", "chicago-noon", "no-stops"})
+        self.assertEqual(self.numbers(), {"pensacola-late", "chicago-noon"})  # Central by default
+
+    def test_open_ended_ranges(self):
+        self.assertEqual(self.numbers(date_zone="local", end_date=""), {"ny-midnight", "la-late", "pensacola-late", "chicago-noon"})
+        self.assertEqual(self.numbers(date_zone="local", start_date=""), {"ny-midnight", "la-late", "pensacola-late", "chicago-noon", "no-stops"})
+
+    def test_pay_summary_matches(self):
+        c = APIClient()
+        c.force_authenticate(self.user)
+        r = c.get("/api/billing/loads-pay-summary/", {"start_date": "2026-11-06", "end_date": "2026-11-06", "date_zone": "local"})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["total_loads"], 4)
+
+    def test_bad_zone_is_a_400(self):
+        c = APIClient()
+        c.force_authenticate(self.user)
+        r = c.get("/api/billing/loads/", {"start_date": "2026-11-06", "date_zone": "Mars/Base"})
+        self.assertEqual(r.status_code, 400)
