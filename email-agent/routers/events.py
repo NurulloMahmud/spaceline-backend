@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from config.settings import config
 from services import events as hub_module
+from services.boxtruck import boxtruck
 from services import telegram
 from services.auth import Principal, current_user_sse
 
@@ -31,18 +32,48 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _notify_ip_async(principal: Principal, client_ip: str) -> None:
-    # Fire-and-forget: send_message already catches its own httpx errors and
-    # returns False rather than raising, so a slow or failing Telegram call
-    # never delays or breaks the SSE connection it's reporting on.
+# user_id -> label, so a dispatcher whose stream reconnects all day does not
+# cost a TMS call each time. Usernames rarely change; a restart clears it.
+_user_labels: dict[int, str] = {}
+
+
+async def _user_label(user_id: int) -> str:
+    """'username (First Last)' for the alert, or '' when the TMS has no answer."""
+    if user_id in _user_labels:
+        return _user_labels[user_id]
+    try:
+        people = await boxtruck.get_dispatchers_bulk([user_id])
+    except Exception as e:  # noqa: BLE001 - the alert must still go out
+        logger.warning("IP alert user lookup failed for %s: %s", user_id, e)
+        return ""
+    person = people.get(user_id)
+    if not person:
+        return ""
+    username = person.get("username") or ""
+    full = f"{person.get('first_name') or ''} {person.get('last_name') or ''}".strip()
+    label = f"{username} ({full})" if username and full else (username or full)
+    _user_labels[user_id] = label
+    return label
+
+
+async def _send_ip_alert(principal: Principal, client_ip: str) -> None:
+    label = await _user_label(principal.user_id)
+    who = f"{label} - id {principal.user_id}" if label else f"id {principal.user_id}"
     text = (
         f"SSE stream opened\n"
-        f"user: {principal.user_id} (company {principal.company_id})\n"
+        f"user: {who} (company {principal.company_id})\n"
         f"ip: {client_ip}"
     )
-    asyncio.create_task(
-        telegram.send_message(config.IP_ALERT_CHAT_ID, text, bot_token=config.IP_ALERT_BOT_TOKEN)
+    await telegram.send_message(
+        config.IP_ALERT_CHAT_ID, text, bot_token=config.IP_ALERT_BOT_TOKEN
     )
+
+
+def _notify_ip_async(principal: Principal, client_ip: str) -> None:
+    # Fire-and-forget: the user lookup and send_message both swallow their own
+    # errors, so a slow or failing TMS or Telegram call never delays or breaks
+    # the SSE connection it is reporting on.
+    asyncio.create_task(_send_ip_alert(principal, client_ip))
 
 
 @router.get("/stream")
