@@ -386,11 +386,13 @@ class VehicleViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         with transaction.atomic():
             updated_vehicle = serializer.save()
-            # `equipment` is not a Vehicle column, so the serializer drops it;
-            # the edit dialog sends the whole list, which replaces the rows.
-            if "equipment" in request.data:
+            # Equipment is not a Vehicle column, so the serializer drops it. The
+            # edit dialog sends the whole list as `equipment_names`, which
+            # replaces the rows. Not `equipment`: older copies of the dialog
+            # sent `equipment: []` on every save without meaning to clear it.
+            if "equipment_names" in request.data:
                 replace_vehicle_equipment(
-                    updated_vehicle, form_list(request.data, "equipment")
+                    updated_vehicle, form_list(request.data, "equipment_names")
                 )
         updated_vehicle.refresh_from_db()
         updated_vehicle.driver

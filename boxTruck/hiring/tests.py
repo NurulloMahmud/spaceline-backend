@@ -1276,7 +1276,7 @@ class VehicleEquipmentEditTests(TestCase):
     def test_the_dialog_list_replaces_the_equipment(self):
         response = self.api.patch(
             f'/api/hiring/vehicles/{self.vehicle.id}/',
-            {'equipment': ['Pallet jack', 'Straps']}, format='json',
+            {'equipment_names': ['Pallet jack', 'Straps']}, format='json',
         )
 
         self.assertEqual(response.status_code, 200, response.data)
@@ -1291,3 +1291,25 @@ class VehicleEquipmentEditTests(TestCase):
         )
 
         self.assertEqual(self._names(), ['Lift-gate'])
+
+    def test_the_old_dialogs_empty_equipment_key_changes_nothing(self):
+        self.api.patch(
+            f'/api/hiring/vehicles/{self.vehicle.id}/', {'equipment': []}, format='json',
+        )
+
+        self.assertEqual(self._names(), ['Lift-gate'])
+
+    def test_tax_fields_can_be_edited_on_the_driver(self):
+        driver = self.vehicle.driver
+        response = self.api.patch(
+            f'/api/hiring/drivers/{driver.id}/',
+            {'tax_exempt': True, 'payee_code': '5', 'fatca_reporting_code': 'A'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        driver.refresh_from_db()
+        self.assertEqual(
+            (driver.tax_exempt, driver.payee_code, driver.fatca_reporting_code),
+            (True, '5', 'A'),
+        )
