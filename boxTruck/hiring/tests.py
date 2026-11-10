@@ -125,11 +125,134 @@ class DriverInviteFlowTests(TestCase):
         self.assertEqual(first.status_code, 201)
 
         second = self._register(driver={
-            'driver_full_name': 'Impostor', 'phone': '+15550002222',
+            'driver_full_name': 'Second Name', 'phone': '+15550002222',
         })
 
-        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.status_code, 201, second.data)
         self.assertEqual(Driver.objects.count(), 1)
+        self.assertEqual(second.data['driver_id'], first.data['driver_id'])
+
+    # --- sending the form again before signing ---------------------------
+
+    def test_sending_the_form_again_updates_the_same_driver(self):
+        """The driver went back from the signing step and fixed a typo."""
+        first = self._register(company_email='bob@example.com')
+        second = self._register(
+            company_name='Bob Hauling Inc',
+            company_email='bob@hauling.example',
+            vehicle={'make': 'Ford', 'model': 'E-350', 'equipment': ['Pallet jack']},
+        )
+
+        self.assertEqual(second.status_code, 201, second.data)
+        driver = Driver.objects.get(id=first.data['driver_id'])
+        self.assertEqual(driver.email, 'bob@hauling.example')
+        self.assertEqual(driver.driver_company.name, 'Bob Hauling Inc')
+        self.assertEqual(DriverCompany.objects.count(), 1)
+        self.assertEqual(Vehicle.objects.count(), 1)
+        vehicle = Vehicle.objects.get(driver=driver)
+        self.assertEqual(vehicle.model, 'E-350')
+        self.assertEqual(
+            list(VehicleEquipment.objects.values_list('name', flat=True)),
+            ['Pallet jack'],
+        )
+
+    def test_sending_again_keeps_one_pair_of_generated_pdfs(self):
+        driver_id = self._register().data['driver_id']
+        self._register()
+
+        self.assertEqual(
+            sorted(DriverFile.objects.filter(driver_id=driver_id).values_list('name', flat=True)),
+            ['Contractor Agreement (Generated)', 'W-9 (Generated)'],
+        )
+
+    def test_sending_again_with_the_same_phone_is_not_a_duplicate(self):
+        self._register()
+        again = self._register()
+
+        self.assertEqual(again.status_code, 201, again.data)
+
+    def test_the_link_still_signs_after_sending_again(self):
+        driver_id = self._register().data['driver_id']
+        self._register()
+
+        self.assertEqual(self._upload_signed(driver_id).status_code, 201)
+
+    def test_after_the_signed_documents_the_form_is_closed(self):
+        driver_id = self._register().data['driver_id']
+        self._upload_signed(driver_id)
+
+        self.assertEqual(self._register().status_code, 400)
+
+    # --- link state, asked before the driver types -------------------------
+
+    def _state(self, token=None):
+        return self.client.get(f'{self.submit_url}?token={token or self.invite.token}')
+
+    def test_a_fresh_link_is_open(self):
+        self.assertEqual(self._state().data, {'state': 'open'})
+
+    def test_a_link_with_its_own_driver_is_registered(self):
+        self._register()
+        self.assertEqual(self._state().data, {'state': 'registered'})
+
+    def test_a_finished_link_is_closed(self):
+        self._upload_signed(self._register().data['driver_id'])
+        self.assertEqual(self._state().data, {'state': 'closed'})
+
+    def test_an_expired_link_is_closed(self):
+        self.invite.expires_at = timezone.now() - timezone.timedelta(minutes=1)
+        self.invite.save()
+        self.assertEqual(self._state().data, {'state': 'closed'})
+
+    def test_an_unknown_link_is_refused(self):
+        self.assertEqual(self.client.get(f'{self.submit_url}?token=nope').status_code, 400)
+
+    def test_the_duplicate_check_ignores_the_drivers_own_record(self):
+        self._register(company_email='bob@example.com')
+        url = reverse('driver-exists-check')
+        body = {'email': 'bob@example.com', 'phone_number': '+15550001111'}
+
+        anonymous = self.client.post(url, body, content_type='application/json')
+        own = self.client.post(
+            f'{url}?token={self.invite.token}', body, content_type='application/json',
+        )
+
+        self.assertEqual(anonymous.data, {'email_exists': True, 'phone_exists': True})
+        self.assertEqual(own.data, {'email_exists': False, 'phone_exists': False})
+
+    # --- what the driver typed lands where it is read ---------------------
+
+    def test_the_email_is_saved_on_the_driver_too(self):
+        driver_id = self._register(company_email='bob@example.com').data['driver_id']
+
+        driver = Driver.objects.get(id=driver_id)
+        self.assertEqual(driver.email, 'bob@example.com')
+        self.assertEqual(driver.driver_company.email, 'bob@example.com')
+
+    def test_the_address_is_saved_on_the_driver_too(self):
+        driver = Driver.objects.get(id=self._register().data['driver_id'])
+
+        self.assertEqual(
+            (driver.address, driver.city, driver.state, driver.zip_code),
+            ('1 Main St', 'Cleveland', 'OH', '44118'),
+        )
+
+    def test_dock_height_in_inches_is_kept_with_the_dock_type(self):
+        response = self._register(vehicle={
+            'make': 'Ford', 'model': 'Transit',
+            'dock_height': '48', 'dock': ['Dock high'],
+        })
+
+        vehicle = Vehicle.objects.get(driver_id=response.data['driver_id'])
+        self.assertEqual(vehicle.dock_height, '48 in Dock high')
+
+    def test_dock_height_alone_is_kept(self):
+        response = self._register(vehicle={
+            'make': 'Ford', 'model': 'Transit', 'dock_height': '44',
+        })
+
+        vehicle = Vehicle.objects.get(driver_id=response.data['driver_id'])
+        self.assertEqual(vehicle.dock_height, '44 in')
 
     def test_registration_claims_the_invite_for_the_driver_it_created(self):
         driver_id = self._register().data['driver_id']
@@ -1085,3 +1208,86 @@ class OnboardingDriverOpenTests(TestCase):
 
         self.assertEqual(response.status_code, 200, response.data)
 
+
+
+class InviteEmailBackfillTests(TestCase):
+    """0029 copies the company email onto invite drivers whose own is blank."""
+
+    def setUp(self):
+        self.status = DriverStatus.objects.create(name='pending')
+
+    def _driver(self, email, company):
+        return Driver.objects.create(
+            full_name='D', status=self.status, email=email, driver_company=company,
+        )
+
+    def _run(self):
+        import importlib
+        from django.apps import apps
+        migration = importlib.import_module('hiring.migrations.0029_invite_driver_email')
+        migration.copy_company_email(apps, None)
+
+    def test_blank_email_is_filled_from_the_only_driver_company(self):
+        company = DriverCompany.objects.create(name='A', email='a@example.com')
+        driver = self._driver(None, company)
+
+        self._run()
+
+        driver.refresh_from_db()
+        self.assertEqual(driver.email, 'a@example.com')
+
+    def test_an_existing_email_is_kept(self):
+        company = DriverCompany.objects.create(name='A', email='a@example.com')
+        driver = self._driver('own@example.com', company)
+
+        self._run()
+
+        driver.refresh_from_db()
+        self.assertEqual(driver.email, 'own@example.com')
+
+    def test_a_shared_company_email_is_not_copied(self):
+        company = DriverCompany.objects.create(name='Fleet', email='office@example.com')
+        first = self._driver(None, company)
+        self._driver(None, company)
+
+        self._run()
+
+        first.refresh_from_db()
+        self.assertIsNone(first.email)
+
+
+class VehicleEquipmentEditTests(TestCase):
+    def setUp(self):
+        user = CustomUser.objects.create_user(username='ops', password='x')
+        self.api = APIClient()
+        self.api.force_authenticate(user)
+        driver = Driver.objects.create(
+            full_name='D', status=DriverStatus.objects.create(name='pending'),
+        )
+        self.vehicle = Vehicle.objects.create(
+            driver=driver, make='Ford', model='Transit', payload=1, gvw=1,
+        )
+        VehicleEquipment.objects.create(vehicle=self.vehicle, name='Lift-gate')
+
+    def _names(self):
+        return list(VehicleEquipment.objects.filter(
+            vehicle=self.vehicle).order_by('id').values_list('name', flat=True))
+
+    def test_the_dialog_list_replaces_the_equipment(self):
+        response = self.api.patch(
+            f'/api/hiring/vehicles/{self.vehicle.id}/',
+            {'equipment': ['Pallet jack', 'Straps']}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self._names(), ['Pallet jack', 'Straps'])
+        self.assertEqual(
+            [e['name'] for e in response.data['equipments']], ['Pallet jack', 'Straps'],
+        )
+
+    def test_a_patch_without_equipment_leaves_it(self):
+        self.api.patch(
+            f'/api/hiring/vehicles/{self.vehicle.id}/', {'make': 'GMC'}, format='json',
+        )
+
+        self.assertEqual(self._names(), ['Lift-gate'])

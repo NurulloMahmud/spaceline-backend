@@ -6,6 +6,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 import copy
 from django.db import transaction
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
 from rest_framework.request import Request
@@ -383,7 +384,14 @@ class VehicleViewSet(viewsets.ModelViewSet):
         old_instance.second_driver = vehicle.second_driver
         serializer = self.get_serializer(vehicle, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        updated_vehicle = serializer.save()
+        with transaction.atomic():
+            updated_vehicle = serializer.save()
+            # `equipment` is not a Vehicle column, so the serializer drops it;
+            # the edit dialog sends the whole list, which replaces the rows.
+            if "equipment" in request.data:
+                replace_vehicle_equipment(
+                    updated_vehicle, form_list(request.data, "equipment")
+                )
         updated_vehicle.refresh_from_db()
         updated_vehicle.driver
         updated_vehicle.second_driver
@@ -709,6 +717,62 @@ def form_bool(value):
     return bool(value)
 
 
+def replace_vehicle_equipment(vehicle, names):
+    """Make the vehicle's equipment exactly `names` (blank entries dropped)."""
+    wanted = []
+    for name in names:
+        name = str(name or "").strip()[:255]
+        if name and name not in wanted:
+            wanted.append(name)
+    current = list(
+        VehicleEquipment.objects.filter(vehicle=vehicle)
+        .order_by("id")
+        .values_list("name", flat=True)
+    )
+    if current == wanted:
+        return
+    VehicleEquipment.objects.filter(vehicle=vehicle).delete()
+    VehicleEquipment.objects.bulk_create(
+        [VehicleEquipment(vehicle=vehicle, name=name) for name in wanted]
+    )
+
+
+def invite_registered_driver(token):
+    """The driver an invite link registered itself, while it may still edit.
+
+    None for a missing, unknown, inactive or expired link, and for a sign
+    link (its driver is older than the link).
+    """
+    if not token:
+        return None
+    try:
+        invite = DriverInviteLink.objects.select_related("driver").get(token=token)
+    except (DriverInviteLink.DoesNotExist, ValueError, DjangoValidationError):
+        return None
+    driver = invite.driver
+    if driver is None or not invite.is_valid():
+        return None
+    if driver.created_at < invite.created_at:
+        return None
+    return driver
+
+
+def invite_dock_height(vehicle_data, data):
+    """Dock height in inches and dock type in the one `dock_height` column.
+
+    Written the way the driver app sync writes it ("48 in Dock high"), so
+    both sources read the same on the vehicle.
+    """
+    inches = "".join(
+        ch for ch in str(vehicle_data.get("dock_height") or "") if ch.isdigit()
+    )
+    dock = vehicle_data.get("dock") or form_list(data, "dock")
+    if isinstance(dock, list):
+        dock = ", ".join(str(d) for d in dock if d)
+    parts = [f"{int(inches)} in" if inches and int(inches) else "", str(dock or "")]
+    return " ".join(p for p in parts if p)
+
+
 def nested_object(data, key):
     """`driver`/`vehicle` arrive as objects in JSON, JSON strings in multipart."""
     value = data.get(key)
@@ -814,13 +878,20 @@ class DriverExistsCheckView(views.APIView):
                 {"detail": "email or phone_number is required."}, status=400
             )
 
+        # A driver sending the invite form again must not be warned about
+        # their own record: the link they hold names it.
+        own = invite_registered_driver(request.query_params.get("token"))
+        drivers = Driver.objects.all()
+        if own is not None:
+            drivers = drivers.exclude(pk=own.pk)
+
         email_exists = False
         if email:
-            email_exists = Driver.objects.filter(email__iexact=email).exists()
+            email_exists = drivers.filter(email__iexact=email).exists()
 
         phone_exists = False
         if phone_number:
-            phone_exists = Driver.objects.filter(phone_number=phone_number).exists()
+            phone_exists = drivers.filter(phone_number=phone_number).exists()
 
         return Response(
             {"email_exists": email_exists, "phone_exists": phone_exists}, status=200
@@ -848,6 +919,32 @@ class DriverInviteSubmitView(views.APIView):
     permission_classes = []
     parser_classes = [parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser]
 
+    def get(self, request):
+        """Whether the form can still be filled, asked before the driver types.
+
+        `open`: nobody has registered with it yet. `registered`: this link
+        registered a driver who has not signed yet; sending the form again
+        updates them. `closed`: used up, expired, or a sign link.
+        """
+        token = request.query_params.get("token")
+        if not token:
+            return Response({"detail": "Token is required."}, status=400)
+        try:
+            invite = DriverInviteLink.objects.select_related("driver").get(
+                token=token
+            )
+        except (DriverInviteLink.DoesNotExist, ValueError, DjangoValidationError):
+            return Response({"detail": "Invalid token."}, status=400)
+        if not invite.is_valid():
+            state = "closed"
+        elif invite.driver is None:
+            state = "open"
+        elif invite.driver.created_at >= invite.created_at:
+            state = "registered"
+        else:
+            state = "closed"
+        return Response({"state": state})
+
     def post(self, request):
         token = request.query_params.get("token")
         if not token:
@@ -863,10 +960,14 @@ class DriverInviteSubmitView(views.APIView):
         if not invite.is_valid():
             return Response({"detail": "Link has expired or is inactive."}, status=400)
 
-        # A link carrying a driver has already done its registration (or was
-        # minted as a sign-link for an existing driver). Registering again
-        # would create a second driver from one invite.
-        if invite.driver_id:
+        # A sign-link is minted for a driver that already existed, so that
+        # driver is older than the link and the link can never register.
+        # A driver this link registered itself is newer than the link: until
+        # the signed documents are in, sending the form again (the driver went
+        # back to fix something, or reloaded the page) updates that same
+        # driver instead of creating a second one or refusing.
+        claimed = invite.driver
+        if claimed is not None and claimed.created_at < invite.created_at:
             return Response(
                 {"detail": "This link has already been used to register a driver."},
                 status=409,
@@ -908,7 +1009,10 @@ class DriverInviteSubmitView(views.APIView):
                 status=400,
             )
 
-        if phone_number and Driver.objects.filter(phone_number=phone_number).exists():
+        same_phone = Driver.objects.filter(phone_number=phone_number)
+        if claimed is not None:
+            same_phone = same_phone.exclude(pk=claimed.pk)
+        if phone_number and same_phone.exists():
             return Response(
                 {"detail": "A driver with this phone number already exists."},
                 status=400,
@@ -916,56 +1020,96 @@ class DriverInviteSubmitView(views.APIView):
 
         pending_status = get_object_or_404(DriverStatus, name__iexact="pending")
 
-        dock = vehicle_data.get("dock") or form_list(data, "dock")
-        if isinstance(dock, list):
-            dock = ", ".join(str(d) for d in dock if d)
+        dock_height = invite_dock_height(vehicle_data, data)
 
         equipment = vehicle_data.get("equipment") or form_list(data, "equipment")
         if not isinstance(equipment, list):
             equipment = [equipment]
 
+        # The form has one email, the owner's. It belongs on the driver (what
+        # the onboarding page, the edit dialogs and the contract read) as well
+        # as on their company.
+        email = (
+            pick((driver_data, "email"), (data, "company_email"), (data, "email"))
+            or None
+        )
+
+        driver_fields = {
+            "full_name": full_name,
+            "phone_number": phone_number,
+            "email": email,
+            "emergency_phone_number": data.get("company_emergency_phone") or "",
+            "address": data.get("company_address") or "",
+            "city": data.get("company_city") or "",
+            "state": data.get("company_state") or "",
+            "zip_code": pick((data, "company_zip"), (data, "company_zipcode")),
+            "tax_exempt": form_bool(data.get("tax_exempt")),
+            "payee_code": data.get("payee_code") or "",
+            "fatca_reporting_code": data.get("fatca_reporting_code") or "",
+        }
+        company_fields = {
+            "name": company_name,
+            "mc": data.get("company_mc") or "",
+            "employer_id": data.get("company_employer_id") or "",
+            "phone_number": data.get("company_phone") or "",
+            "business_as": data.get("company_doing_business") or "",
+            "business_type": str(data.get("company_type") or ""),
+            "zipcode": pick((data, "company_zip"), (data, "company_zipcode")),
+            "state": data.get("company_state") or "",
+            "city": data.get("company_city") or "",
+            "address": data.get("company_address") or "",
+            "email": data.get("company_email") or None,
+            "applicant_first_name": data.get("company_applicant_first_name") or "",
+            "applicant_last_name": data.get("company_applicant_last_name") or "",
+        }
+        vehicle_fields = {
+            "make": vehicle_data.get("make") or "",
+            "model": vehicle_data.get("model") or "",
+            "length": vehicle_data.get("useful_cargo_length") or None,
+            "width": vehicle_data.get("useful_cargo_width") or None,
+            "height": vehicle_data.get("useful_cargo_height") or None,
+            "gvw": vehicle_data.get("GVW_lbs") or 0,
+            "payload": vehicle_data.get("payload_lbs") or 0,
+            "door_open_width": vehicle_data.get("door_width") or None,
+            "door_open_height": vehicle_data.get("door_height") or None,
+            "dock_height": dock_height,
+        }
+
         with transaction.atomic():
-            driver = Driver.objects.create(
-                full_name=full_name,
-                phone_number=phone_number,
-                emergency_phone_number=data.get("company_emergency_phone") or "",
-                status=pending_status,
-                referral_by=invite.created_by,
-                manager=invite.manager,
-                tax_exempt=form_bool(data.get("tax_exempt")),
-                payee_code=data.get("payee_code") or "",
-                fatca_reporting_code=data.get("fatca_reporting_code") or "",
-            )
-            driver_company = DriverCompany.objects.create(
-                name=company_name,
-                mc=data.get("company_mc") or "",
-                employer_id=data.get("company_employer_id") or "",
-                phone_number=data.get("company_phone") or "",
-                business_as=data.get("company_doing_business") or "",
-                business_type=str(data.get("company_type") or ""),
-                zipcode=pick((data, "company_zip"), (data, "company_zipcode")),
-                state=data.get("company_state") or "",
-                city=data.get("company_city") or "",
-                address=data.get("company_address") or "",
-                email=data.get("company_email") or None,
-                applicant_first_name=data.get("company_applicant_first_name") or "",
-                applicant_last_name=data.get("company_applicant_last_name") or "",
-            )
-            driver.driver_company = driver_company
-            driver.save(update_fields=["driver_company"])
-            vehicle = Vehicle.objects.create(
-                driver=driver,
-                make=vehicle_data.get("make") or "",
-                model=vehicle_data.get("model") or "",
-                length=vehicle_data.get("useful_cargo_length") or None,
-                width=vehicle_data.get("useful_cargo_width") or None,
-                height=vehicle_data.get("useful_cargo_height") or None,
-                gvw=vehicle_data.get("GVW_lbs") or 0,
-                payload=vehicle_data.get("payload_lbs") or 0,
-                door_open_width=vehicle_data.get("door_width") or None,
-                door_open_height=vehicle_data.get("door_height") or None,
-                dock_height=dock or "",
-            )
+            if claimed is None:
+                driver = Driver.objects.create(
+                    status=pending_status,
+                    referral_by=invite.created_by,
+                    manager=invite.manager,
+                    **driver_fields,
+                )
+                driver_company = DriverCompany.objects.create(**company_fields)
+                driver.driver_company = driver_company
+                driver.save(update_fields=["driver_company"])
+                vehicle = Vehicle.objects.create(driver=driver, **vehicle_fields)
+            else:
+                driver = claimed
+                for key, value in driver_fields.items():
+                    setattr(driver, key, value)
+                driver_company = driver.driver_company or DriverCompany()
+                for key, value in company_fields.items():
+                    setattr(driver_company, key, value)
+                driver_company.save()
+                driver.driver_company = driver_company
+                driver.save()
+                vehicle = driver.vehicles.order_by("id").first() or Vehicle(
+                    driver=driver
+                )
+                for key, value in vehicle_fields.items():
+                    setattr(vehicle, key, value)
+                vehicle.save()
+                VehicleEquipment.objects.filter(vehicle=vehicle).delete()
+                # The PDFs are generated from the answers, so new answers mean
+                # new PDFs; the old pair would otherwise sit next to them.
+                DriverFile.objects.filter(
+                    driver=driver, name__in=SIGN_FILE_NAMES
+                ).delete()
+
             VehicleEquipment.objects.bulk_create(
                 [
                     VehicleEquipment(vehicle=vehicle, name=str(name))
@@ -1047,11 +1191,12 @@ class DriverInviteSubmitView(views.APIView):
             # authenticates with this same token. Deactivating here left every
             # driver unable to return their signed W-9 and contract.
             #
-            # Claiming the invite with the driver it just created is what stops
-            # it being re-registered — spent for this step, still usable for the
-            # next. The upload endpoint is what finally deactivates it.
-            invite.driver = driver
-            invite.save(update_fields=["driver"])
+            # Claiming the invite with the driver it just created ties the
+            # link to that driver: a second submit updates it, and the upload
+            # endpoint is what finally deactivates the link.
+            if claimed is None:
+                invite.driver = driver
+                invite.save(update_fields=["driver"])
 
         def described(files):
             return [{"id": f.id, "name": f.name, "url": f.document.url} for f in files]
