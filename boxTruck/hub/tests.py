@@ -23,7 +23,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.files.base import ContentFile
 from django.core.management import call_command
-from django.db import connection
+from django.db import connection, transaction
 from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -45,7 +45,7 @@ from hiring.models import (
     VehicleFile,
     ZipLocation,
 )
-from hub import bids, blacklist, payouts, registry, sync
+from hub import bids, blacklist, payouts, profiles, registry, sync
 from hub.models import DriverBidDecision
 from hub.services import driver_hub
 from mobile.models import DriverLocation
@@ -55,6 +55,19 @@ from payroll.models import Deduction, DeductionType
 from users.models import Company, CustomUser, Department
 
 HUB = dict(DRIVER_HUB_URL="https://hub.test", DRIVER_HUB_TOKEN="tenant-token")
+
+# Driver profile pushes (hub.profiles) run in a background thread after commit.
+# Outside the tests written for them they are dropped, so no thread outlives a
+# test or reaches a network; those tests patch the runner to run inline.
+_drop_profile_pushes = patch("hub.profiles._in_background", lambda work: None)
+
+
+def setUpModule() -> None:
+    _drop_profile_pushes.start()
+
+
+def tearDownModule() -> None:
+    _drop_profile_pushes.stop()
 LOCAL_FILES = dict(
     STORAGES={
         "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
@@ -162,58 +175,36 @@ class HubDriverEndpointTests(TestCase):
             )
         self.assertIn(response.status_code, (401, 403))
 
-    def test_creates_the_driver_company_vehicle_and_documents(self):
+    def test_an_unknown_member_becomes_a_driver_without_company_or_vehicle(self):
         response, fetch = self.push()
         self.assertEqual(response.status_code, 200, response.content)
 
         driver = Driver.objects.get(id=response.json()["driver_id"])
         self.assertEqual(driver.hub_driver_id, 7)
         self.assertEqual(driver.hub_status, "connected")
+        # Name, email and phone from the hub; nothing else (SPEC-1.4 2.1).
         self.assertEqual(driver.full_name, "Bob Smith")
         self.assertEqual(driver.email, "bob@example.com")
         self.assertEqual(driver.phone_number, "5551234")
-        self.assertEqual(driver.unit_number, "214")
-        self.assertEqual(driver.zip_code, "44101")
+        self.assertIsNone(driver.driver_company_id)
+        self.assertIsNone(driver.unit_number)
+        self.assertEqual((driver.address, driver.city, driver.zip_code), (None, None, None))
+        self.assertFalse(Vehicle.objects.filter(driver=driver).exists())
+        self.assertEqual(DriverCompany.objects.count(), 0)
         self.assertEqual(driver.current_latitude, 41.5)
         self.assertIsNotNone(driver.current_location_updated_at)
         self.assertEqual(driver.cdl_expiration, date(2027, 1, 15))
         self.assertEqual(driver.medical_exp_date, date(2026, 6, 1))
 
-        company = driver.driver_company
-        self.assertEqual(company.name, "Bob Hauling LLC")
-        self.assertEqual(company.mc, "123456")
-        self.assertEqual(company.employer_id, "99-1234567")
-        self.assertEqual(company.applicant_first_name, "Bob")
-
-        vehicle = Vehicle.objects.get(driver=driver)
-        self.assertEqual(
-            (vehicle.make, vehicle.model, vehicle.year), ("Ford", "Transit", 2022)
-        )
-        self.assertEqual(vehicle.vehicle_type, "cargo van")
-        self.assertEqual((vehicle.payload, vehicle.gvw), (3200, 9000))
-        self.assertEqual((vehicle.length, vehicle.width, vehicle.height), (144, 70, 76))
-        self.assertEqual(vehicle.dock_height, "40 in ramp")
-        self.assertEqual(vehicle.insurance_expiry_date, date(2026, 9, 30))
-        self.assertEqual(
-            sorted(
-                VehicleEquipment.objects.filter(vehicle=vehicle).values_list(
-                    "name", flat=True
-                )
-            ),
-            ["Lift gate", "Pallet jack"],
-        )
-
-        self.assertEqual(fetch.call_count, 3)
+        # Insurance from an old hub is a vehicle document: ignored.
+        self.assertEqual(fetch.call_count, 2)
         self.assertEqual(
             sorted(
                 DriverFile.objects.filter(driver=driver).values_list("name", flat=True)
             ),
             ["CDL (driver app)", "Medical Card (driver app)"],
         )
-        self.assertEqual(VehicleFile.objects.filter(vehicle=vehicle).count(), 1)
-        self.assertEqual(
-            VehicleFile.objects.get(vehicle=vehicle).name, "Progressive (driver app)"
-        )
+        self.assertEqual(VehicleFile.objects.count(), 0)
 
     def test_links_the_invited_driver_by_email(self):
         invited = Driver.objects.create(
@@ -228,7 +219,9 @@ class HubDriverEndpointTests(TestCase):
         self.assertEqual(Driver.objects.count(), 1)
         invited.refresh_from_db()
         self.assertEqual(invited.hub_driver_id, 7)
-        self.assertEqual(invited.full_name, "Bob Smith")
+        # The carrier's name stays; the hub's "Bob Smith" is not taken.
+        self.assertEqual(invited.full_name, "Robert Smith")
+        self.assertEqual(invited.email, "Bob@Example.com")
         self.assertEqual(invited.hub_status, "connected")
 
     def test_a_second_push_updates_the_same_driver(self):
@@ -244,10 +237,11 @@ class HubDriverEndpointTests(TestCase):
         second, fetch = self.push(changed)
         self.assertEqual(first.json()["driver_id"], second.json()["driver_id"])
         self.assertEqual(Driver.objects.count(), 1)
-        self.assertEqual(Vehicle.objects.count(), 1)
+        self.assertEqual(Vehicle.objects.count(), 0)
         driver = Driver.objects.get()
+        # Linked now: the carrier's phone and email are never overwritten.
         self.assertEqual(
-            (driver.phone_number, driver.email), ("5559999", "new@example.com")
+            (driver.phone_number, driver.email), ("5551234", "bob@example.com")
         )
         # Files already stored under the same name are not fetched again.
         self.assertEqual(fetch.call_count, 0)
@@ -824,168 +818,201 @@ class HubPushTestCase(TestCase):
         return Driver.objects.get(id=response.json()["driver_id"]), fetch
 
 
-class SharedCompanyTests(HubPushTestCase):
+class CarrierOwnsTheRecordTests(HubPushTestCase):
+    """SPEC-1.4 2.1: the bug of 2026-11-10. A dispatcher onboarded the driver
+    through the invite link; accepting the invite in the app must not change
+    the carrier's name, phone, address, company or vehicle."""
+
     def setUp(self) -> None:
         super().setUp()
-        self.shared = DriverCompany.objects.create(
-            name="Spaceline LLC",
+        self.company = DriverCompany.objects.create(
+            name="Roy Johnson Trucking LLC",
             mc="111111",
             employer_id="88-0000001",
-            phone_number="3125550100",
-            business_as="Spaceline",
+            phone_number="3125550147",
+            business_as="RJ Trucking",
             business_type="LLC",
             zipcode="60601",
             state="IL",
             city="Chicago",
             address="1 Wacker Dr",
-            email="office@spaceline.test",
-            applicant_first_name="Office",
-            applicant_last_name="Manager",
         )
-        self.snapshot = DriverCompany.objects.filter(pk=self.shared.pk).values().get()
-        self.bob = Driver.objects.create(
-            full_name="Bob Smith",
-            email="bob@example.com",
+        self.roy = Driver.objects.create(
+            full_name="Roy Johnson",
+            email="roy@example.com",
+            phone_number="+13125550147",
+            address="1 Wacker Dr",
+            city="Chicago",
+            state="IL",
+            zip_code="60601",
+            unit_number="RJ-1",
             status=self.pending,
-            driver_company=self.shared,
+            driver_company=self.company,
             hub_invite_id=5,
             hub_invite_status="pending",
         )
-        self.other = Driver.objects.create(
-            full_name="Ann Lee", status=self.pending, driver_company=self.shared
+        self.vehicle = Vehicle.objects.create(
+            driver=self.roy,
+            vehicle_type="Box Truck",
+            make="Isuzu",
+            model="NPR",
+            year=2020,
+            payload=5000,
+            gvw=14500,
+            length=192,
+        )
+        VehicleEquipment.objects.create(vehicle=self.vehicle, name="Lift-Gate")
+        self.dispatcher_file = DriverFile.objects.create(
+            driver=self.roy,
+            name="Driver license",
+            document=ContentFile(b"%PDF", name="dl.pdf"),
         )
 
-    def assert_shared_untouched(self) -> None:
-        self.assertEqual(
-            DriverCompany.objects.filter(pk=self.shared.pk).values().get(),
-            self.snapshot,
+    def snapshot(self) -> dict[str, Any]:
+        driver = Driver.objects.filter(pk=self.roy.pk).values(
+            "full_name",
+            "email",
+            "phone_number",
+            "address",
+            "city",
+            "state",
+            "zip_code",
+            "unit_number",
+            "driver_company_id",
         )
-        self.other.refresh_from_db()
-        self.assertEqual(self.other.driver_company_id, self.shared.pk)
+        return {
+            "driver": driver.get(),
+            "company": DriverCompany.objects.filter(pk=self.company.pk).values().get(),
+            "vehicles": list(Vehicle.objects.order_by("id").values()),
+            "equipment": list(VehicleEquipment.objects.values_list("name", flat=True)),
+            "dispatcher_file": DriverFile.objects.filter(pk=self.dispatcher_file.pk)
+            .values("name", "document")
+            .get(),
+        }
 
-    def test_a_shared_company_is_never_edited_and_the_driver_gets_its_own(self) -> None:
-        driver, _ = self.push(_profile())
-        self.assertEqual(driver.pk, self.bob.pk)
-        self.assertNotEqual(driver.driver_company_id, self.shared.pk)
-        own = driver.driver_company
-        self.assertEqual(
-            (own.name, own.mc, own.employer_id, own.business_as),
-            ("Bob Hauling LLC", "123456", "99-1234567", "Bob Hauling"),
+    def accept_payload(self) -> dict[str, Any]:
+        """The app profile of the same person, as an old hub pushes it on accept."""
+        return _profile(
+            email="roy@example.com",
+            first_name="Roy",
+            last_name="J",
+            phone="+17735550000",
         )
-        self.assertEqual(
-            (own.phone_number, own.email, own.applicant_first_name),
-            ("5551234", "bob@example.com", "Bob"),
-        )
-        self.assert_shared_untouched()
 
-        # Later pushes edit the driver's own company, still never the shared one.
-        driver, _ = self.push(_profile(company_name="Bob Hauling Inc"))
-        self.assertEqual(driver.driver_company_id, own.pk)
-        self.assertEqual(DriverCompany.objects.get(pk=own.pk).name, "Bob Hauling Inc")
-        self.assertEqual(DriverCompany.objects.count(), 2)
-        self.assert_shared_untouched()
-
-    def test_the_same_shared_company_keeps_the_driver_on_it(self) -> None:
-        driver, _ = self.push(
-            _profile(
-                company_name="Spaceline, LLC",
-                mc="MC-111111",
-                employer_id="",
-                business_as="",
-            )
-        )
-        self.assertEqual(driver.driver_company_id, self.shared.pk)
+    def test_accepting_the_invite_leaves_the_onboarded_record_untouched(self) -> None:
+        before = self.snapshot()
+        driver, _ = self.push(self.accept_payload())
+        self.assertEqual(driver.pk, self.roy.pk)
+        self.assertEqual(driver.hub_driver_id, 7)
+        self.assertEqual(driver.hub_invite_status, "active")
+        self.assertEqual(self.snapshot(), before)
         self.assertEqual(DriverCompany.objects.count(), 1)
-        self.assert_shared_untouched()
-
-    def test_a_different_mc_is_a_different_company_even_with_the_same_name(
-        self,
-    ) -> None:
-        driver, _ = self.push(_profile(company_name="Spaceline LLC", mc="222222"))
-        self.assertNotEqual(driver.driver_company_id, self.shared.pk)
-        self.assertEqual(driver.driver_company.mc, "222222")
-        self.assert_shared_untouched()
-
-    def test_an_own_company_is_updated_in_place_and_never_blanked(self) -> None:
-        own = DriverCompany.objects.create(
-            name="Old Name",
-            mc="999999",
-            employer_id="11-1111111",
-            phone_number="5550000",
-            business_as="Old",
-            business_type="Corp",
-            zipcode="44101",
-            state="OH",
-            city="Cleveland",
-            address="9 Elm St",
-            email="old@example.com",
-            applicant_first_name="Robert",
-            applicant_last_name="Smith",
-        )
-        self.bob.driver_company = own
-        self.bob.hub_driver_id = (
-            7  # linked already, so the empty email below still finds Bob
-        )
-        self.bob.save()
-        driver, _ = self.push(
-            _profile(
-                company_name="New Name LLC",
-                mc="",
-                employer_id="",
-                business_as="",
-                business_type="",
-                address="",
-                city="",
-                state="",
-                zip="",
-                phone="",
-                email="",
-                first_name="",
-                last_name="",
-            )
-        )
-        self.assertEqual(driver.driver_company_id, own.pk)
-        own.refresh_from_db()
-        self.assertEqual(own.name, "New Name LLC")
+        self.assertEqual(Vehicle.objects.count(), 1)
+        self.assertEqual(VehicleFile.objects.count(), 0)
+        # The app's documents still come in, next to the dispatcher's file.
         self.assertEqual(
-            (
-                own.mc,
-                own.employer_id,
-                own.business_as,
-                own.business_type,
-                own.zipcode,
-                own.state,
-                own.city,
-                own.address,
-            ),
-            (
-                "999999",
-                "11-1111111",
-                "Old",
-                "Corp",
-                "44101",
-                "OH",
-                "Cleveland",
-                "9 Elm St",
-            ),
+            sorted(DriverFile.objects.values_list("name", flat=True)),
+            ["CDL (driver app)", "Driver license", "Medical Card (driver app)"],
+        )
+
+        # Every later push (a move, a document) changes nothing either.
+        driver, _ = self.push(
+            {**self.accept_payload(), "driver": {**self.accept_payload()["driver"],
+                                                 "lat": 41.6, "phone": "1"}}
+        )
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(driver.current_latitude, 41.6)
+
+    def test_the_new_payload_shape_is_handled_the_same(self) -> None:
+        before = self.snapshot()
+        payload = {
+            "hub_driver_id": 7,
+            "driver": {
+                "email": "roy@example.com",
+                "first_name": "Roy",
+                "last_name": "J",
+                "phone": "+17735550000",
+                "lat": 41.5,
+                "lng": -81.7,
+            },
+            "vehicle": None,
+            "documents": [],
+        }
+        driver, fetch = self.push(payload)
+        self.assertEqual(driver.pk, self.roy.pk)
+        fetch.assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_linked_driver_found_by_hub_id_keeps_its_email(self) -> None:
+        self.roy.hub_driver_id = 7
+        self.roy.hub_invite_status = "active"
+        self.roy.save()
+        before = self.snapshot()
+        driver, _ = self.push(_profile(email="other@example.com"))
+        self.assertEqual(driver.pk, self.roy.pk)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(Driver.objects.count(), 1)
+
+    def test_only_app_documents_are_stored(self) -> None:
+        payload = _profile(email="roy@example.com")
+        payload["documents"] = [
+            {
+                "kind": "license",
+                "title": "License",
+                "file_url": "https://files.test/app-dl.pdf",
+                "expires_at": "2028-02-01",
+                "source": "app",
+                "hub_document_id": 1,
+            },
+            {
+                "kind": "medical_card",
+                "title": "Medical Card",
+                "file_url": "https://files.test/other-carrier-med.pdf",
+                "expires_at": "2027-03-01",
+                "source": "carrier",
+                "hub_document_id": 2,
+            },
+            {
+                "kind": "other",
+                "title": "TWIC",
+                "file_url": "https://files.test/twic.pdf",
+                "source": "app",
+                "hub_document_id": 3,
+            },
+            {
+                "kind": "registration",
+                "title": "Registration",
+                "file_url": "https://files.test/reg.pdf",
+                "source": "app",
+            },
+        ]
+        driver, fetch = self.push(payload)
+        self.assertEqual(
+            sorted(c.args[0] for c in fetch.call_args_list),
+            ["https://files.test/app-dl.pdf", "https://files.test/twic.pdf"],
         )
         self.assertEqual(
-            (
-                own.phone_number,
-                own.email,
-                own.applicant_first_name,
-                own.applicant_last_name,
+            sorted(
+                DriverFile.objects.filter(driver=driver).values_list("name", "hub_kind")
             ),
-            ("5550000", "old@example.com", "Robert", "Smith"),
+            [
+                ("Driver license", ""),
+                ("License (driver app)", "license"),
+                ("TWIC (driver app)", "other"),
+            ],
         )
-        self.assert_shared_untouched()
+        # The app's license sets the expiry; the other carrier's medical card does not.
+        self.assertEqual(driver.cdl_expiration, date(2028, 2, 1))
+        self.assertIsNone(driver.medical_exp_date)
+        self.assertEqual(VehicleFile.objects.count(), 0)
 
-    def test_no_company_fields_leave_the_company_alone(self) -> None:
-        driver, _ = self.push(
-            _profile(company_name="", mc="", employer_id="", business_as="")
+        # The driver deletes the app license: only the sync's own row goes.
+        payload["documents"] = payload["documents"][1:]
+        driver, _ = self.push(payload)
+        self.assertEqual(
+            sorted(DriverFile.objects.filter(driver=driver).values_list("name", flat=True)),
+            ["Driver license", "TWIC (driver app)"],
         )
-        self.assertEqual(driver.driver_company_id, self.shared.pk)
-        self.assert_shared_untouched()
 
 
 @override_settings(**HUB)
@@ -1125,7 +1152,9 @@ class DocumentRemovalTests(HubPushTestCase):
                 ("Medical Card (driver app)", "medical_card"),
             ],
         )
-        vehicle = Vehicle.objects.get(driver=driver)
+        vehicle = Vehicle.objects.create(
+            driver=driver, make="Ford", model="Transit", payload=1, gvw=1
+        )
         DriverFile.objects.create(
             driver=driver, name="CDL scan", document=ContentFile(b"x", name="scan.pdf")
         )
@@ -1133,6 +1162,13 @@ class DocumentRemovalTests(HubPushTestCase):
             vehicle=vehicle,
             name="Insurance card",
             document=ContentFile(b"x", name="card.pdf"),
+        )
+        # Stored by the sync before 1.4: vehicle documents are the carrier's now.
+        VehicleFile.objects.create(
+            vehicle=vehicle,
+            name="Progressive (driver app)",
+            hub_kind="insurance",
+            document=ContentFile(b"x", name="ins.pdf"),
         )
 
         payload = _profile()
@@ -1142,7 +1178,9 @@ class DocumentRemovalTests(HubPushTestCase):
         driver, fetch = self.push(payload)
         self.assertEqual(fetch.call_count, 0)
         self.assertEqual(self.names(driver), ["CDL scan", "Medical Card (driver app)"])
-        self.assertEqual(self.vehicle_names(driver), ["Insurance card"])
+        self.assertEqual(
+            self.vehicle_names(driver), ["Insurance card", "Progressive (driver app)"]
+        )
 
     def test_null_documents_remove_every_app_file_and_a_missing_key_none(self) -> None:
         driver, _ = self.push(_profile())
@@ -1222,48 +1260,18 @@ class DocumentRemovalTests(HubPushTestCase):
         )
 
 
-class VehicleNumberTests(HubPushTestCase):
-    EMPTY = {
-        "payload_lbs": 0,
-        "gvw_lbs": None,
-        "cargo_length_in": 0,
-        "cargo_width_in": 0,
-        "cargo_height_in": None,
-        "door_width_in": 0,
-        "door_height_in": 0,
-        "dock_height_in": 0,
-        "year": 0,
-    }
-
-    def test_zero_and_null_never_overwrite_real_numbers(self) -> None:
+class VehicleNeverFromTheHubTests(HubPushTestCase):
+    def test_an_old_hub_vehicle_never_creates_or_changes_one(self) -> None:
         driver, _ = self.push(_profile())
-        payload = _profile()
-        payload["vehicle"] = {**payload["vehicle"], **self.EMPTY}
-        driver, _ = self.push(payload)
-        vehicle = Vehicle.objects.get(driver=driver)
-        self.assertEqual(
-            (vehicle.payload, vehicle.gvw, vehicle.year), (3200, 9000, 2022)
+        self.assertFalse(Vehicle.objects.exists())
+        vehicle = Vehicle.objects.create(
+            driver=driver, make="Isuzu", model="NPR", payload=5000, gvw=14500
         )
-        self.assertEqual((vehicle.length, vehicle.width, vehicle.height), (144, 70, 76))
-        self.assertEqual((vehicle.door_open_width, vehicle.door_open_height), (60, 70))
-        self.assertEqual(vehicle.dock_height, "ramp")
-
-    def test_a_new_vehicle_without_numbers_stays_empty(self) -> None:
-        payload = _profile()
-        payload["vehicle"] = {**payload["vehicle"], **self.EMPTY}
-        driver, _ = self.push(payload)
-        vehicle = Vehicle.objects.get(driver=driver)
-        self.assertEqual((vehicle.payload, vehicle.gvw), (0, 0))
-        self.assertEqual(
-            (
-                vehicle.length,
-                vehicle.width,
-                vehicle.height,
-                vehicle.door_open_width,
-                vehicle.year,
-            ),
-            (None,) * 5,
-        )
+        before = Vehicle.objects.filter(pk=vehicle.pk).values().get()
+        driver, _ = self.push(_profile(lat=40.0, lng=-80.0))
+        self.assertEqual(Vehicle.objects.filter(pk=vehicle.pk).values().get(), before)
+        self.assertFalse(VehicleEquipment.objects.exists())
+        self.assertEqual(Driver.objects.get(pk=driver.pk).unit_number, None)
 
 
 class AppLocationTests(HubPushTestCase):
@@ -1301,10 +1309,10 @@ class AppLocationTests(HubPushTestCase):
             ("44301", "Akron", "OH", "Akron, OH 44301"),
         )
         self.assertIsNotNone(driver.current_location_updated_at)
-        # The mailing address is what the driver typed, not the position.
+        # The mailing address is the carrier's, never the position or the app's.
         self.assertEqual(
             (driver.address, driver.city, driver.state, driver.zip_code),
-            ("1 Main St", "Cleveland", "OH", "44101"),
+            (None, None, None, None),
         )
 
         user = CustomUser.objects.create_user(username="dylan", password="x")
@@ -2398,10 +2406,14 @@ class PositionOnlyPushTests(HubPushTestCase):
     def test_a_moved_position_updates_the_place_and_writes_nothing_else(self) -> None:
         driver, _ = self.push(_profile(lat=41.05, lng=-81.52))
         self.assertEqual(driver.current_city, "Akron")
-        company = (
-            DriverCompany.objects.filter(pk=driver.driver_company_id).values().get()
+        # The carrier adds the company and the vehicle afterwards.
+        own = DriverCompany.objects.create(name="Bob Hauling LLC", mc="123456")
+        Driver.objects.filter(pk=driver.pk).update(driver_company=own)
+        company = DriverCompany.objects.filter(pk=own.pk).values().get()
+        vehicle = Vehicle.objects.create(
+            driver=driver, make="Ford", model="Transit", payload=3200, gvw=9000
         )
-        vehicle = Vehicle.objects.get(driver=driver)
+        VehicleEquipment.objects.create(vehicle=vehicle, name="Lift gate")
         equipment = list(
             VehicleEquipment.objects.filter(vehicle=vehicle).values_list(
                 "id", flat=True
@@ -2449,28 +2461,17 @@ class PositionOnlyPushTests(HubPushTestCase):
             self.push(_profile(lat=41.06, lng=-81.52))
         self.assertEqual(written_tables(queries), [])
 
-    def test_a_real_change_still_writes_only_its_row(self) -> None:
+    def test_a_document_change_writes_only_the_driver_files(self) -> None:
         driver, _ = self.push(_profile())
         payload = _profile()
-        payload["vehicle"] = {
-            **payload["vehicle"],
-            "payload_lbs": 3500,
-            "equipment": "Lift gate",
+        payload["documents"][0] = {
+            **payload["documents"][0],
+            "file_url": "https://files.test/cdl-2.pdf",
         }
         with CaptureQueriesContext(connection) as queries:
-            driver, _ = self.push(payload)
-        self.assertEqual(
-            sorted(set(written_tables(queries))), ["vehicle_equipments", "vehicles"]
-        )
-        self.assertEqual(Vehicle.objects.get(driver=driver).payload, 3500)
-        self.assertEqual(
-            list(
-                VehicleEquipment.objects.filter(vehicle__driver=driver).values_list(
-                    "name", flat=True
-                )
-            ),
-            ["Lift gate"],
-        )
+            driver, fetch = self.push(payload)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(sorted(set(written_tables(queries))), ["driver_files"])
 
 
 @override_settings(**HUB, **LOCAL_FILES)
@@ -3075,3 +3076,338 @@ class DriverBidDecisionTests(TestCase):
         self.assertEqual(client.get(url).status_code, 400)
         too_many = ",".join(f"load-{n}" for n in range(501))
         self.assertEqual(client.get(url, {"load_ids": too_many}).status_code, 400)
+
+
+@override_settings(**HUB, **LOCAL_FILES)
+class ProfilePushTests(TestCase):
+    """SPEC-1.4 2.2: the carrier's record goes to PUT /t/v1/drivers/{id}/profile."""
+
+    def setUp(self) -> None:
+        Company.objects.create(name="Space Line LLC")
+        self.pending = DriverStatus.objects.create(name="Pending")
+        self.user = CustomUser.objects.create_user(username="dylan", password="x")
+        self.web = APIClient()
+        self.web.force_authenticate(self.user)
+        self.calls: list[tuple[str, str, dict | None]] = []
+        self.hub_fails = False
+        inline = patch("hub.profiles._in_background", side_effect=lambda work: work())
+        inline.start()
+        self.addCleanup(inline.stop)
+        transport = patch(
+            "hub.services.driver_hub.requests.request", side_effect=self.hub
+        )
+        transport.start()
+        self.addCleanup(transport.stop)
+        self.roy = Driver.objects.create(
+            full_name="Roy  Lee Johnson",
+            email="roy@example.com",
+            phone_number="+13125550147",
+            status=self.pending,
+            cdl_expiration=date(2027, 4, 30),
+            medical_exp_date=date(2026, 12, 1),
+        )
+        # Linked without a save: a push queued here would be one the test
+        # transaction never runs, and later saves would join it.
+        Driver.objects.filter(pk=self.roy.pk).update(
+            hub_driver_id=6, hub_invite_status="active"
+        )
+        self.roy.refresh_from_db()
+
+    def hub(
+        self, method: str, url: str, json: dict | None = None, **kwargs: object
+    ) -> MagicMock:
+        if self.hub_fails:
+            raise requests.ConnectionError("refused")
+        self.calls.append((method, url.replace("https://hub.test", ""), json))
+        return _response(200, {"hub_driver_id": 6, "changed": True, "documents": []})
+
+    def puts(self) -> list[tuple[str, dict | None]]:
+        return [(p, b) for m, p, b in self.calls if m == "PUT"]
+
+    def add_file(self, name: str, driver: Driver | None = None, **kwargs: Any) -> DriverFile:
+        return DriverFile.objects.create(
+            driver=driver or self.roy,
+            name=name,
+            document=ContentFile(b"%PDF", name="f.pdf"),
+            **kwargs,
+        )
+
+    def test_classification_by_name(self) -> None:
+        cases = {
+            # The names the forms give (invite form, Edit driver, Add driver
+            # request, document AI) and what dispatchers type.
+            "Driver license": "license",
+            "CDL Copy": "license",
+            "Driver's License / CDL": "license",
+            "DL front": "license",
+            "Drivers Licence": "license",
+            "Medical Examiner Certificate": "medical_card",
+            "Medical card": "medical_card",
+            "W-9 (Generated)": None,
+            "Filled W-9": None,
+            "Signed W-9": None,
+            "Contractor Agreement (Generated)": None,
+            "Signed Contract": None,
+            "Driving Record": None,
+            "Void Check": None,
+            "SSN card": None,
+            "Handler notes": None,
+            "Unrecognized Document": None,
+        }
+        for name, kind in cases.items():
+            self.assertEqual(profiles.classify(name), kind, name)
+
+    def test_the_payload(self) -> None:
+        with self.captureOnCommitCallbacks(execute=True):
+            old_license = self.add_file("Driver license")
+        DriverFile.objects.filter(pk=old_license.pk).update(
+            updated_at=timezone.now() - timedelta(days=3)
+        )
+        self.calls.clear()
+        with self.captureOnCommitCallbacks(execute=True):
+            newest = self.add_file("CDL Copy")
+            medical = self.add_file("Medical card")
+            self.add_file("W-9 (Generated)")
+            self.add_file("Driving Record")
+            # What the sync stored from the app is never echoed.
+            self.add_file("License (driver app)", hub_kind="license")
+            self.add_file("CDL (driver app)")
+        self.assertEqual(len(self.puts()), 1)
+        path, body = self.puts()[0]
+        self.assertEqual(path, "/t/v1/drivers/6/profile")
+        # A document change: name and phone are left out.
+        self.assertNotIn("first_name", body)
+        self.assertNotIn("last_name", body)
+        self.assertNotIn("phone", body)
+        docs = {d["kind"]: d for d in body["documents"]}
+        self.assertEqual(sorted(docs), ["license", "medical_card"])
+        self.assertEqual(docs["license"]["external_id"], f"driverfile-{newest.pk}")
+        self.assertEqual(docs["license"]["title"], "CDL Copy")
+        self.assertEqual(docs["license"]["expires_at"], "2027-04-30")
+        self.assertEqual(docs["medical_card"]["external_id"], f"driverfile-{medical.pk}")
+        self.assertEqual(docs["medical_card"]["expires_at"], "2026-12-01")
+        self.assertTrue(docs["license"]["file_url"].endswith(".pdf"))
+        self.assertRegex(
+            docs["license"]["updated_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$"
+        )
+
+    def test_an_empty_name_or_phone_is_left_out_and_documents_always_sent(self) -> None:
+        Driver.objects.filter(pk=self.roy.pk).update(phone_number="", full_name="Roy")
+        self.roy.refresh_from_db()
+        self.assertEqual(
+            profiles.profile_body(self.roy), {"first_name": "Roy", "documents": []}
+        )
+
+    def test_name_and_phone_go_only_when_they_change(self) -> None:
+        self.assertEqual(
+            profiles.split_name(self.roy.full_name), ("Roy", "Lee Johnson")
+        )
+        name_keys = {"first_name", "last_name", "phone"}
+        for field, value, with_name in (
+            ("cdl_expiration", date(2028, 1, 1), False),
+            ("medical_exp_date", date(2027, 1, 1), False),
+            ("full_name", "Roy Johnson", True),
+            ("phone_number", "+13125550000", True),
+        ):
+            self.calls.clear()
+            with self.captureOnCommitCallbacks(execute=True):
+                setattr(self.roy, field, value)
+                self.roy.save()
+            (body,) = [b for _, b in self.puts()]
+            self.assertEqual(name_keys <= set(body), with_name, field)
+            self.assertIn("documents", body)
+        self.assertEqual(
+            (body["first_name"], body["last_name"], body["phone"]),
+            ("Roy", "Johnson", "+13125550000"),
+        )
+
+        # A name change and a document change in one save: the name goes.
+        self.calls.clear()
+        with self.captureOnCommitCallbacks(execute=True):
+            with transaction.atomic():
+                self.add_file("Driver license")
+                self.roy.full_name = "Roy L Johnson"
+                self.roy.save()
+        (body,) = [b for _, b in self.puts()]
+        self.assertEqual(body["last_name"], "L Johnson")
+
+        # The command always sends them.
+        self.calls.clear()
+        call_command("push_hub_profiles", stdout=StringIO())
+        (body,) = [b for _, b in self.puts()]
+        self.assertTrue(name_keys <= set(body))
+
+    def test_driver_changes_that_push(self) -> None:
+        for field, value in (
+            ("full_name", "Roy Johnson"),
+            ("phone_number", "+13125550000"),
+            ("cdl_expiration", date(2028, 1, 1)),
+            ("medical_exp_date", date(2027, 1, 1)),
+        ):
+            self.calls.clear()
+            with self.captureOnCommitCallbacks(execute=True):
+                setattr(self.roy, field, value)
+                self.roy.save()
+            self.assertEqual(len(self.puts()), 1, field)
+
+        self.calls.clear()
+        with self.captureOnCommitCallbacks(execute=True):
+            self.roy.note = "Prefers the Midwest"
+            self.roy.address = "9 Elm St"
+            self.roy.save()
+        self.assertEqual(self.puts(), [])
+
+    def test_edit_driver_in_the_web_pushes_once(self) -> None:
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.web.patch(
+                reverse("drivers-detail", args=[self.roy.id]),
+                {"full_name": "Roy Johnson", "phone_number": "+13125559999"},
+                format="json",
+            )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(len(self.puts()), 1)
+        self.assertEqual(self.puts()[0][1]["phone"], "+13125559999")
+
+    def test_driver_file_changes_that_push(self) -> None:
+        with self.captureOnCommitCallbacks(execute=True):
+            license_file = self.add_file("Driver license")
+        self.assertEqual(len(self.puts()), 1)
+
+        self.calls.clear()
+        with self.captureOnCommitCallbacks(execute=True):
+            other = self.add_file("W-9 Form")
+            other.name = "Signed Contract"
+            other.save()
+            other.delete()
+        self.assertEqual(self.puts(), [], "unclassified files do not push")
+
+        self.calls.clear()
+        with self.captureOnCommitCallbacks(execute=True):
+            license_file.name = "Contract"
+            license_file.save()
+        self.assertEqual(len(self.puts()), 1, "renamed away from a license")
+        self.assertEqual(self.puts()[0][1]["documents"], [])
+
+        with self.captureOnCommitCallbacks(execute=True):
+            medical = self.add_file("Medical card")
+        self.calls.clear()
+        with self.captureOnCommitCallbacks(execute=True):
+            medical.delete()
+        self.assertEqual(len(self.puts()), 1, "a deleted medical card")
+
+    def test_only_active_linked_drivers_are_pushed(self) -> None:
+        bob = Driver.objects.create(full_name="Bob", status=self.pending)
+        left = Driver.objects.create(
+            full_name="Ann", status=self.pending, hub_driver_id=8, hub_invite_status="left"
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            for driver in (bob, left):
+                driver.full_name += " X"
+                driver.save()
+                self.add_file("Driver license", driver=driver)
+        self.assertEqual(self.puts(), [])
+
+    def test_the_hub_sync_never_pushes_back(self) -> None:
+        payload = _profile(email="roy@example.com")
+        payload["hub_driver_id"] = 6
+        with patch("hub.sync.fetch_file", return_value=b"%PDF"):
+            with self.captureOnCommitCallbacks(execute=True):
+                response = APIClient().post(
+                    reverse("hub-drivers"),
+                    payload,
+                    format="json",
+                    HTTP_X_HUB_TOKEN="tenant-token",
+                )
+        self.assertEqual(response.status_code, 200, response.content)
+        # Stored an app license and changed the expiry dates: no push.
+        self.assertTrue(DriverFile.objects.filter(hub_kind="license").exists())
+        self.assertEqual(
+            Driver.objects.get(pk=self.roy.pk).cdl_expiration, date(2027, 1, 15)
+        )
+        self.assertEqual(self.puts(), [])
+
+    def test_accepting_the_invite_pushes_the_carrier_record(self) -> None:
+        onboarded = Driver.objects.create(
+            full_name="Bob Driver",
+            email="bob@example.com",
+            phone_number="+15550001111",
+            status=self.pending,
+            hub_invite_id=5,
+            hub_invite_status="pending",
+        )
+        self.add_file("Driver license", driver=onboarded)
+        with patch("hub.sync.fetch_file", return_value=b"%PDF"):
+            with self.captureOnCommitCallbacks(execute=True):
+                response = APIClient().post(
+                    reverse("hub-drivers"),
+                    PROFILE,
+                    format="json",
+                    HTTP_X_HUB_TOKEN="tenant-token",
+                )
+        self.assertEqual(response.json()["driver_id"], onboarded.id)
+        self.assertEqual(len(self.puts()), 1)
+        path, body = self.puts()[0]
+        self.assertEqual(path, "/t/v1/drivers/7/profile")
+        self.assertEqual(
+            (body["first_name"], body["last_name"], body["phone"]),
+            ("Bob", "Driver", "+15550001111"),
+        )
+        self.assertEqual([d["kind"] for d in body["documents"]], ["license"])
+        self.assertEqual(Driver.objects.get(pk=onboarded.pk).full_name, "Bob Driver")
+
+    def test_one_push_per_transaction(self) -> None:
+        with self.captureOnCommitCallbacks(execute=True):
+            with transaction.atomic():
+                self.roy.full_name = "Roy Johnson"
+                self.roy.save()
+                self.add_file("Driver license")
+                self.add_file("Medical card")
+        self.assertEqual(len(self.puts()), 1)
+
+    def test_a_down_hub_never_fails_the_save(self) -> None:
+        self.hub_fails = True
+        with self.assertLogs("hub.profiles", level="WARNING"):
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.web.patch(
+                    reverse("drivers-detail", args=[self.roy.id]),
+                    {"full_name": "Roy Johnson"},
+                    format="json",
+                )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Driver.objects.get(pk=self.roy.pk).full_name, "Roy Johnson")
+
+    def test_the_command_pushes_every_active_linked_driver(self) -> None:
+        Driver.objects.create(full_name="Bob", status=self.pending)
+        Driver.objects.create(
+            full_name="Ann", status=self.pending, hub_driver_id=8, hub_invite_status="left"
+        )
+        ann = Driver.objects.create(
+            full_name="Ann Lee", status=self.pending, hub_driver_id=9,
+            hub_invite_status="active",
+        )
+        out = StringIO()
+        call_command("push_hub_profiles", stdout=out)
+        self.assertEqual(
+            sorted(p for p, _ in self.puts()),
+            ["/t/v1/drivers/6/profile", "/t/v1/drivers/9/profile"],
+        )
+        self.assertIn("Sent 2 driver profile(s)", out.getvalue())
+
+        self.calls.clear()
+        call_command("push_hub_profiles", driver=ann.id, stdout=StringIO())
+        self.assertEqual([p for p, _ in self.puts()], ["/t/v1/drivers/9/profile"])
+
+    def test_the_command_without_the_hub_sends_nothing(self) -> None:
+        out = StringIO()
+        with override_settings(DRIVER_HUB_TOKEN=""):
+            call_command("push_hub_profiles", stdout=out)
+        self.assertEqual(self.calls, [])
+        self.assertIn("not configured", out.getvalue())
+
+    def test_the_client_call(self) -> None:
+        reply = driver_hub.put_driver_profile(6, {"first_name": "Roy", "documents": []})
+        self.assertEqual(reply["changed"], True)
+        self.assertEqual(
+            self.calls,
+            [("PUT", "/t/v1/drivers/6/profile", {"first_name": "Roy", "documents": []})],
+        )

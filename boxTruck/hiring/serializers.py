@@ -1,4 +1,7 @@
+from typing import Any
+
 from django.core.files.base import ContentFile
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -19,6 +22,32 @@ from .models import (
     Deposit,
     DepositHistory,
 )
+
+
+# What a new vehicle needs once any of its values is given (SPEC-1.4 2.4).
+VEHICLE_REQUIRED = ("vehicle_type", "make", "model", "year", "payload", "gvw")
+
+
+def is_empty_value(value: Any) -> bool:
+    """Nothing filled: None, "", 0, False, or a list or dict of such values."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, dict):
+        return is_empty_block(value)
+    if isinstance(value, (list, tuple, set)):
+        return all(is_empty_value(v) for v in value)
+    return False
+
+
+def is_empty_block(values: dict[str, Any] | None) -> bool:
+    """True when a vehicle block has nothing filled: missing, null, "", 0 or empty lists."""
+    return not values or all(is_empty_value(v) for v in values.values())
 
 
 class DriverStatusSerializer(serializers.ModelSerializer):
@@ -440,10 +469,21 @@ class DriverListSerializer(serializers.ModelSerializer):
         return docs_count
 
 
+def _person(driver: Driver | None) -> dict[str, Any] | None:
+    return {"id": driver.id, "full_name": driver.full_name} if driver else None
+
+
 class DriverCompanyModalSerializer(serializers.ModelSerializer):
-    # A company can now be shared by several drivers, so this is a list, not
-    # a single object.
+    """The onboarding drawer for one driver (context["driver"], the `?driver=` id).
+
+    A company can be shared by several drivers, so `drivers` is a list. Each
+    driver says who they drive with (SPEC-1.4 2.5): the second driver on
+    their truck, or the truck they drive as second driver. The drawer
+    driver's team partner is listed even from another company.
+    """
+
     drivers = serializers.SerializerMethodField()
+    vehicles = serializers.SerializerMethodField()
     documents = CompanyFileSerializer(many=True, source="companyfile_set")
 
     class Meta:
@@ -453,6 +493,7 @@ class DriverCompanyModalSerializer(serializers.ModelSerializer):
             "name",
             "employer_id",
             "drivers",
+            "vehicles",
             "phone_number",
             "address",
             "city",
@@ -462,15 +503,97 @@ class DriverCompanyModalSerializer(serializers.ModelSerializer):
         ]
 
     @classmethod
-    def without_company(cls, driver):
+    def without_company(cls, driver: Driver) -> dict[str, Any]:
+        serializer = cls(context={"driver": driver})
         data = dict.fromkeys(cls.Meta.fields)
-        data.update(drivers=[cls()._get_driver(driver)], documents=[])
+        drivers, vehicles = serializer._drawer([driver])
+        data.update(drivers=drivers, vehicles=vehicles, documents=[])
         return data
 
-    def get_drivers(self, obj):
-        return [self._get_driver(driver) for driver in obj.drivers.all()]
+    def get_drivers(self, obj: DriverCompany) -> list[dict[str, Any]]:
+        return self._drawer(list(obj.drivers.all()))[0]
 
-    def _get_driver(self, driver):
+    def get_vehicles(self, obj: DriverCompany) -> list[dict[str, Any]]:
+        return self._drawer(list(obj.drivers.all()))[1]
+
+    def _drawer(
+        self, members: list[Driver]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """(drivers, vehicles) for the drawer, computed once per serializer."""
+        if hasattr(self, "_drawer_data"):
+            return self._drawer_data
+        subject = self.context.get("driver")
+        members = sorted(members, key=lambda d: d.id)
+        listed = {d.id for d in members}
+        partners: list[Driver] = []
+        if subject is not None:
+            if subject.id not in listed:
+                members.append(subject)
+                listed.add(subject.id)
+            partner_ids = set()
+            for owner_id, second_id in Vehicle.objects.filter(
+                Q(driver_id=subject.id) | Q(second_driver_id=subject.id)
+            ).values_list("driver_id", "second_driver_id"):
+                partner_ids.update({owner_id, second_id})
+            partner_ids -= listed | {None}
+            partners = list(
+                Driver.objects.filter(id__in=partner_ids)
+                .select_related("status", "manager")
+                .order_by("id")
+            )
+        everyone = members + partners
+        ids = [d.id for d in everyone]
+        vehicles = list(
+            Vehicle.objects.filter(Q(driver_id__in=ids) | Q(second_driver_id__in=ids))
+            .select_related("driver", "second_driver")
+            .order_by("id")
+        )
+        subject_id = subject.id if subject is not None else None
+
+        def vehicle_dict(vehicle: Vehicle, for_second: bool) -> dict[str, Any]:
+            shared = for_second or (
+                subject_id is not None and vehicle.second_driver_id == subject_id
+            )
+            return {
+                "id": vehicle.id,
+                "vehicle_type": vehicle.vehicle_type,
+                "make": vehicle.make,
+                "model": vehicle.model,
+                "year": vehicle.year,
+                "registration_plate": vehicle.registration_plate,
+                "vin": vehicle.vin,
+                "driver": _person(vehicle.driver),
+                "second_driver": _person(vehicle.second_driver),
+                "shared_with": _person(vehicle.driver) if shared else None,
+            }
+
+        partner_ids = {d.id for d in partners}
+        drivers = []
+        for driver in everyone:
+            own = [v for v in vehicles if v.driver_id == driver.id]
+            shared = [v for v in vehicles if v.second_driver_id == driver.id]
+            teamed = next((v for v in own if v.second_driver_id), None)
+            second_driver = teamed.second_driver if teamed else None
+            if second_driver is not None:
+                team_with, role = second_driver, "owner"
+            elif shared:
+                team_with, role = shared[0].driver, "second"
+            else:
+                team_with, role = None, None
+            row = self._get_driver(driver)
+            row.update(
+                vehicle=vehicle_dict(own[0], False) if own else None,
+                shared_vehicles=[vehicle_dict(v, True) for v in shared],
+                second_driver=_person(second_driver),
+                team_with=_person(team_with),
+                team_role=role,
+                is_team_partner=driver.id in partner_ids,
+            )
+            drivers.append(row)
+        self._drawer_data = (drivers, [vehicle_dict(v, False) for v in vehicles])
+        return self._drawer_data
+
+    def _get_driver(self, driver: Driver) -> dict[str, Any]:
         return {
             "id": driver.id,
             "full_name": driver.full_name,
@@ -483,7 +606,6 @@ class DriverCompanyModalSerializer(serializers.ModelSerializer):
             "city": driver.city if driver.city else None,
             "state": driver.state if driver.state else None,
             "zip_code": driver.zip_code if driver.zip_code else None,
-            "vehicle": self._get_vehicle(driver),
             "manager": (
                 driver.manager.username
                 + " - "
@@ -495,19 +617,67 @@ class DriverCompanyModalSerializer(serializers.ModelSerializer):
             ),
         }
 
-    def _get_vehicle(self, driver):
-        vehicle = driver.vehicles.first()
-        if not vehicle:
-            return None
-        return {
-            "id": vehicle.id,
-            "vehicle_type": vehicle.vehicle_type,
-            "make": vehicle.make,
-            "model": vehicle.model,
-            "year": vehicle.year,
-            "registration_plate": vehicle.registration_plate,
-            "vin": vehicle.vin,
+
+class DriverVehicleBlockSerializer(serializers.ModelSerializer):
+    """The optional vehicle section of Edit driver and quick create (SPEC-1.4 2.5).
+
+    Validated only when something is filled (see is_empty_block); then the
+    VEHICLE_REQUIRED fields are required.
+    """
+
+    equipment = serializers.ListField(
+        child=serializers.CharField(max_length=255), required=False
+    )
+
+    class Meta:
+        model = Vehicle
+        fields = [
+            "vehicle_type",
+            "make",
+            "model",
+            "year",
+            "payload",
+            "gvw",
+            "vin",
+            "registration_plate",
+            "registration_expiry_date",
+            "registration_state",
+            "insurance_company",
+            "insurance_expiry_date",
+            "policy_number",
+            "length",
+            "width",
+            "height",
+            "door_open_width",
+            "door_open_height",
+            "dock_height",
+            "ramps",
+            "note",
+            "equipment",
+        ]
+        extra_kwargs = {
+            "make": {"required": False, "allow_blank": True},
+            "model": {"required": False, "allow_blank": True},
+            "payload": {"required": False, "allow_null": True},
+            "gvw": {"required": False, "allow_null": True},
         }
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        missing = [f for f in VEHICLE_REQUIRED if attrs.get(f) in (None, "")]
+        if missing:
+            raise serializers.ValidationError(
+                {f: ["This field is required."] for f in missing}
+            )
+        return attrs
+
+    def create_for(self, driver: Driver) -> Vehicle:
+        data = dict(self.validated_data)
+        equipment = [e.strip() for e in data.pop("equipment", []) if e.strip()]
+        vehicle = Vehicle.objects.create(driver=driver, **data)
+        VehicleEquipment.objects.bulk_create(
+            [VehicleEquipment(vehicle=vehicle, name=name) for name in equipment]
+        )
+        return vehicle
 
 
 class DriverBulkCreateSerializer(serializers.Serializer):
@@ -574,12 +744,14 @@ class DriverBulkCreateSerializer(serializers.Serializer):
     company__state = serializers.CharField(required=False, allow_blank=True)
     company__city = serializers.CharField(required=False, allow_blank=True)
     company__address = serializers.CharField(required=False, allow_blank=True)
-    vehicle__vehicle_type = serializers.CharField()
-    vehicle__make = serializers.CharField()
-    vehicle__model = serializers.CharField()
-    vehicle__year = serializers.IntegerField()
-    vehicle__payload = serializers.IntegerField()
-    vehicle__gvw = serializers.IntegerField()
+    # The vehicle is optional (SPEC-1.4 2.4): an empty block creates none. Once
+    # any vehicle value is given, these six are required (see validate).
+    vehicle__vehicle_type = serializers.CharField(required=False, allow_blank=True)
+    vehicle__make = serializers.CharField(required=False, allow_blank=True)
+    vehicle__model = serializers.CharField(required=False, allow_blank=True)
+    vehicle__year = serializers.IntegerField(required=False, allow_null=True)
+    vehicle__payload = serializers.IntegerField(required=False, allow_null=True)
+    vehicle__gvw = serializers.IntegerField(required=False, allow_null=True)
     vehicle__second_driver = serializers.PrimaryKeyRelatedField(
         queryset=Driver.objects.all(), required=False, allow_null=True
     )
@@ -649,6 +821,21 @@ class DriverBulkCreateSerializer(serializers.Serializer):
                 "vehicle_files and vehicle_file_names must have the same count."
             )
 
+        vehicle_values = {
+            k: v for k, v in attrs.items() if k.startswith("vehicle__")
+        }
+        if vehicle_files or not is_empty_block(vehicle_values):
+            missing = [
+                f"vehicle__{f}"
+                for f in VEHICLE_REQUIRED
+                if attrs.get(f"vehicle__{f}") in (None, "")
+            ]
+            if missing:
+                raise serializers.ValidationError(
+                    {f: ["This field is required."] for f in missing}
+                )
+            attrs["_with_vehicle"] = True
+
         company = Company.current()
         if not company.contract_template_text:
             raise serializers.ValidationError(
@@ -692,6 +879,7 @@ class DriverBulkCreateSerializer(serializers.Serializer):
         vehicle_files = validated_data.pop("vehicle_files", [])
         vehicle_file_names = validated_data.pop("vehicle_file_names", [])
         existing_company = validated_data.pop("driver_company", None)
+        with_vehicle = validated_data.pop("_with_vehicle", False)
         company_data = {
             k.replace("company__", ""): validated_data.pop(k)
             for k in list(validated_data.keys())
@@ -730,7 +918,14 @@ class DriverBulkCreateSerializer(serializers.Serializer):
                 company_fields = company_data
             driver.driver_company = driver_company
             driver.save(update_fields=["driver_company"])
-            vehicle = Vehicle.objects.create(driver=driver, **vehicle_data)
+            vehicle = (
+                Vehicle.objects.create(
+                    driver=driver,
+                    **{k: v for k, v in vehicle_data.items() if v is not None},
+                )
+                if with_vehicle
+                else None
+            )
             Deposit.objects.create(driver=driver, **deposit_data)
             contractor_address = ", ".join(
                 part
@@ -792,12 +987,13 @@ class DriverBulkCreateSerializer(serializers.Serializer):
                 ]
             )
 
-            VehicleFile.objects.bulk_create(
-                [
-                    VehicleFile(vehicle=vehicle, name=name, document=file)
-                    for file, name in zip(vehicle_files, vehicle_file_names)
-                ]
-            )
+            if vehicle is not None:
+                VehicleFile.objects.bulk_create(
+                    [
+                        VehicleFile(vehicle=vehicle, name=name, document=file)
+                        for file, name in zip(vehicle_files, vehicle_file_names)
+                    ]
+                )
 
         return driver
 

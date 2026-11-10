@@ -40,6 +40,7 @@ from .utils import (
 )
 from .pdf_generation import fill_w9, generate_contract
 from .document_ai import MAX_FILES_PER_REQUEST, build_prefill, parse_document
+from .team import NoVehicle, set_team
 from users.models import CustomUser, Team, Company
 from .models import (
     CompanyFile,
@@ -59,6 +60,8 @@ from .models import (
 )
 from .serializers import (
     DriverAssignSerializer,
+    DriverVehicleBlockSerializer,
+    is_empty_block,
     UnassignedDriverSerializer,
     CompanyFileSerializer,
     DepositHistoryViewSerializer,
@@ -127,6 +130,20 @@ class DriverViewSet(viewsets.ModelViewSet):
             return qs
         return Driver.objects.all()
 
+    def create(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        """Quick create; an optional `vehicle` block creates the driver's vehicle too."""
+        vehicle_block = _vehicle_block_serializer(request.data, driver=None)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            self.perform_create(serializer)
+            if vehicle_block is not None:
+                _create_vehicle(
+                    vehicle_block, serializer.instance, request.user, "with the driver"
+                )
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
     def perform_create(self, serializer):
         if self.request.user.department.name.lower() in [
             "management",
@@ -148,9 +165,16 @@ class DriverViewSet(viewsets.ModelViewSet):
         old_instance.manager = driver.manager
         old_instance.referral_by = driver.referral_by
         old_instance.driver_company = driver.driver_company
+        # Edit driver may add the vehicle a driver was created without.
+        vehicle_block = _vehicle_block_serializer(request.data, driver=driver)
         serializer = self.get_serializer(driver, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        updated_driver = serializer.save()
+        with transaction.atomic():
+            updated_driver = serializer.save()
+            if vehicle_block is not None:
+                _create_vehicle(
+                    vehicle_block, updated_driver, request.user, "from Edit driver"
+                )
         updated_driver.refresh_from_db()
         updated_driver.status
         updated_driver.manager
@@ -179,7 +203,7 @@ class DriverViewSet(viewsets.ModelViewSet):
             description = build_change_description(
                 old_instance,
                 updated_driver,
-                list(request.data.keys()),
+                [k for k in request.data.keys() if k != "vehicle"],
                 DRIVER_FK_DISPLAY,
             )
             if description:
@@ -201,6 +225,58 @@ class DriverViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             driver.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="team",
+        permission_classes=[IsAuthenticated],
+    )
+    def team(self, request: Request, pk: str | None = None) -> Response:
+        """
+        POST /hiring/drivers/{id}/team/ {second_driver_id}: set or clear the second driver.
+
+        Sets `second_driver` on this driver's first vehicle; null clears it.
+        The picked driver is taken off any other truck (`moved_from`). See
+        DRIVER_TEAM_API.md.
+        """
+        driver = self.get_object()
+        body = request.data if hasattr(request.data, "get") else {}
+        if "second_driver_id" not in body:
+            return Response(
+                {"detail": "second_driver_id is required (null clears).", "code": "invalid"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        raw = body.get("second_driver_id")
+        second = None
+        if raw not in (None, ""):
+            try:
+                second_id = int(raw)
+            except (TypeError, ValueError):
+                return Response(
+                    {
+                        "detail": "second_driver_id is required (null clears).",
+                        "code": "invalid",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if second_id == driver.id:
+                return Response(
+                    {
+                        "detail": "A driver cannot be their own second driver.",
+                        "code": "same_driver",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            second = get_object_or_404(self.get_queryset(), pk=second_id)
+        try:
+            result = set_team(driver, second, request.user)
+        except NoVehicle:
+            return Response(
+                {"detail": "Add a vehicle to this driver first.", "code": "no_vehicle"},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(result)
 
     @action(
         detail=True,
@@ -304,6 +380,39 @@ class DriverViewSet(viewsets.ModelViewSet):
                 "hub_driver_id": driver.hub_driver_id,
             }
         )
+
+
+def _vehicle_block_serializer(
+    data: Any, driver: Driver | None
+) -> DriverVehicleBlockSerializer | None:
+    """The validated optional `vehicle` block of a driver create or edit, or None.
+
+    Empty or missing: None. Filled: VEHICLE_REQUIRED apply, and a driver who
+    already has a vehicle is refused (Edit driver only adds a missing one).
+    Raises ValidationError as {"vehicle": ...}.
+    """
+    block = nested_object(data, "vehicle")
+    if is_empty_block(block):
+        return None
+    if driver is not None and driver.vehicles.exists():
+        raise ValidationError(
+            {"vehicle": ["This driver already has a vehicle. Edit it from the vehicle."]}
+        )
+    serializer = DriverVehicleBlockSerializer(data=block)
+    if not serializer.is_valid():
+        raise ValidationError({"vehicle": serializer.errors})
+    return serializer
+
+
+def _create_vehicle(
+    block: DriverVehicleBlockSerializer, driver: Driver, user: Any, why: str
+) -> Vehicle:
+    vehicle = block.create_for(driver)
+    if getattr(user, "is_authenticated", False):
+        VehicleHistory.objects.create(
+            vehicle=vehicle, changed_by=user, description=f"Vehicle added {why}"
+        )
+    return vehicle
 
 
 class DriverDropdownAPIView(generics.ListAPIView):
@@ -558,12 +667,12 @@ class DriverCompanyModalView(views.APIView):
         company = get_object_or_404(
             DriverCompany.objects.prefetch_related(
                 "drivers__status",
-                "drivers__vehicles",
+                "drivers__manager",
                 "companyfile_set",
             ),
             pk=driver.driver_company_id,
         )
-        serializer = DriverCompanyModalSerializer(company)
+        serializer = DriverCompanyModalSerializer(company, context={"driver": driver})
         return Response(serializer.data)
 
 
@@ -1064,6 +1173,11 @@ class DriverInviteSubmitView(views.APIView):
             "applicant_first_name": data.get("company_applicant_first_name") or "",
             "applicant_last_name": data.get("company_applicant_last_name") or "",
         }
+        # The vehicle is optional (SPEC-1.4 2.4): nothing filled, no Vehicle.
+        # Vehicle files need one to hang on, so they still make one.
+        vehicle_filled = not is_empty_block(
+            {**vehicle_data, "dock": dock_height, "equipment": equipment}
+        )
         vehicle_fields = {
             "make": vehicle_data.get("make") or "",
             "model": vehicle_data.get("model") or "",
@@ -1088,7 +1202,11 @@ class DriverInviteSubmitView(views.APIView):
                 driver_company = DriverCompany.objects.create(**company_fields)
                 driver.driver_company = driver_company
                 driver.save(update_fields=["driver_company"])
-                vehicle = Vehicle.objects.create(driver=driver, **vehicle_fields)
+                vehicle = (
+                    Vehicle.objects.create(driver=driver, **vehicle_fields)
+                    if vehicle_filled or uploads["vehicle"]
+                    else None
+                )
             else:
                 driver = claimed
                 for key, value in driver_fields.items():
@@ -1099,26 +1217,32 @@ class DriverInviteSubmitView(views.APIView):
                 driver_company.save()
                 driver.driver_company = driver_company
                 driver.save()
-                vehicle = driver.vehicles.order_by("id").first() or Vehicle(
-                    driver=driver
-                )
-                for key, value in vehicle_fields.items():
-                    setattr(vehicle, key, value)
-                vehicle.save()
-                VehicleEquipment.objects.filter(vehicle=vehicle).delete()
+                vehicle = driver.vehicles.order_by("id").first()
+                if vehicle_filled:
+                    vehicle = vehicle or Vehicle(driver=driver)
+                    for key, value in vehicle_fields.items():
+                        setattr(vehicle, key, value)
+                    vehicle.save()
+                    VehicleEquipment.objects.filter(vehicle=vehicle).delete()
+                elif vehicle is None and uploads["vehicle"]:
+                    # Vehicle files alone: a blank vehicle to hang them on.
+                    vehicle = Vehicle.objects.create(driver=driver, **vehicle_fields)
+                # An empty vehicle block leaves a vehicle the first submit
+                # made exactly as it is (SPEC-1.4 2.4: the vehicle is optional).
                 # The PDFs are generated from the answers, so new answers mean
                 # new PDFs; the old pair would otherwise sit next to them.
                 DriverFile.objects.filter(
                     driver=driver, name__in=SIGN_FILE_NAMES
                 ).delete()
 
-            VehicleEquipment.objects.bulk_create(
-                [
-                    VehicleEquipment(vehicle=vehicle, name=str(name))
-                    for name in equipment
-                    if name
-                ]
-            )
+            if vehicle is not None and vehicle_filled:
+                VehicleEquipment.objects.bulk_create(
+                    [
+                        VehicleEquipment(vehicle=vehicle, name=str(name))
+                        for name in equipment
+                        if name
+                    ]
+                )
 
             uploaded_driver_files = DriverFile.objects.bulk_create(
                 [
@@ -1132,11 +1256,15 @@ class DriverInviteSubmitView(views.APIView):
                     for file, name in uploads["company"]
                 ]
             )
-            uploaded_vehicle_files = VehicleFile.objects.bulk_create(
-                [
-                    VehicleFile(vehicle=vehicle, name=name, document=file)
-                    for file, name in uploads["vehicle"]
-                ]
+            uploaded_vehicle_files = (
+                VehicleFile.objects.bulk_create(
+                    [
+                        VehicleFile(vehicle=vehicle, name=name, document=file)
+                        for file, name in uploads["vehicle"]
+                    ]
+                )
+                if vehicle is not None
+                else []
             )
 
             w9_bytes = fill_w9(
@@ -1207,6 +1335,7 @@ class DriverInviteSubmitView(views.APIView):
             {
                 "detail": "Driver created.",
                 "driver_id": driver.id,
+                "vehicle_id": vehicle.id if vehicle is not None else None,
                 "w9_url": w9_file.document.url,
                 "contract_url": contract_file.document.url,
                 "files": {

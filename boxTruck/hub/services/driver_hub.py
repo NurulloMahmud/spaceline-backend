@@ -2,7 +2,8 @@
 
 Every call goes to ``{DRIVER_HUB_URL}/t/v1/...`` with the deployment's service
 token as a bearer token. Callers that must not fail because the hub is down
-(bid relays, payouts, blacklist and name pushes, the registration lookup)
+(bid relays, payouts, blacklist, name and driver profile pushes, the
+registration lookup)
 catch DriverHubError and log it; the invite endpoint lets it through so the
 dispatcher sees why nothing happened.
 """
@@ -23,6 +24,8 @@ TIMEOUT = 10
 # The registration lookup runs inside a page request, so it gives up sooner.
 LOOKUP_TIMEOUT = 4
 LOOKUP_LIMIT = 500
+# A profile push waits while the hub downloads the documents (30 s per file).
+PROFILE_TIMEOUT = 90
 
 BID_STATUSES = ("reviewing", "placed", "declined", "won", "lost", "blacklisted")
 PAYOUT_STATUSES = ("pending", "hold", "confirmed", "paid")
@@ -137,6 +140,24 @@ def link_driver(hub_driver_id, tenant_driver_id):
         "POST",
         f"/t/v1/drivers/{int(hub_driver_id)}/link",
         json={"tenant_driver_id": int(tenant_driver_id)},
+    )
+
+
+def put_driver_profile(
+    hub_driver_id: int, body: dict[str, Any]
+) -> dict[str, Any] | None:
+    """PUT /t/v1/drivers/{hub_driver_id}/profile: the carrier's record of the driver.
+
+    Body {first_name, last_name, phone, documents}, see hub.profiles. Answers
+    {hub_driver_id, changed, documents: [{external_id, status}]}; a driver
+    that never was a member here is a 404 with code not_found.
+    """
+    # The hub downloads every new document inside this request (30 s each).
+    return _request(
+        "PUT",
+        f"/t/v1/drivers/{int(hub_driver_id)}/profile",
+        json=body,
+        timeout=PROFILE_TIMEOUT,
     )
 
 

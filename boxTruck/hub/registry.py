@@ -22,7 +22,7 @@ from django.db import IntegrityError, transaction
 
 from hiring.models import Driver
 
-from . import payouts
+from . import payouts, profiles
 from .services import driver_hub
 
 logger = logging.getLogger(__name__)
@@ -221,6 +221,8 @@ def reconcile(driver: Driver, row: dict[str, Any]) -> None:
     if changes and _store(driver, changes, f"hub says {hub_status}"):
         if changes.get("hub_driver_id"):
             payouts.push_driver_payouts_later(driver.pk)
+            # Newly linked: the app shows this carrier's name, phone and documents.
+            profiles.push_profile_later(driver.pk, with_name=True)
 
 
 def _store(driver: Driver, changes: dict[str, Any], why: str) -> bool:

@@ -1313,3 +1313,439 @@ class VehicleEquipmentEditTests(TestCase):
             (driver.tax_exempt, driver.payee_code, driver.fatca_reporting_code),
             (True, '5', 'A'),
         )
+
+
+# --- SPEC-1.4: vehicle optional, Edit driver vehicle, second driver ------------
+
+import tempfile  # noqa: E402
+
+from django.test import override_settings  # noqa: E402
+
+from hiring.models import VehicleHistory  # noqa: E402
+
+LOCAL_FILES = dict(
+    STORAGES={
+        'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+        'staticfiles': {
+            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'
+        },
+    },
+    MEDIA_ROOT=tempfile.mkdtemp(),
+    DRIVER_HUB_TOKEN='',
+)
+
+VEHICLE = {
+    'vehicle__vehicle_type': 'Box Truck',
+    'vehicle__make': 'Ford',
+    'vehicle__model': 'Transit',
+    'vehicle__year': 2018,
+    'vehicle__payload': 3800,
+    'vehicle__gvw': 9500,
+}
+NEW_COMPANY = {
+    'company__name': 'Bob Hauling LLC',
+    'company__mc': '846834',
+    'company__employer_id': '12-3456789',
+    'company__phone_number': '+15550001111',
+}
+
+
+@override_settings(**LOCAL_FILES)
+class VehicleOptionalOnCreateTests(TestCase):
+    """Every creation path: an empty vehicle block makes no Vehicle and no error."""
+
+    def setUp(self):
+        Company.objects.create(
+            name='Space Line LLC',
+            contract_template_text='Agreement with {contractor_name}.',
+        )
+        self.staff = CustomUser.objects.create_user(
+            username='recruiter', password='x',
+            department=Department.objects.create(name='hiring'),
+        )
+        self.pending = DriverStatus.objects.create(name='pending')
+        self.client = APIClient()
+        self.client.force_authenticate(self.staff)
+
+    def _invite(self):
+        return DriverInviteLink.objects.create(
+            created_by=self.staff,
+            expires_at=timezone.now() + timezone.timedelta(days=7),
+        )
+
+    def _submit(self, vehicle, invite=None, **extra):
+        payload = {
+            'company_name': 'Bob Hauling LLC',
+            'driver': {'driver_full_name': 'Bob Driver', 'phone': '+15550001111'},
+            'vehicle': vehicle,
+            **extra,
+        }
+        invite = invite or self._invite()
+        url = f"{reverse('driver-invite-submit')}?token={invite.token}"
+        with patch('hiring.views.fill_w9', return_value=_pdf()), \
+             patch('hiring.views.generate_contract', return_value=_pdf()):
+            return APIClient().post(url, payload, format='json')
+
+    def _multipart(self, url, payload, client=None):
+        with patch('hiring.serializers.fill_w9', return_value=_pdf()), \
+             patch('hiring.serializers.generate_contract', return_value=_pdf()):
+            return (client or self.client).post(url, payload, format='multipart')
+
+    # invite link form (driver/invite/submit/)
+
+    def test_invite_form_without_a_vehicle(self):
+        response = self._submit({
+            'make': '', 'model': None, 'useful_cargo_length': '',
+            'dock': [], 'equipment': [], 'GVW_lbs': 0,
+        })
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertIsNone(response.data['vehicle_id'])
+        self.assertEqual(response.data['files']['vehicle'], [])
+        self.assertFalse(Vehicle.objects.exists())
+        self.assertTrue(Driver.objects.filter(id=response.data['driver_id']).exists())
+
+    def test_invite_form_with_no_vehicle_key_at_all(self):
+        url = f"{reverse('driver-invite-submit')}?token={self._invite().token}"
+        with patch('hiring.views.fill_w9', return_value=_pdf()), \
+             patch('hiring.views.generate_contract', return_value=_pdf()):
+            response = APIClient().post(url, {
+                'company_name': 'Bob Hauling LLC', 'driver_full_name': 'Bob Driver',
+            }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertFalse(Vehicle.objects.exists())
+
+    def test_invite_form_with_a_vehicle_still_creates_it(self):
+        response = self._submit({'make': 'Ford', 'equipment': ['Lift-Gate']})
+        self.assertEqual(response.status_code, 201, response.data)
+        vehicle = Vehicle.objects.get()
+        self.assertEqual(response.data['vehicle_id'], vehicle.id)
+        self.assertEqual(vehicle.make, 'Ford')
+        self.assertEqual(
+            list(VehicleEquipment.objects.values_list('name', flat=True)), ['Lift-Gate']
+        )
+
+    def test_a_resubmit_with_an_empty_vehicle_keeps_the_vehicle(self):
+        invite = self._invite()
+        first = self._submit(
+            {'make': 'Ford', 'model': 'Transit', 'equipment': ['Straps']}, invite=invite
+        )
+        self.assertEqual(first.status_code, 201, first.data)
+        second = self._submit(
+            {'make': '', 'model': '', 'dock': [], 'equipment': []},
+            invite=invite, company_name='Bob Hauling Inc',
+        )
+        self.assertEqual(second.status_code, 201, second.data)
+        self.assertEqual(second.data['driver_id'], first.data['driver_id'])
+        vehicle = Vehicle.objects.get()
+        self.assertEqual(second.data['vehicle_id'], vehicle.id)
+        self.assertEqual((vehicle.make, vehicle.model), ('Ford', 'Transit'))
+        self.assertEqual(
+            list(VehicleEquipment.objects.values_list('name', flat=True)), ['Straps']
+        )
+        self.assertEqual(
+            Driver.objects.get().driver_company.name, 'Bob Hauling Inc'
+        )
+
+    def test_a_resubmit_adds_the_vehicle_left_out_the_first_time(self):
+        invite = self._invite()
+        first = self._submit({}, invite=invite)
+        self.assertIsNone(first.data['vehicle_id'])
+        second = self._submit({'make': 'Isuzu', 'equipment': ['Lift-Gate']}, invite=invite)
+        self.assertEqual(second.status_code, 201, second.data)
+        vehicle = Vehicle.objects.get()
+        self.assertEqual((second.data['vehicle_id'], vehicle.make), (vehicle.id, 'Isuzu'))
+
+    def test_invite_form_equipment_alone_is_a_vehicle(self):
+        response = self._submit({'equipment': ['Straps']})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Vehicle.objects.count(), 1)
+
+    # old multipart invite (driver/invite/) and Add driver request (hiring/request/)
+
+    def test_old_multipart_invite_without_a_vehicle(self):
+        url = f"{reverse('driver-create-invite')}?token={self._invite().token}"
+        response = self._multipart(
+            url, {'full_name': 'Bob Driver', **NEW_COMPANY}, client=APIClient()
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertFalse(Vehicle.objects.exists())
+
+    def test_add_driver_request_without_a_vehicle(self):
+        response = self._multipart(reverse('driver-create-hr'), {
+            'full_name': 'Bob Driver', **NEW_COMPANY,
+            'vehicle__make': '', 'vehicle__year': '',
+            'driver_files': [SimpleUploadedFile('dl.pdf', b'%PDF')],
+            'driver_file_names': ['Driver license'],
+        })
+        self.assertEqual(response.status_code, 201, response.data)
+        driver = Driver.objects.get(id=response.data['driver_id'])
+        self.assertFalse(Vehicle.objects.exists())
+        self.assertIn(
+            'Driver license', driver.driverfile_set.values_list('name', flat=True)
+        )
+
+    def test_add_driver_request_with_a_vehicle(self):
+        response = self._multipart(reverse('driver-create-hr'), {
+            'full_name': 'Bob Driver', **NEW_COMPANY, **VEHICLE,
+        })
+        self.assertEqual(response.status_code, 201, response.data)
+        vehicle = Vehicle.objects.get()
+        self.assertEqual((vehicle.make, vehicle.year, vehicle.gvw), ('Ford', 2018, 9500))
+
+    def test_add_driver_request_partial_vehicle_needs_the_required_fields(self):
+        response = self._multipart(reverse('driver-create-hr'), {
+            'full_name': 'Bob Driver', **NEW_COMPANY,
+            'vehicle__make': 'Ford', 'vehicle__vin': '1FT',
+        })
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(
+            sorted(response.data),
+            ['vehicle__gvw', 'vehicle__model', 'vehicle__payload',
+             'vehicle__vehicle_type', 'vehicle__year'],
+        )
+        self.assertFalse(Driver.objects.exists())
+
+    def test_add_driver_request_vehicle_files_need_a_vehicle(self):
+        response = self._multipart(reverse('driver-create-hr'), {
+            'full_name': 'Bob Driver', **NEW_COMPANY,
+            'vehicle_files': [SimpleUploadedFile('ins.pdf', b'%PDF')],
+            'vehicle_file_names': ['Insurance'],
+        })
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('vehicle__make', response.data)
+
+    # quick create (POST /hiring/drivers/)
+
+    def test_quick_create_without_a_vehicle(self):
+        response = self.client.post(reverse('drivers-list'), {
+            'full_name': 'Quick Driver', 'status': self.pending.id,
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertFalse(Vehicle.objects.exists())
+
+    def test_quick_create_with_a_vehicle_block(self):
+        response = self.client.post(reverse('drivers-list'), {
+            'full_name': 'Quick Driver', 'status': self.pending.id,
+            'vehicle': {
+                'vehicle_type': 'Cargo Van', 'make': 'Ram', 'model': 'ProMaster',
+                'year': 2022, 'payload': 3000, 'gvw': 9000,
+            },
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Vehicle.objects.get().driver_id, response.data['id'])
+
+
+@override_settings(**LOCAL_FILES)
+class EditDriverVehicleTests(TestCase):
+    """Edit driver adds the vehicle a driver was created without (SPEC-1.4 2.5)."""
+
+    BLOCK = {
+        'vehicle_type': 'Box Truck', 'make': 'Isuzu', 'model': 'NPR', 'year': 2020,
+        'payload': 5000, 'gvw': 14500, 'length': 192,
+        'equipment': ['Lift-Gate', ' E-Tracks '],
+    }
+
+    def setUp(self):
+        Company.objects.create(name='Space Line LLC')
+        self.status = DriverStatus.objects.create(name='pending')
+        self.user = CustomUser.objects.create_user(username='disp', password='x')
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.driver = Driver.objects.create(full_name='Roy Johnson', status=self.status)
+        self.url = reverse('drivers-detail', args=[self.driver.id])
+
+    def test_creates_the_vehicle(self):
+        response = self.client.patch(self.url, {
+            'full_name': 'Roy L Johnson', 'vehicle': self.BLOCK,
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        vehicle = Vehicle.objects.get(driver=self.driver)
+        self.assertEqual((vehicle.make, vehicle.payload, vehicle.length), ('Isuzu', 5000, 192))
+        self.assertEqual(response.data['vehicle']['id'], vehicle.id)
+        self.assertEqual(response.data['full_name'], 'Roy L Johnson')
+        self.assertEqual(
+            sorted(VehicleEquipment.objects.values_list('name', flat=True)),
+            ['E-Tracks', 'Lift-Gate'],
+        )
+        self.assertTrue(VehicleHistory.objects.filter(vehicle=vehicle).exists())
+
+    def test_a_json_string_block_works_too(self):
+        response = self.client.patch(self.url, {
+            'vehicle': json.dumps(self.BLOCK),
+        }, format='multipart')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(Vehicle.objects.filter(driver=self.driver).exists())
+
+    def test_an_empty_block_is_ignored(self):
+        for block in ({}, None, {'make': '', 'year': None, 'equipment': []}):
+            response = self.client.patch(self.url, {
+                'note': 'x', 'vehicle': block,
+            }, format='json')
+            self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(Vehicle.objects.exists())
+
+    def test_a_partial_block_saves_nothing(self):
+        response = self.client.patch(self.url, {
+            'full_name': 'Changed', 'vehicle': {'make': 'Isuzu'},
+        }, format='json')
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(
+            sorted(response.data['vehicle']),
+            ['gvw', 'model', 'payload', 'vehicle_type', 'year'],
+        )
+        self.assertFalse(Vehicle.objects.exists())
+        self.driver.refresh_from_db()
+        self.assertEqual(self.driver.full_name, 'Roy Johnson')
+
+    def test_a_driver_with_a_vehicle_is_refused(self):
+        Vehicle.objects.create(driver=self.driver, make='A', model='B', payload=1, gvw=1)
+        response = self.client.patch(self.url, {'vehicle': self.BLOCK}, format='json')
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('already has a vehicle', str(response.data['vehicle']))
+        self.assertEqual(Vehicle.objects.count(), 1)
+
+
+@override_settings(**LOCAL_FILES)
+class DriverTeamTests(TestCase):
+    """POST /hiring/drivers/{id}/team/ and the drawer data (SPEC-1.4 2.5)."""
+
+    def setUp(self):
+        Company.objects.create(name='Space Line LLC')
+        self.status = DriverStatus.objects.create(name='pending')
+        self.user = CustomUser.objects.create_user(username='disp', password='x')
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.bob_co = DriverCompany.objects.create(name='Bob Hauling LLC')
+        self.bob = Driver.objects.create(
+            full_name='Bob Driver', status=self.status, driver_company=self.bob_co,
+        )
+        self.ann = Driver.objects.create(full_name='Ann Lee', status=self.status)
+        self.sam = Driver.objects.create(full_name='Sam Roe', status=self.status)
+        self.truck = Vehicle.objects.create(
+            driver=self.bob, make='Ford', model='E-450', payload=1, gvw=1,
+        )
+        self.sam_truck = Vehicle.objects.create(
+            driver=self.sam, make='Isuzu', model='NPR', payload=1, gvw=1,
+        )
+
+    def team(self, driver_id, body):
+        return self.client.post(
+            reverse('drivers-team', args=[driver_id]), body, format='json'
+        )
+
+    def test_set_and_clear(self):
+        response = self.team(self.bob.id, {'second_driver_id': self.ann.id})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data, {
+            'driver_id': self.bob.id,
+            'vehicle_id': self.truck.id,
+            'second_driver': {'id': self.ann.id, 'full_name': 'Ann Lee'},
+            'moved_from': None,
+            'replaced': None,
+        })
+        self.truck.refresh_from_db()
+        self.assertEqual(self.truck.second_driver_id, self.ann.id)
+        self.assertEqual(VehicleHistory.objects.filter(vehicle=self.truck).count(), 1)
+
+        again = self.team(self.bob.id, {'second_driver_id': self.ann.id})
+        self.assertEqual((again.data['moved_from'], again.data['replaced']), (None, None))
+
+        cleared = self.team(self.bob.id, {'second_driver_id': None})
+        self.assertEqual(cleared.status_code, 200, cleared.data)
+        self.assertIsNone(cleared.data['second_driver'])
+        self.assertEqual(cleared.data['replaced'], {'id': self.ann.id, 'full_name': 'Ann Lee'})
+        self.truck.refresh_from_db()
+        self.assertIsNone(self.truck.second_driver_id)
+
+    def test_a_driver_teamed_elsewhere_is_moved(self):
+        self.team(self.sam.id, {'second_driver_id': self.ann.id})
+        response = self.team(self.bob.id, {'second_driver_id': self.ann.id})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['moved_from'], {'id': self.sam.id, 'full_name': 'Sam Roe'})
+        self.sam_truck.refresh_from_db()
+        self.assertIsNone(self.sam_truck.second_driver_id)
+        self.truck.refresh_from_db()
+        self.assertEqual(self.truck.second_driver_id, self.ann.id)
+
+    def test_replacing_the_second_driver(self):
+        cal = Driver.objects.create(full_name='Cal Moe', status=self.status)
+        self.team(self.bob.id, {'second_driver_id': self.ann.id})
+        response = self.team(self.bob.id, {'second_driver_id': cal.id})
+        self.assertEqual(response.data['replaced'], {'id': self.ann.id, 'full_name': 'Ann Lee'})
+
+    def test_errors(self):
+        no_vehicle = self.team(self.ann.id, {'second_driver_id': self.bob.id})
+        self.assertEqual(no_vehicle.status_code, 409)
+        self.assertEqual(no_vehicle.data['code'], 'no_vehicle')
+        self.assertEqual(no_vehicle.data['detail'], 'Add a vehicle to this driver first.')
+        self.assertEqual(self.team(self.ann.id, {'second_driver_id': None}).status_code, 409)
+
+        same = self.team(self.bob.id, {'second_driver_id': self.bob.id})
+        self.assertEqual((same.status_code, same.data['code']), (400, 'same_driver'))
+        self.assertEqual(self.team(self.bob.id, {}).status_code, 400)
+        self.assertEqual(self.team(self.bob.id, {'second_driver_id': 'x'}).status_code, 400)
+
+        self.assertEqual(self.team(99999, {'second_driver_id': self.ann.id}).status_code, 404)
+        self.assertEqual(self.team(self.bob.id, {'second_driver_id': 99999}).status_code, 404)
+        self.truck.refresh_from_db()
+        self.assertIsNone(self.truck.second_driver_id)
+
+        anonymous = APIClient().post(
+            reverse('drivers-team', args=[self.bob.id]),
+            {'second_driver_id': self.ann.id}, format='json',
+        )
+        self.assertIn(anonymous.status_code, (401, 403))
+
+    def drawer(self, driver):
+        response = self.client.get(reverse('driver-company-modal'), {'driver': driver.id})
+        self.assertEqual(response.status_code, 200, response.data)
+        return response.data
+
+    def test_the_drawer_shows_the_team_both_ways(self):
+        self.team(self.bob.id, {'second_driver_id': self.ann.id})
+        bob = {'id': self.bob.id, 'full_name': 'Bob Driver'}
+        ann = {'id': self.ann.id, 'full_name': 'Ann Lee'}
+
+        owner_side = self.drawer(self.bob)
+        rows = {d['id']: d for d in owner_side['drivers']}
+        self.assertEqual(sorted(rows), [self.bob.id, self.ann.id])
+        self.assertEqual(rows[self.bob.id]['second_driver'], ann)
+        self.assertEqual(rows[self.bob.id]['team_with'], ann)
+        self.assertEqual(rows[self.bob.id]['team_role'], 'owner')
+        self.assertIsNone(rows[self.bob.id]['vehicle']['shared_with'])
+        self.assertEqual(rows[self.bob.id]['vehicle']['second_driver'], ann)
+        self.assertFalse(rows[self.bob.id]['is_team_partner'])
+        self.assertTrue(rows[self.ann.id]['is_team_partner'])
+        self.assertEqual(rows[self.ann.id]['team_role'], 'second')
+        self.assertEqual(
+            [(v['id'], v['shared_with']) for v in owner_side['vehicles']],
+            [(self.truck.id, None)],
+        )
+
+        second_side = self.drawer(self.ann)
+        self.assertIsNone(second_side['id'])
+        rows = {d['id']: d for d in second_side['drivers']}
+        self.assertEqual(sorted(rows), [self.bob.id, self.ann.id])
+        me = rows[self.ann.id]
+        self.assertIsNone(me['vehicle'])
+        self.assertEqual(me['team_with'], bob)
+        self.assertEqual(me['team_role'], 'second')
+        self.assertEqual(
+            [(v['id'], v['shared_with']) for v in me['shared_vehicles']],
+            [(self.truck.id, bob)],
+        )
+        self.assertTrue(rows[self.bob.id]['is_team_partner'])
+        self.assertEqual(rows[self.bob.id]['vehicle']['shared_with'], bob)
+        self.assertEqual(
+            [(v['id'], v['shared_with']) for v in second_side['vehicles']],
+            [(self.truck.id, bob)],
+        )
+
+    def test_the_drawer_without_a_team(self):
+        data = self.drawer(self.sam)
+        (row,) = data['drivers']
+        self.assertEqual(
+            (row['team_with'], row['team_role'], row['second_driver'], row['shared_vehicles']),
+            (None, None, None, []),
+        )
+        self.assertEqual(row['vehicle']['id'], self.sam_truck.id)

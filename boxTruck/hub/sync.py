@@ -1,12 +1,18 @@
-"""Create or update the hiring records from a hub driver profile.
+"""Receive a driver from the Driver Hub (POST /api/hub/drivers/).
 
-The hub is the source of truth for a connected driver: on every profile,
-vehicle or document change it posts the whole profile here and we overwrite
-our copy. Matching is by hub_driver_id first, then by the email the invite
-went to, so the Driver row the dispatcher invited is the one that gets linked.
+Since release 1.4 the carrier owns the driver record (SPEC-1.4 section 2):
+name, phone, email, mailing address, company, unit number and vehicles are
+edited here and pushed to the hub (hub.profiles), never taken from it. The
+hub's push links the driver, reports its position and brings the driver's
+own app documents (license, medical card, other).
 
-What the sync never does: edit a DriverCompany other drivers share, write an
-empty app value over one we have, or touch a file a dispatcher uploaded.
+Matching is by hub_driver_id first, then by the email the invite went to, so
+the Driver row the dispatcher invited is the one that gets linked. Only when
+no row matches (the hub knows a member we lost) is a Driver created, from the
+hub's name, email and phone, with no company and no vehicle.
+
+The sync never touches a file a dispatcher uploaded, and nothing it saves is
+pushed back to the hub (hub.profiles.syncing).
 """
 
 import logging
@@ -19,54 +25,33 @@ import requests
 from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.base import ContentFile
 from django.db import transaction
-from django.db.models import Model, Q
+from django.db.models import Model
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils.text import get_valid_filename
 
-from hiring.models import (
-    Driver,
-    DriverCompany,
-    DriverFile,
-    DriverStatus,
-    Vehicle,
-    VehicleEquipment,
-    VehicleFile,
-)
+from hiring.models import Driver, DriverFile, DriverStatus
 from hiring.places import place_for_position
 from mobile.models import DriverLocation
 
-from . import payouts, registry
+from . import payouts, profiles, registry
+from .profiles import APP_FILE_SUFFIX, APP_FILES
 
 logger = logging.getLogger(__name__)
 
+# The driver documents the app manages. Insurance and registration (sent by
+# hub builds before 1.4) belong to the carrier's vehicle and are ignored.
 DRIVER_DOC_KINDS = ("license", "medical_card", "other")
-VEHICLE_DOC_KINDS = ("insurance", "registration")
 DOC_TITLES = {
     "license": "Driver License",
     "medical_card": "Medical Card",
-    "insurance": "Insurance",
-    "registration": "Registration",
 }
-APP_FILE_SUFFIX = " (driver app)"
-# Files this sync stored: marked with hub_kind, or, before that field existed,
-# only named "<title> (driver app)". Nothing else is ever replaced or removed.
-APP_FILES = ~Q(hub_kind="") | Q(name__endswith=APP_FILE_SUFFIX)
+# Documents the driver uploaded in the app. "carrier" ones came from a carrier
+# (maybe another one) and are not stored; no source is an old hub: the app's.
+APP_SOURCES = ("", "app")
 # DriverLocation.device for positions the hub reported.
 APP_DEVICE = "driver app"
 INVITE_STATUSES = ("declined", "accepted")
-
-COMPANY_IDENTITY = ("mc", "employer_id", "name", "business_as")
-# The app sends 0 for a number the driver left empty, so 0 means "not given".
-VEHICLE_NUMBERS = (
-    ("payload", "payload_lbs"),
-    ("gvw", "gvw_lbs"),
-    ("length", "cargo_length_in"),
-    ("width", "cargo_width_in"),
-    ("height", "cargo_height_in"),
-    ("door_open_width", "door_width_in"),
-    ("door_open_height", "door_height_in"),
-)
 
 
 def fetch_file(url):
@@ -91,11 +76,6 @@ def _int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _positive_int(value: Any) -> int | None:
-    number = _int(value)
-    return number if number and number > 0 else None
 
 
 def _date(value):
@@ -130,76 +110,74 @@ def find_driver(hub_driver_id, email):
     )
 
 
-@transaction.atomic
+def _new_driver(hub_driver_id: int, data: dict[str, Any], email: str) -> Driver:
+    """A member the carrier has no row for: what the hub knows, nothing else."""
+    full_name = " ".join(
+        p for p in (_text(data.get("first_name")), _text(data.get("last_name"))) if p
+    )
+    return Driver(
+        status=default_status(),
+        full_name=full_name or email or f"Driver {hub_driver_id}",
+        email=email or None,
+        phone_number=_text(data.get("phone")) or None,
+    )
+
+
 def upsert_driver(payload: dict[str, Any]) -> Driver:
+    """Link the driver, record the position and store the app documents.
+
+    Accepts the hub's payload from before 1.4 too: its `vehicle` and the
+    driver's company and address keys are ignored.
+    """
     hub_driver_id = _int(payload.get("hub_driver_id"))
     if not hub_driver_id:
         raise ValueError("hub_driver_id is required")
     data = payload.get("driver") or {}
+    if not isinstance(data, dict):
+        data = {}
     email = _text(data.get("email"))
 
-    driver = find_driver(hub_driver_id, email)
-    if driver is None:
-        driver = Driver(status=default_status())
-    before = _snapshot(driver)
-    linked_before = driver.hub_driver_id
+    with profiles.syncing(), transaction.atomic():
+        driver = find_driver(hub_driver_id, email)
+        if driver is None:
+            driver = _new_driver(hub_driver_id, data, email)
+        before = _snapshot(driver)
+        linked_before = driver.hub_driver_id
 
-    driver.hub_driver_id = hub_driver_id
-    driver.hub_invite_status = "active"
-    full_name = " ".join(
-        p for p in (_text(data.get("first_name")), _text(data.get("last_name"))) if p
-    )
-    if full_name:
-        driver.full_name = full_name
-    elif not driver.full_name:
-        driver.full_name = email or f"Driver {hub_driver_id}"
-    if email:
-        driver.email = email
-    if data.get("phone"):
-        driver.phone_number = _text(data.get("phone"))
-    for ours, theirs, limit in (
-        ("address", "address", 255),
-        ("city", "city", 250),
-        ("state", "state", 55),
-        ("zip_code", "zip", 20),
-    ):
-        if data.get(theirs):
-            setattr(driver, ours, _text(data.get(theirs), limit))
+        driver.hub_driver_id = hub_driver_id
+        driver.hub_invite_status = "active"
 
-    position = _position(data)
-    moved = position is not None and _is_new_position(driver, position)
-    if moved:
-        driver.current_latitude, driver.current_longitude = position
-        driver.current_location_updated_at = timezone.now()
-        # The place the Tracking page shows, from the nearest known ZIP. The
-        # mailing address above stays what the driver typed.
-        for key, value in place_for_position(*position).items():
-            setattr(driver, key, value)
+        position = _position(data)
+        moved = position is not None and _is_new_position(driver, position)
+        if moved:
+            driver.current_latitude, driver.current_longitude = position
+            driver.current_location_updated_at = timezone.now()
+            # The place the Tracking page shows, from the nearest known ZIP.
+            # The mailing address stays the carrier's.
+            for key, value in place_for_position(*position).items():
+                setattr(driver, key, value)
 
-    company = _upsert_company(driver, data)
-    if company:
-        driver.driver_company = company
-    # A push is the whole profile, and most pushes now only move the position:
-    # rows whose values did not change are not written.
-    _save_changed(driver, before)
-    if linked_before != hub_driver_id:
-        # Newly linked: the app shows the payouts the driver already has here.
-        payouts.push_driver_payouts_later(driver.pk)
-    if moved:
-        DriverLocation.objects.create(
-            driver=driver,
-            latitude=position[0],
-            longitude=position[1],
-            device=APP_DEVICE,
-        )
+        # Most pushes only move the position: rows whose values did not change
+        # are not written.
+        _save_changed(driver, before)
+        if moved:
+            DriverLocation.objects.create(
+                driver=driver,
+                latitude=position[0],
+                longitude=position[1],
+                device=APP_DEVICE,
+            )
 
-    vehicle = _upsert_vehicle(driver, payload.get("vehicle"))
-    # The hub always sends the key (null when the driver has no documents).
-    # Without it we cannot tell a removed document from a short payload.
-    reconcile = "documents" in payload
-    _apply_documents(
-        driver, vehicle, payload.get("documents") or [], reconcile=reconcile
-    )
+        # The hub always sends the key (null when the driver has no documents).
+        # Without it we cannot tell a removed document from a short payload.
+        reconcile = "documents" in payload
+        _apply_documents(driver, payload.get("documents") or [], reconcile=reconcile)
+
+        if linked_before != hub_driver_id:
+            # Newly linked: the app shows the payouts the driver already has
+            # here, and this carrier's name, phone and documents.
+            payouts.push_driver_payouts_later(driver.pk)
+            profiles.push_profile_later(driver.pk, with_name=True)
     registry.forget(email, driver.email, hub_driver_ids=[hub_driver_id, linked_before])
     return driver
 
@@ -220,9 +198,9 @@ def _position(data: dict[str, Any]) -> tuple[float, float] | None:
 def _is_new_position(driver: Driver, position: tuple[float, float]) -> bool:
     """False when the hub resends the position it sent last time.
 
-    The hub pushes the profile on profile, vehicle and document changes, not
-    on position updates, so a repeated position is old news: it must not mark
-    the location fresh or undo a ZIP a dispatcher typed since.
+    The hub also pushes on document changes, with the last position again: a
+    repeated position is old news and must not mark the location fresh or
+    undo a ZIP a dispatcher typed since.
     """
     if driver.pk is None:
         return True
@@ -237,94 +215,6 @@ def _is_new_position(driver: Driver, position: tuple[float, float]) -> bool:
         abs(last.latitude - position[0]) > 1e-6
         or abs(last.longitude - position[1]) > 1e-6
     )
-
-
-def _company_fields(data: dict[str, Any]) -> dict[str, str]:
-    return {
-        "mc": _text(data.get("mc")),
-        "employer_id": _text(data.get("employer_id")),
-        "name": _text(data.get("company_name")),
-        "business_as": _text(data.get("business_as")),
-        "business_type": _text(data.get("business_type")),
-        "zipcode": _text(data.get("zip")),
-        "state": _text(data.get("state")),
-        "city": _text(data.get("city")),
-        "address": _text(data.get("address")),
-    }
-
-
-def _norm_name(value: str | None) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
-
-
-def _norm_number(value: str | None) -> str:
-    return re.sub(r"\D+", "", value or "")
-
-
-def _same_company(company: DriverCompany, fields: dict[str, str]) -> bool:
-    """Whether the app values describe this company (same MC or EIN, else same name)."""
-    matched = False
-    for key in ("mc", "employer_id"):
-        ours, theirs = _norm_number(getattr(company, key)), _norm_number(fields[key])
-        if ours and theirs:
-            if ours != theirs:
-                return False
-            matched = True
-    if matched:
-        return True
-    names = {
-        n for n in (_norm_name(company.name), _norm_name(company.business_as)) if n
-    }
-    return any(
-        _norm_name(fields[key]) in names
-        for key in ("name", "business_as")
-        if _norm_name(fields[key])
-    )
-
-
-def _is_shared(company: DriverCompany, driver: Driver) -> bool:
-    return Driver.objects.filter(driver_company=company).exclude(pk=driver.pk).exists()
-
-
-def _upsert_company(driver: Driver, data: dict[str, Any]) -> DriverCompany | None:
-    """The driver's own company, as the app describes it.
-
-    A company other drivers use (for example the carrier's own LLC that every
-    company driver is attached to) is never edited from the app. If the app
-    describes that same company the driver stays on it untouched; otherwise the
-    driver gets a company of their own with the app values.
-    """
-    fields = _company_fields(data)
-    if not any(fields[key] for key in COMPANY_IDENTITY):
-        return driver.driver_company
-    company = driver.driver_company
-    if company is not None and _is_shared(company, driver):
-        if _same_company(company, fields):
-            return company
-        logger.info(
-            "hub driver %s: company %s is shared, the app company %r becomes its own",
-            driver.hub_driver_id,
-            company.pk,
-            fields["name"] or fields["business_as"] or fields["mc"],
-        )
-        company = None
-    if company is None:
-        company = DriverCompany()
-    before = _snapshot(company)
-    for key, value in fields.items():
-        # An empty app value never blanks one we have.
-        if value:
-            setattr(company, key, value)
-    company.phone_number = _text(data.get("phone")) or company.phone_number or ""
-    company.email = _text(data.get("email")) or company.email
-    company.applicant_first_name = (
-        _text(data.get("first_name")) or company.applicant_first_name
-    )
-    company.applicant_last_name = (
-        _text(data.get("last_name")) or company.applicant_last_name
-    )
-    _save_changed(company, before)
-    return company
 
 
 def _snapshot(instance: Model) -> dict[str, Any]:
@@ -356,89 +246,46 @@ def _save_changed(instance: Model, before: dict[str, Any]) -> bool:
     return True
 
 
-def _upsert_vehicle(driver: Driver, data: dict[str, Any] | None) -> Vehicle | None:
-    if not data:
-        return driver.vehicles.order_by("id").first()
-    vehicle = driver.vehicles.order_by("id").first() or Vehicle(
-        driver=driver, payload=0, gvw=0, make="", model=""
-    )
-    before = _snapshot(vehicle)
-    vehicle.make = _text(data.get("make")) or vehicle.make
-    vehicle.model = _text(data.get("model")) or vehicle.model
-    vehicle.vehicle_type = _text(data.get("vehicle_type")) or vehicle.vehicle_type
-    year = _positive_int(data.get("year"))
-    if year:
-        vehicle.year = year
-    for ours, theirs in VEHICLE_NUMBERS:
-        value = _positive_int(data.get(theirs))
-        if value:
-            setattr(vehicle, ours, value)
-    dock = _positive_int(data.get("dock_height_in"))
-    dock_type = _text(data.get("dock_type"))
-    if dock or dock_type:
-        vehicle.dock_height = " ".join(
-            p for p in (f"{dock} in" if dock else "", dock_type) if p
-        )
-    _save_changed(vehicle, before)
-
-    unit = _text(data.get("unit_number"))
-    if unit and driver.unit_number != unit:
-        Driver.objects.filter(pk=driver.pk).update(unit_number=unit)
-        driver.unit_number = unit
-
-    equipment = [
-        e.strip() for e in _text(data.get("equipment"), 1000).split(",") if e.strip()
-    ]
-    names = [e[:255] for e in equipment]
-    current = list(
-        VehicleEquipment.objects.filter(vehicle=vehicle)
-        .order_by("id")
-        .values_list("name", flat=True)
-    )
-    if names and names != current:
-        VehicleEquipment.objects.filter(vehicle=vehicle).delete()
-        VehicleEquipment.objects.bulk_create(
-            [VehicleEquipment(vehicle=vehicle, name=name) for name in names]
-        )
-    return vehicle
-
-
 class _Stored:
     """What one push did with its documents, for removing the ones it no longer has."""
 
     def __init__(self) -> None:
         self.driver_files: set[int] = set()
-        self.vehicle_files: set[int] = set()
         # Kinds whose new file could not be downloaded: their old files stay.
         self.unfetched: set[str] = set()
-        self.names: set[tuple[str, str]] = set()
+        self.names: set[str] = set()
 
-    def keep(self, model: type[Model], pk: int) -> None:
-        (self.vehicle_files if model is VehicleFile else self.driver_files).add(pk)
+    def keep(self, pk: int) -> None:
+        self.driver_files.add(pk)
 
-    def unique_name(self, model: type[Model], title: str) -> str:
+    def unique_name(self, title: str) -> str:
         """'<title> (driver app)', numbered when two documents share a title."""
         title = title[:200]
         name = f"{title}{APP_FILE_SUFFIX}"
         number = 1
-        while (model.__name__, name) in self.names:
+        while name in self.names:
             number += 1
             name = f"{title} {number}{APP_FILE_SUFFIX}"
-        self.names.add((model.__name__, name))
+        self.names.add(name)
         return name
+
+
+def is_app_document(doc: dict[str, Any]) -> bool:
+    """A driver document the driver uploaded in the app (or from a hub without sources)."""
+    kind = _text(doc.get("kind"), 40) or "other"
+    source = _text(doc.get("source"), 40).lower()
+    return kind in DRIVER_DOC_KINDS and source in APP_SOURCES
 
 
 def _apply_documents(
     driver: Driver,
-    vehicle: Vehicle | None,
     documents: list[dict[str, Any]],
     reconcile: bool = True,
 ) -> None:
     driver_updates = {}
-    vehicle_updates = {}
     stored = _Stored()
     for doc in documents:
-        if not isinstance(doc, dict):
+        if not isinstance(doc, dict) or not is_app_document(doc):
             continue
         kind = _text(doc.get("kind"), 40) or "other"
         expires = _date(doc.get("expires_at"))
@@ -446,11 +293,7 @@ def _apply_documents(
             driver_updates["cdl_expiration"] = expires
         elif kind == "medical_card" and expires:
             driver_updates["medical_exp_date"] = expires
-        elif kind == "insurance" and expires:
-            vehicle_updates["insurance_expiry_date"] = expires
-        elif kind == "registration" and expires:
-            vehicle_updates["registration_expiry_date"] = expires
-        _store_document(driver, vehicle, kind, doc, stored)
+        _store_document(driver, kind, doc, stored)
     driver_updates = {
         k: v for k, v in driver_updates.items() if getattr(driver, k) != v
     }
@@ -458,21 +301,12 @@ def _apply_documents(
         Driver.objects.filter(pk=driver.pk).update(**driver_updates)
         for key, value in driver_updates.items():
             setattr(driver, key, value)
-    if vehicle:
-        vehicle_updates = {
-            k: v for k, v in vehicle_updates.items() if getattr(vehicle, k) != v
-        }
-        if vehicle_updates:
-            Vehicle.objects.filter(pk=vehicle.pk).update(**vehicle_updates)
-            for key, value in vehicle_updates.items():
-                setattr(vehicle, key, value)
     if reconcile:
-        _remove_dropped_documents(driver, vehicle, stored)
+        _remove_dropped_documents(driver, stored)
 
 
 def _store_document(
     driver: Driver,
-    vehicle: Vehicle | None,
     kind: str,
     doc: dict[str, Any],
     stored: _Stored,
@@ -481,22 +315,17 @@ def _store_document(
     title = _text(doc.get("title")) or DOC_TITLES.get(
         kind, kind.replace("_", " ").title()
     )
-
-    if kind in VEHICLE_DOC_KINDS:
-        if vehicle is None:
-            return
-        model, owner = VehicleFile, {"vehicle": vehicle}
-    else:
-        model, owner = DriverFile, {"driver": driver}
-    name = stored.unique_name(model, title)
+    name = stored.unique_name(title)
     existing = (
-        model.objects.filter(APP_FILES, name=name, **owner).order_by("-id").first()
+        DriverFile.objects.filter(APP_FILES, name=name, driver=driver)
+        .order_by("-id")
+        .first()
     )
 
     if not url:
         # The document is still in the app, just without a file: keep ours.
         if existing:
-            stored.keep(model, existing.pk)
+            stored.keep(existing.pk)
         return
     filename = _upload_name(url, kind)
     if (
@@ -505,20 +334,23 @@ def _store_document(
         and _same_upload(existing.document.name, filename)
     ):
         if existing.hub_kind != kind:
-            model.objects.filter(pk=existing.pk).update(hub_kind=kind)
-        stored.keep(model, existing.pk)
+            DriverFile.objects.filter(pk=existing.pk).update(hub_kind=kind)
+        stored.keep(existing.pk)
         return
     content = fetch_file(url)
     if content is None:
         stored.unfetched.add(kind)
         if existing:
-            stored.keep(model, existing.pk)
+            stored.keep(existing.pk)
         return
-    model.objects.filter(APP_FILES, name=name, **owner).delete()
-    created = model.objects.create(
-        name=name, document=ContentFile(content, name=filename), hub_kind=kind, **owner
+    DriverFile.objects.filter(APP_FILES, name=name, driver=driver).delete()
+    created = DriverFile.objects.create(
+        name=name,
+        document=ContentFile(content, name=filename),
+        hub_kind=kind,
+        driver=driver,
     )
-    stored.keep(model, created.pk)
+    stored.keep(created.pk)
 
 
 def _upload_name(url: str, kind: str) -> str:
@@ -543,37 +375,29 @@ def _same_upload(stored_name: str, filename: str) -> bool:
     )
 
 
-def _remove_dropped_documents(
-    driver: Driver, vehicle: Vehicle | None, stored: _Stored
-) -> None:
+def _remove_dropped_documents(driver: Driver, stored: _Stored) -> None:
     """Remove the app's files for documents the driver removed in the app.
 
-    Only files the sync stored itself. A kind whose new file could not be
-    downloaded keeps its old files, and so do the unmarked older files (whose
-    kind is unknown) when any download failed.
+    Only driver files the sync stored itself. Vehicle files it stored before
+    1.4 (insurance, registration) now belong to the carrier and stay. A kind
+    whose new file could not be downloaded keeps its old files, and so do the
+    unmarked older files (whose kind is unknown) when any download failed.
     """
-    targets: list[tuple[type[Model], dict[str, Any], set[int]]] = [
-        (DriverFile, {"driver": driver}, stored.driver_files)
-    ]
-    if vehicle is not None:
-        targets.append((VehicleFile, {"vehicle": vehicle}, stored.vehicle_files))
-    for model, owner, kept in targets:
-        dropped = model.objects.filter(APP_FILES, **owner).exclude(pk__in=kept)
-        if stored.unfetched:
-            dropped = dropped.exclude(hub_kind__in=stored.unfetched).exclude(
-                hub_kind=""
-            )
-        for row in dropped:
-            logger.info(
-                "hub driver %s removed %s in the app: %s %s (%s) deleted",
-                driver.hub_driver_id,
-                row.hub_kind or "a document",
-                model.__name__,
-                row.pk,
-                row.name,
-            )
-            # The stored object is left in storage, as when a dispatcher deletes a file.
-            row.delete()
+    dropped = DriverFile.objects.filter(APP_FILES, driver=driver).exclude(
+        pk__in=stored.driver_files
+    )
+    if stored.unfetched:
+        dropped = dropped.exclude(hub_kind__in=stored.unfetched).exclude(hub_kind="")
+    for row in dropped:
+        logger.info(
+            "hub driver %s removed %s in the app: DriverFile %s (%s) deleted",
+            driver.hub_driver_id,
+            row.hub_kind or "a document",
+            row.pk,
+            row.name,
+        )
+        # The stored object is left in storage, as when a dispatcher deletes a file.
+        row.delete()
 
 
 def set_invite_status(invite_id: Any, email: Any, invite_status: str) -> Driver | None:

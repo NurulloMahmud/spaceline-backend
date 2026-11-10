@@ -6,10 +6,10 @@ from django.dispatch import receiver
 
 from accounting.models import Payout, PayoutExpense
 from billing.models import BrokerBlacklist, Load, LoadStop
-from hiring.models import Driver
+from hiring.models import Driver, DriverFile
 from users.models import Company
 
-from . import payouts
+from . import payouts, profiles
 from .blacklist import push_blacklist
 from .services import driver_hub
 from .tenant import push_tenant_name
@@ -106,6 +106,97 @@ def load_stop_changed(
         .values_list("id", flat=True)
         .first()
     )
+
+
+# --- The carrier's driver record (SPEC-1.4 section 2.2) -------------------------
+
+# Read before a save: the profile fields plus the link, so a newly linked
+# driver is pushed too.
+DRIVER_FIELDS = profiles.PROFILE_FIELDS + ("hub_driver_id", "hub_invite_status")
+
+
+@receiver(pre_save, sender=Driver)
+def remember_driver_for_hub(
+    sender: type[Driver], instance: Driver, **kwargs: Any
+) -> None:
+    instance._hub_profile_old = None
+    if instance.pk and driver_hub.configured() and not profiles.is_syncing():
+        instance._hub_profile_old = (
+            Driver.objects.filter(pk=instance.pk).values(*DRIVER_FIELDS).first()
+        )
+
+
+@receiver(post_save, sender=Driver)
+def driver_changed_for_hub(
+    sender: type[Driver], instance: Driver, created: bool, **kwargs: Any
+) -> None:
+    if profiles.is_syncing() or not driver_hub.configured():
+        return
+    if not profiles.is_pushed(instance):
+        return
+    old = getattr(instance, "_hub_profile_old", None)
+    if created:
+        profiles.push_profile_later(instance.pk, with_name=True)
+        return
+    if old is None:
+        return
+    changed = {f for f in DRIVER_FIELDS if old.get(f) != getattr(instance, f)}
+    if not changed:
+        return
+    # A new link sends the name and phone; otherwise only when they changed.
+    with_name = bool(
+        changed & {*profiles.NAME_FIELDS, "hub_driver_id", "hub_invite_status"}
+    )
+    profiles.push_profile_later(instance.pk, with_name=with_name)
+
+
+def _driver_file_changed(driver_id: int | None, *names: str | None) -> None:
+    """Push the driver if one of these file names is a document the hub gets."""
+    if not driver_id or not any(profiles.classify(n) for n in names):
+        return
+    if Driver.objects.filter(
+        pk=driver_id, hub_driver_id__isnull=False, hub_invite_status="active"
+    ).exists():
+        profiles.push_profile_later(driver_id)
+
+
+@receiver(pre_save, sender=DriverFile)
+def remember_driver_file_for_hub(
+    sender: type[DriverFile], instance: DriverFile, **kwargs: Any
+) -> None:
+    instance._hub_old = None
+    if instance.pk and driver_hub.configured() and not profiles.is_syncing():
+        instance._hub_old = (
+            DriverFile.objects.filter(pk=instance.pk)
+            .values("name", "driver_id")
+            .first()
+        )
+
+
+@receiver(post_save, sender=DriverFile)
+def driver_file_saved(
+    sender: type[DriverFile], instance: DriverFile, **kwargs: Any
+) -> None:
+    if profiles.is_syncing() or not driver_hub.configured():
+        return
+    if profiles.is_app_file(instance):
+        return
+    old = getattr(instance, "_hub_old", None) or {}
+    _driver_file_changed(instance.driver_id, instance.name, old.get("name"))
+    if old.get("driver_id") and old["driver_id"] != instance.driver_id:
+        # Moved to another driver: off the first one's documents too.
+        _driver_file_changed(old["driver_id"], old.get("name"))
+
+
+@receiver(post_delete, sender=DriverFile)
+def driver_file_deleted(
+    sender: type[DriverFile], instance: DriverFile, **kwargs: Any
+) -> None:
+    if profiles.is_syncing() or not driver_hub.configured():
+        return
+    if profiles.is_app_file(instance):
+        return
+    _driver_file_changed(instance.driver_id, instance.name)
 
 
 @receiver(pre_save, sender=Company)
