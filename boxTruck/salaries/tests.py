@@ -232,3 +232,33 @@ class TheApi(SalariesBase):
         self.assertEqual(parse_month('2026-02'), date(2026, 2, 1))
         with self.assertRaises(ValueError):
             parse_month('2026-2-1')
+
+
+class LeaderboardTests(SalariesBase):
+    def test_ranks_dispatchers_by_pickup_profit_and_shows_no_pay(self):
+        EmployeeSalary.objects.create(user=self.dana, month=NOV, fixed_salary=D('1000'), profit_percentage=D('10'))
+        self.load(self.dana, central(2026, 11, 2), carrier='1300', driver='874')            # 426
+        self.load(self.sam, central(2026, 11, 3), carrier='2000', driver='1000')            # 1000
+        self.load(self.sam, central(2026, 11, 4), carrier='900', driver='100', status=self.cancelled)
+        self.load(self.dana, central(2026, 10, 30), pickup=central(2026, 11, 1))           # pick-up in Nov counts
+        self.load(self.dana, central(2026, 11, 5), pickup=central(2026, 12, 1))            # pick-up in Dec does not
+        r = self.api(self.dana).get(reverse('salaries-leaderboard'), {'month': '2026-11'})
+        self.assertEqual(r.status_code, 200)
+        rows = r.data['rows']
+        self.assertEqual([(x['rank'], x['user']['id'], x['profit'], x['loads_count']) for x in rows],
+                         [(1, self.sam.id, D('1000.00'), 1), (2, self.dana.id, D('852.00'), 2)])
+        self.assertNotIn('commission', rows[0])
+        self.assertNotIn('fixed_salary', rows[0])
+        self.assertEqual((r.data['total_profit'], r.data['total_loads']), (D('1852.00'), 3))
+
+    def test_lists_idle_dispatchers_and_anyone_who_booked(self):
+        self.load(self.elena, central(2026, 11, 2))
+        r = self.api(self.sam).get(reverse('salaries-leaderboard'), {'month': '2026-11'})
+        ids = [x['user']['id'] for x in r.data['rows']]
+        self.assertEqual(ids[0], self.elena.id)
+        self.assertCountEqual(ids, [self.elena.id, self.dana.id, self.sam.id])
+        self.assertNotIn(self.boss.id, ids)
+
+    def test_needs_sign_in_and_a_month(self):
+        self.assertIn(APIClient().get(reverse('salaries-leaderboard'), {'month': '2026-11'}).status_code, (401, 403))
+        self.assertEqual(self.api(self.sam).get(reverse('salaries-leaderboard'), {'month': 'nov'}).status_code, 400)

@@ -249,6 +249,57 @@ def month_report(first, today=None):
     }
 
 
+BOOKING_DEPARTMENTS = ('dispatch', 'dispatch manager')
+
+
+def leaderboard(first, today=None):
+    """Who booked the most profit in the month, for everyone to see: the same profit the Salaries
+    tab counts (loads by pick-up date in the month, Cancelled and Rejected left out), with no pay
+    figures. Active dispatchers with nothing booked yet are listed too, at the bottom."""
+    today = today or timezone.localdate()
+    last = month_end(first)
+    profit = defaultdict(lambda: ZERO)
+    count = defaultdict(int)
+    for load in commission_loads(first):
+        profit[load.booked_by_id] += profit_of(load)
+        count[load.booked_by_id] += 1
+
+    dept = Q()
+    for name in BOOKING_DEPARTMENTS:
+        dept |= Q(department__name__iexact=name)
+    users = CustomUser.objects.select_related('department').filter(Q(is_active=True, is_superuser=False) & dept | Q(id__in=list(profit)))
+    rows = [
+        {
+            'user': {
+                'id': u.id,
+                'username': u.username,
+                'first_name': u.first_name,
+                'last_name': u.last_name,
+                'department': u.department.name if u.department else None,
+                'is_active': u.is_active,
+            },
+            'profit': money(profit[u.id]),
+            'loads_count': count[u.id],
+        }
+        for u in users
+    ]
+    rows.sort(key=lambda r: (-r['profit'], -r['loads_count'], _person_key(r['user'])))
+    for i, row in enumerate(rows):
+        row['rank'] = i + 1
+    return {
+        'month': month_key(first),
+        'through': min(today, last) if today >= first else first,
+        'is_current': first <= today <= last,
+        'total_profit': money(sum(profit.values(), ZERO)),
+        'total_loads': sum(count.values()),
+        'rows': rows,
+    }
+
+
+def _person_key(user):
+    return (' '.join(p for p in (user['first_name'], user['last_name']) if p) or user['username']).lower()
+
+
 def stops_of(loads):
     """load id -> (origin, destination) as 'City, ST', from the load's stops."""
     by_load = defaultdict(list)

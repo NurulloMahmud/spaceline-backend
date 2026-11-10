@@ -1,7 +1,7 @@
-"""Management only: the month's pay per employee, saving salaries, one employee's detail, and
-the daily bonus rule."""
+"""Management only: the month's pay per employee, saving salaries, one employee's detail and
+the daily bonus rule. Everyone signed in: the month's profit leaderboard."""
 from django.shortcuts import get_object_or_404
-from rest_framework import status, views
+from rest_framework import permissions, status, views
 from rest_framework.response import Response
 
 from users.models import CustomUser
@@ -69,3 +69,15 @@ class BonusRuleView(views.APIView):
             defaults={'profit_step': ser.validated_data['profit_step'], 'bonus_amount': ser.validated_data['bonus_amount'], 'created_by': request.user},
         )
         return Response(BonusRuleSerializer(rule).data, status=status.HTTP_201_CREATED)
+
+
+class LeaderboardView(views.APIView):
+    """GET ?month=YYYY-MM: profit booked per dispatcher in the month, highest first. Open to every
+    signed-in user; it carries no salary, commission or bonus."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        first, err = _month_or_400(request)
+        if err:
+            return err
+        return Response(services.leaderboard(first))
