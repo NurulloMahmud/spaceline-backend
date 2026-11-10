@@ -264,6 +264,11 @@ def leaderboard(first, today=None):
         profit[load.booked_by_id] += profit_of(load)
         count[load.booked_by_id] += 1
 
+    rules = list(BonusRule.objects.select_related('created_by'))
+    by_day = defaultdict(list)
+    for (uid, _), day in days_of(booked_loads(first)).items():
+        by_day[uid].append(day)
+
     dept = Q()
     for name in BOOKING_DEPARTMENTS:
         dept |= Q(department__name__iexact=name)
@@ -280,6 +285,10 @@ def leaderboard(first, today=None):
             },
             'profit': money(profit[u.id]),
             'loads_count': count[u.id],
+            'days': [
+                {'date': d['date'], 'loads': d['loads'], 'profit': money(d['profit']), 'bonus': money(d['bonus'])}
+                for d in sorted(bonus_lines(by_day.get(u.id, []), rules), key=lambda d: d['date'])
+            ],
         }
         for u in users
     ]
@@ -292,8 +301,38 @@ def leaderboard(first, today=None):
         'is_current': first <= today <= last,
         'total_profit': money(sum(profit.values(), ZERO)),
         'total_loads': sum(count.values()),
+        'rule': _public_rule(rule_on(rules, min(today, last) if today >= first else first)),
         'rows': rows,
     }
+
+
+def _public_rule(rule):
+    if rule is None or rule.profit_step <= ZERO or rule.bonus_amount <= ZERO:
+        return None
+    return {'profit_step': money(rule.profit_step), 'bonus_amount': money(rule.bonus_amount)}
+
+
+def leaderboard_loads(user, first):
+    """The loads a person booked (created) in the month, oldest first, with the Central day they
+    were booked on, for the leaderboard's Performance calendar."""
+    loads = list(booked_loads(first).filter(booked_by=user).order_by('created_at'))
+    places = stops_of(loads)
+    rows = []
+    for load in loads:
+        origin, destination = places.get(load.id, ('', ''))
+        rows.append({
+            'id': load.id,
+            'shipment': load.shipment,
+            'load_number': load.load_number,
+            'origin': origin,
+            'destination': destination,
+            'booked_at': load.created_at,
+            'booked_date': local_date(load.created_at),
+            'pickup_date': load.pickup_date,
+            'status': load.status.name if load.status else None,
+            'profit': money(profit_of(load)),
+        })
+    return {'month': month_key(first), 'user': {'id': user.id, 'first_name': user.first_name, 'last_name': user.last_name, 'username': user.username}, 'loads': rows}
 
 
 def _person_key(user):

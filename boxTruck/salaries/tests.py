@@ -262,3 +262,27 @@ class LeaderboardTests(SalariesBase):
     def test_needs_sign_in_and_a_month(self):
         self.assertIn(APIClient().get(reverse('salaries-leaderboard'), {'month': '2026-11'}).status_code, (401, 403))
         self.assertEqual(self.api(self.sam).get(reverse('salaries-leaderboard'), {'month': 'nov'}).status_code, 400)
+
+
+class LeaderboardDaysTests(SalariesBase):
+    def test_days_carry_profit_and_bonus_by_day_booked(self):
+        BonusRule.objects.create(effective_from=date(2026, 7, 1), profit_step=D('500'), bonus_amount=D('50'))
+        self.load(self.dana, central(2026, 11, 6, 9), carrier='2000', driver='750')                 # 1250
+        self.load(self.dana, central(2026, 11, 6, 15), carrier='800', driver='600')                 # 200
+        self.load(self.dana, central(2026, 11, 7), pickup=central(2026, 12, 2), carrier='900', driver='700')  # 200
+        r = self.api(self.sam).get(reverse('salaries-leaderboard'), {'month': '2026-11'})
+        dana = next(x for x in r.data['rows'] if x['user']['id'] == self.dana.id)
+        self.assertEqual([(d['date'], d['loads'], d['profit'], d['bonus']) for d in dana['days']],
+                         [(date(2026, 11, 6), 2, D('1450.00'), D('100.00')), (date(2026, 11, 7), 1, D('200.00'), D('0.00'))])
+        self.assertEqual(r.data['rule'], {'profit_step': D('500.00'), 'bonus_amount': D('50.00')})
+        sam = next(x for x in r.data['rows'] if x['user']['id'] == self.sam.id)
+        self.assertEqual(sam['days'], [])
+
+    def test_loads_by_day_booked(self):
+        LoadStop.objects.create(load=self.load(self.dana, central(2026, 11, 6, 23, 30)), order=1, city='Dallas', state='TX', load_pickup=True)
+        self.load(self.dana, central(2026, 10, 31, 23, 0), pickup=central(2026, 11, 2))            # booked in October
+        self.load(self.dana, central(2026, 11, 8), status=self.cancelled)
+        r = self.api(self.sam).get(reverse('salaries-leaderboard-loads', args=[self.dana.id]), {'month': '2026-11'})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([(l['booked_date'], l['origin'], l['profit']) for l in r.data['loads']], [(date(2026, 11, 6), 'Dallas, TX', D('426.00'))])
+        self.assertIn(APIClient().get(reverse('salaries-leaderboard-loads', args=[self.dana.id]), {'month': '2026-11'}).status_code, (401, 403))

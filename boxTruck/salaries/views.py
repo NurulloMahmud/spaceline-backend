@@ -81,3 +81,16 @@ class LeaderboardView(views.APIView):
         if err:
             return err
         return Response(services.leaderboard(first))
+
+
+class LeaderboardLoadsView(views.APIView):
+    """GET ?month=YYYY-MM: the loads one person booked in the month, by the day booked. Open to
+    every signed-in user, like the leaderboard."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, pk):
+        first, err = _month_or_400(request)
+        if err:
+            return err
+        user = get_object_or_404(CustomUser, pk=pk)
+        return Response(services.leaderboard_loads(user, first))
