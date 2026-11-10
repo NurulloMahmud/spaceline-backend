@@ -1,7 +1,7 @@
 from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
-from django.db.models import Count, F, Prefetch, Q, Sum
+from django.db.models import Count, F, OuterRef, Prefetch, Q, Subquery, Sum
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework import status, views
@@ -94,7 +94,13 @@ def payout_queryset():
     return Payout.objects.select_related(*PAYOUT_RELATED).prefetch_related(
         'load__loadfile_set',
         Prefetch('expenses', queryset=PayoutExpense.objects.select_related('deduction', 'deduction__type').prefetch_related('deduction__payout_links__payout'))
-    ).annotate(notes_n=Count('notes', distinct=True))
+    ).annotate(
+        notes_n=Count('notes', distinct=True),
+        # The driver's earliest payout; the row with this id is their first payout.
+        first_payout_id=Subquery(
+            Payout.objects.filter(load__driver_id=OuterRef('load__driver_id')).order_by('id').values('id')[:1]
+        ),
+    )
 
 
 def payout_filters(request, qs, with_status=True):

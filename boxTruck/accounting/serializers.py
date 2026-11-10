@@ -70,6 +70,7 @@ def payout_dict(p, detail=False):
         'paid_at': p.paid_at, 'paid_by': user_dict(p.paid_by), 'reopened_at': p.reopened_at,
         'expenses': [link_dict(l, p.status) for l in links],
         'notes_count': len(p.notes.all()) if detail else getattr(p, 'notes_n', 0),
+        'is_first_for_driver': bool(p.load.driver_id) and getattr(p, 'first_payout_id', None) == p.id,
         'updated_at': p.updated_at, 'created_at': p.created_at,
     }
     if detail:
