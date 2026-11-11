@@ -24,11 +24,6 @@ class CreateNegotiationRequest(BaseModel):
     )
 
 
-class SendSuggestionRequest(BaseModel):
-    body: Optional[str] = Field(None, description="omit to send the draft unchanged")
-    subject: Optional[str] = None
-
-
 class WriteMessageRequest(BaseModel):
     body: str = Field(..., max_length=20_000, description="plain text; line breaks are kept")
 

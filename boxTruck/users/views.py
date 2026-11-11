@@ -8,19 +8,16 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import PermissionDenied
 from rest_framework import viewsets
-from rest_framework.decorators import action
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .permissions import IsAdminUser, IsDispatchManager, IsDispatch, IsInternalService, IsUpdater, is_developer
-from .models import PasswordReset, Company, CustomUser, Department, Team, UserInvite, Page, UserPageAccess
+from .permissions import IsAdminUser, IsDispatchManager, IsInternalService, IsUpdater, is_developer
+from .models import PasswordReset, Company, CustomUser, Department, UserInvite, Page, UserPageAccess
 from .serializers import (
     InviteUserSerializer, PasswordResetRequestSerializer, PasswordResetSerializer, CompanySerializer, UserProfileSerializer, RegisterWithInviteSerializer, UserRegisterSerializer, CustomTokenObtainPairSerializer,
     UserProfileUpdateSerializer, UserUpdateSerializer, UserListSerializer, DepartmentSerializer, UpdaterUsersSerializer,
-    PageSerializer, UserPageAccessSerializer, MyPageAccessSerializer,
-    TeamSerializer, TeamAssignUsersSerializer, TeamMemberSerializer
+    PageSerializer, UserPageAccessSerializer, MyPageAccessSerializer
 )
 
-from hiring.models import Driver  # noqa: E402  (team deletion unassigns drivers)
 
 User = get_user_model()
 
@@ -324,108 +321,3 @@ class UserBulkView(views.APIView):
         return Response(list(users))
 
 
-class TeamViewSet(viewsets.ModelViewSet):
-    """
-    Dispatch teams.
-    """
-    serializer_class = TeamSerializer
-
-    def get_permissions(self):
-        if self.request.method in ('GET', 'HEAD', 'OPTIONS'):
-            return [IsAuthenticated()]
-        return [(IsAdminUser | IsDispatchManager)()]
-
-    def get_queryset(self):
-        queryset = (
-            Team.objects
-            .select_related('lead')
-            .annotate(
-                members_total=Count('members', distinct=True),
-                drivers_total=Count('drivers', distinct=True),
-            )
-        )
-        is_active = self.request.query_params.get('is_active')
-        if is_active in ('true', 'false'):
-            queryset = queryset.filter(is_active=is_active == 'true')
-
-        search = self.request.query_params.get('search')
-        if search:
-            queryset = queryset.filter(name__icontains=search)
-
-        return queryset
-
-    def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
-
-    def destroy(self, request, *args, **kwargs):
-        """
-        Deleting a team unassigns its members and drivers rather than
-        cascading — losing driver records because a team was tidied up would
-        be unrecoverable.
-        """
-        team = self.get_object()
-        members = CustomUser.objects.filter(team=team).update(team=None)
-        drivers = Driver.objects.filter(team=team).update(team=None)
-        team.delete()
-        return Response(
-            {"detail": "Team deleted.", "users_unassigned": members,
-             "drivers_unassigned": drivers},
-            status=status.HTTP_200_OK,
-        )
-
-    @action(detail=True, methods=['get'])
-    def members(self, request, pk=None):
-        """The dispatchers on this team."""
-        team = self.get_object()
-        users = CustomUser.objects.filter(team=team).select_related('department')
-        return Response(TeamMemberSerializer(users, many=True).data)
-
-    @action(detail=True, methods=['post'], url_path='assign-users')
-    def assign_users(self, request, pk=None):
-        """Move users onto this team. Users already elsewhere are re-pointed."""
-        team = self.get_object()
-        serializer = TeamAssignUsersSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        user_ids = serializer.validated_data['user_ids']
-
-        eligible = CustomUser.objects.filter(id__in=user_ids)
-        found = set(eligible.values_list('id', flat=True))
-        rejected = [uid for uid in user_ids if uid not in found]
-
-        updated = eligible.update(team=team)
-        return Response({
-            "assigned": updated,
-            "rejected_user_ids": rejected,
-            "detail": (
-                "Users that do not exist were skipped."
-                if rejected else "All users assigned."
-            ),
-        })
-
-    @action(detail=True, methods=['post'], url_path='remove-users')
-    def remove_users(self, request, pk=None):
-        team = self.get_object()
-        serializer = TeamAssignUsersSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        removed = CustomUser.objects.filter(
-            id__in=serializer.validated_data['user_ids'], team=team
-        ).update(team=None)
-        return Response({"removed": removed})
-
-
-class UnassignedUsersAPIView(generics.ListAPIView):
-    """
-    Dispatch users with no team yet — the worklist for getting everyone
-    assigned, since the column is nullable for existing records.
-    """
-    serializer_class = TeamMemberSerializer
-    permission_classes = [IsAdminUser | IsDispatchManager | IsUpdater]
-
-    def get_queryset(self):
-        queryset = CustomUser.objects.filter(team__isnull=True).select_related('department')
-        only_dispatch = self.request.query_params.get('dispatch_only')
-        if only_dispatch != 'false':
-            queryset = queryset.filter(
-                department__name__in=['Dispatch', 'Dispatch Manager', 'Updater']
-            )
-        return queryset

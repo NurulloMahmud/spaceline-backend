@@ -5,7 +5,6 @@ The bid replies to the Sylectus alert by Message-ID.
 """
 import pytest
 
-from config.settings import config
 from database import models
 from services import inbound
 from services.negotiations import NegotiationError, create_negotiation
@@ -32,11 +31,6 @@ def own_account(session):
 
 def _headers(**claims):
     return {"Authorization": f"Bearer {make_token(**claims)}"}
-
-
-def test_company_status_reports_the_shared_mailbox_only(client, session, own_account):
-    resp = client.get("/api/v1/accounts", headers=_headers())
-    assert resp.json() == {"connected": False}
 
 
 async def _bid(session, user_id=7):
@@ -201,9 +195,9 @@ def test_a_reply_leaves_from_the_mailbox_that_sent_the_bid(
     monkeypatch.setattr(outbound, "send", fake_send)
 
     resp = client.post(
-        f"/api/v1/suggestions/{suggestion.id}/send", headers=_headers(), json={}
+        f"/api/v1/conversations/{negotiation.id}/messages", headers=_headers(), json={"body": "Our rate is $3,200."}
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 201
     assert sent[0]["grant_id"] == "grant-own-7"
 
 
@@ -222,7 +216,7 @@ def test_a_reply_waits_when_the_bidding_mailbox_was_disconnected(
     monkeypatch.setattr(outbound, "send", fake_send)
 
     resp = client.post(
-        f"/api/v1/suggestions/{suggestion.id}/send", headers=_headers(), json={}
+        f"/api/v1/conversations/{negotiation.id}/messages", headers=_headers(), json={"body": "Our rate is $3,200."}
     )
     assert resp.status_code == 409
     assert "jane@gmail.com" in str(resp.json())

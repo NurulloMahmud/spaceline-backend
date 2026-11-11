@@ -1,10 +1,8 @@
 from django.urls import path
 from rest_framework.routers import SimpleRouter
 from .views import (BrokersViewSet, LoadStopsViewSet,
-                    LoadsViewSet, LoadStatusesViewSet, BatchListView, PaymentTypeViewSet, BestProfitLoadsAPIView,
-                    LoadFilesAPIView, LoadHistoryByIdAPIView, BrokerListView, LoadsCountByProcessView, RateConfirmationUploadView,
-                    BatchViewSet, BatchLoadViewSet, BatchLoadDropDown, MultipleBatchLoadCreateView, LoadByDriverForStatementView, BatchLoadByIDListAPIView,
-                    GenerateCSVView, DailyReportByDispatchersAPIView, DriversReportAPIView, LoadsPaySummaryAPIView, BrokerImportAPIView, TagViewSet, LoadTagViewSet,
+                    LoadsViewSet, LoadStatusesViewSet, PaymentTypeViewSet, LoadFilesAPIView, LoadHistoryByIdAPIView, RateConfirmationUploadView,
+                    DailyReportByDispatchersAPIView, DriversReportAPIView, LoadsPaySummaryAPIView, TagViewSet, LoadTagViewSet,
                     BrokerBlacklistViewSet
                     )
 from .internal_views import (InternalBookedLoadsCountView, InternalBookLoadView, InternalBrokerBlacklistBulkView, InternalBrokerResolveView, InternalBrokersBulkView, InternalBusyDriversView,
@@ -16,8 +14,6 @@ router.register(r'broker-blacklist', BrokerBlacklistViewSet, basename="broker-bl
 router.register(r'loads', LoadsViewSet, basename="loads") #checked
 router.register(r'load-statuses', LoadStatusesViewSet, basename="load-statuses") #checked
 router.register(r'load-stops', LoadStopsViewSet, basename="load-stops") #checked
-router.register(r'batch', BatchViewSet, basename="batch") #checked
-router.register(r'batch-loads', BatchLoadViewSet, basename="batch-load") #checked
 router.register(r'payment-types', PaymentTypeViewSet, basename="payment-types") #checked
 router.register(r'tags', TagViewSet, basename="tags") #checked
 router.register(r'load-tags', LoadTagViewSet, basename="load-tags") #checked
@@ -26,20 +22,10 @@ urlpattern = ([
     path('loads/<int:pk>/history/', LoadHistoryByIdAPIView.as_view(), name='loadhistory-by-id'), #checked
     path('load-files/', LoadFilesAPIView.as_view(), name='upload-files'), #checked
     path('load-files/file/<int:file_id>/', LoadFilesAPIView.as_view(), name='file-detail'), #checked
-    path('broker-list/', BrokerListView.as_view(), name='broker-list'), #checked
     path('rate-con-upload/', RateConfirmationUploadView.as_view(), name='rate-con-upload'), #checked
-    path('batch-load-dropdown/', BatchLoadDropDown.as_view(), name='batch-load-dropdown'), #checked
-    path('multiple-batch-load-create/', MultipleBatchLoadCreateView.as_view(), name='multiple-batch-load-create'), #checked
-    path('driver-load-dropdown/', LoadByDriverForStatementView.as_view(), name='load-driver-statement-dropdown'), #checked
-    path('batch/<int:pk>/loads/', BatchLoadByIDListAPIView.as_view(), name='batch-loads-by-id'), #checked
-    path('loads-by-statuses/', LoadsCountByProcessView.as_view(), name='loads-by-statuses'), #checked
-    path('batch-list/', BatchListView.as_view(), name='batch-list'), #checked
-    path('factoring-csv/', GenerateCSVView.as_view(), name='factoring-csv'), #need test credentials
     path('daily-dispatcher-report/', DailyReportByDispatchersAPIView.as_view(), name='daily-dispatcher-report'), #checked
     path('drivers-report/', DriversReportAPIView.as_view(), name='drivers-report'),
     path('loads-pay-summary/', LoadsPaySummaryAPIView.as_view(), name='loads-pay-summary'), #checked
-    path('brokers-import/', BrokerImportAPIView.as_view(), name='brokers-import'), #checked
-    path('best-profitable-load/', BestProfitLoadsAPIView.as_view(), name='best-profitable-load'),
 
     # email-agent (server-to-server, X-Internal-Secret)
     path('internal/company/<int:company_id>/', InternalCompanyProfileView.as_view(), name='internal-company'),

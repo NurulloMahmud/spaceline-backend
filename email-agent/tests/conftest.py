@@ -72,12 +72,7 @@ def bid_status_reports(monkeypatch):
         reports.append((negotiation.load_uuid, status))
         return True
 
-    def record_sync(negotiation, status, note=None):
-        reports.append((negotiation.load_uuid, status))
-        return True
-
     monkeypatch.setattr(boxtruck, "report_bid_status", record)
-    monkeypatch.setattr(boxtruck, "report_bid_status_sync", record_sync)
     return reports
 
 

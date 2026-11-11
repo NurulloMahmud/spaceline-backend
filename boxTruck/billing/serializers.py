@@ -4,7 +4,7 @@ from django.db import transaction
 from payroll.models import StatementLoad
 from .models import (Broker, BrokerBlacklist, normalize_mc,
                      LoadStatus, Load, LoadHistory, LoadFile, LoadStop,
-                     Batch, BatchLoad, PaymentType, Tag, LoadTag
+                     Batch, PaymentType, Tag, LoadTag
                      )
 
 
@@ -31,13 +31,6 @@ class BrokersSerializer(serializers.ModelSerializer):
             if existing:
                 return existing
         return super().create(validated_data)
-
-
-class BrokersUseSerializer(serializers.ModelSerializer):
-
-    class Meta:
-        model = Broker
-        fields = ['id', 'name', 'address']
 
 
 class LoadStatusesSerializer(serializers.ModelSerializer):
@@ -101,110 +94,9 @@ class LoadStopWriteSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-class BatchLoadViewSerializer(serializers.ModelSerializer):
-    load = serializers.SerializerMethodField(method_name='get_load')
-    batch = serializers.SerializerMethodField(method_name='get_batch')
-    created_by = serializers.SerializerMethodField(method_name='get_created_by')
-
-    class Meta:
-        model = BatchLoad
-        fields = '__all__'
-
-    def get_load(self, obj):
-        if obj.load:
-            return {
-                "id": obj.load.id,
-                "load_number": obj.load.load_number,
-                "shipment": f"SH - {obj.load.shipment}" if obj.load.shipment else None,
-                "carrier_pay": obj.load.carrier_pay,
-                "driver_pay": obj.load.driver_pay,
-                "status": obj.load.status.name if obj.load.status else None
-            }
-        return None
-
-    def get_batch(self, obj):
-        if obj.batch:
-            return {
-                "id": obj.batch.id,
-                "name": obj.batch.name,
-                "date": obj.batch.date
-            }
-        return None
-
-    def get_created_by(self, obj):
-        if obj.created_by:
-            return {
-                "id": obj.created_by.id,
-                "username": obj.created_by.username,
-                "first_name": obj.created_by.first_name,
-                "last_name": obj.created_by.last_name
-            }
-        return None
-
-
-class BatchLoadWriteSerializer(serializers.ModelSerializer):
-
-    class Meta:
-        model = BatchLoad
-        fields = '__all__'
-
-
-class BatchViewSerializer(serializers.ModelSerializer):
-    loads_count = serializers.SerializerMethodField()
-    total_carrier_pay = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Batch
-        fields = '__all__'
-
-    def get_loads_count(self, obj):
-        from django.db.models import Count
-        status_counts = obj.batchload_set.values('status').annotate(count=Count('id'))
-        result = {
-            'In Review': 0,
-            'Completed': 0,
-            'Total': 0
-        }
-        total = 0
-        for entry in status_counts:
-            status = entry['status']
-            count = entry['count']
-            if status in ['In Review', 'Completed']:
-                result[status] = count
-            total += count
-        result['Total'] = total
-        return result
-
-    def get_total_carrier_pay(self, obj):
-        from django.db.models import Sum
-        total = obj.batchload_set.aggregate(
-            total_pay=Sum('load__carrier_pay')
-        )['total_pay']
-        return total or 0
-
-
-class BatchWriteSerializer(serializers.ModelSerializer):
-
-    class Meta:
-        model = Batch
-        fields = '__all__'
-
-
-class BatchMultipleLoadSerializer(serializers.Serializer):
-    batch = serializers.IntegerField()
-    loads = serializers.ListField(child=serializers.IntegerField(), allow_empty=False)
-
-
 class BatchFileUploadSerializer(serializers.Serializer):
     batch = serializers.PrimaryKeyRelatedField(queryset=Batch.objects.all())
     file = serializers.FileField()
-
-
-class BatchUseSerializer(serializers.ModelSerializer):
-
-    class Meta:
-        model = Batch
-        fields = ['id', 'name', 'date']
 
 
 class LoadFilesViewSerializer(serializers.ModelSerializer):
@@ -470,13 +362,6 @@ class LoadUseSerializer(serializers.ModelSerializer):
         return obj.status.name if obj.status else None
 
 
-class LoadByDriverSerializer(serializers.ModelSerializer):
-
-    class Meta:
-        model = Load
-        fields = ['id', 'load_number', 'shipment', 'driver_pay', 'carrier_pay', 'pickup_date', 'drop_date']
-
-
 class PaymentTypeSerializer(serializers.ModelSerializer):
 
     class Meta:
@@ -613,7 +498,6 @@ class LoadsViewSerializer(serializers.ModelSerializer):
     def get_profit(self, obj):
         profit = (obj.carrier_pay or 0) - (obj.driver_pay or 0)
         return profit
-
 
 
 class BrokerBlacklistSerializer(serializers.ModelSerializer):

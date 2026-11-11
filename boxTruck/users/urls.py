@@ -4,13 +4,11 @@ from rest_framework.routers import SimpleRouter
 from .views import (CompanyProfileView, RegisterAPIView, PasswordResetRequestView, PasswordResetView, DispatchUsers,
                     UserProfileUpdateView, UserUpdateView, UserListAPIView, UserRetrieveAPIView, DepartmentViewSet,
                     UpdaterUsersAPIView, CreateInviteView, InviteDetailView, RegisterWithInviteView, UserBulkView,
-                    PageViewSet, UserPageAccessViewSet, MyPageAccessView,
-                    TeamViewSet, UnassignedUsersAPIView
+                    PageViewSet, UserPageAccessViewSet, MyPageAccessView
                     )
 
 router = SimpleRouter()
 router.register(r'departments', DepartmentViewSet, basename='department') #checked
-router.register(r'teams', TeamViewSet, basename='team')
 router.register(r'pages', PageViewSet, basename='page')
 router.register(r'user-page-access', UserPageAccessViewSet, basename='user-page-access')
 
@@ -27,7 +25,6 @@ urlpatterns = [
     path('dispatch-users/', DispatchUsers.as_view(), name='dispatch-users'), #checked
     path('updater-users/', UpdaterUsersAPIView.as_view(), name='updater-users'), #checked
     path('users-bulk/', UserBulkView.as_view(), name='user-bulk'),
-    path('unassigned/', UnassignedUsersAPIView.as_view(), name='unassigned-users'),
     path('my-pages/', MyPageAccessView.as_view(), name='my-pages'),
 
     path('invite/create/', CreateInviteView.as_view(), name='invite-create'),

@@ -1,9 +1,7 @@
 from decimal import Decimal
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from hiring.models import Driver
-from datetime import datetime, timedelta
-from django.utils.timezone import localdate
+from datetime import datetime
 from users.permissions import IsAdminUser
 from datetime import datetime
 import calendar
@@ -64,78 +62,6 @@ class LoadStatusAnalyticsAPIView(APIView):
                 }
             result[status_name]['total_driver_pay'] += driver_pay
         return Response(result)
-
-
-class DriverWeeklyPerformanceAPIView(APIView):
-    permission_classes = [IsAdminUser]
-
-    def get(self, request):
-        start_date_param = request.query_params.get("start_date")
-        end_date_param = request.query_params.get("end_date")
-
-        try:
-            if start_date_param:
-                start_date = datetime.strptime(start_date_param, "%Y-%m-%d").date()
-            else:
-                start_date = localdate()
-
-            if end_date_param:
-                end_date = datetime.strptime(end_date_param, "%Y-%m-%d").date()
-            else:
-                end_date = start_date + timedelta(days=6)
-
-        except ValueError:
-            return Response(
-                {"detail": "Invalid date format. Use YYYY-MM-DD"},
-                status=400
-            )
-        if end_date < start_date:
-            return Response(
-                {"detail": "end_date cannot be earlier than start_date"},
-                status=400
-            )
-
-        active_drivers_qs = Driver.objects.filter(
-            status__name__iexact="Active"
-        )
-
-        active_driver_ids = list(active_drivers_qs.values_list("id", flat=True))
-        active_drivers_count = len(active_driver_ids)
-        total_days = (end_date - start_date).days + 1
-        response_data = []
-        for i in range(total_days):
-            current_day = start_date + timedelta(days=i)
-
-            drivers_with_load_count = (
-                Load.objects.filter(
-                    driver_id__in=active_driver_ids,
-                    pickup_date__date__lte=current_day,
-                    drop_date__date__gte=current_day,
-                )
-                .exclude(status__name__in=["Cancelled", "Rejected"])
-                .values("driver_id")
-                .distinct()
-                .count()
-            )
-
-            drivers_without_load = active_drivers_count - drivers_with_load_count
-            utilization_percent = round(
-                (drivers_with_load_count / active_drivers_count * 100), 2
-            ) if active_drivers_count > 0 else 0.0
-
-            response_data.append({
-                "date": current_day.strftime("%Y-%m-%d"),
-                "day": current_day.strftime("%A"),
-                "active_drivers": active_drivers_count,
-                "drivers_with_load": drivers_with_load_count,
-                "drivers_without_load": drivers_without_load,
-                "utilization_percent": utilization_percent,
-            })
-        return Response({
-            "start_date": start_date.strftime("%Y-%m-%d"),
-            "end_date": end_date.strftime("%Y-%m-%d"),
-            "driver_performance": response_data
-        })
 
 
 class LoadSummaryAnalyticsAPIView(APIView):

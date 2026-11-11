@@ -1144,52 +1144,6 @@ class VehicleDropdownSerializer(serializers.ModelSerializer):
         return None
 
 
-class UnassignedDriverSerializer(serializers.ModelSerializer):
-    """The worklist row: who they are and which assignment is missing."""
-
-    status_name = serializers.CharField(source="status.name", read_only=True)
-    team = serializers.SerializerMethodField()
-    dispatcher = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Driver
-        fields = [
-            "id",
-            "full_name",
-            "phone_number",
-            "unit_number",
-            "status_name",
-            "team",
-            "dispatcher",
-        ]
-
-    def get_team(self, obj):
-        return {"id": obj.team.id, "name": obj.team.name} if obj.team else None
-
-    def get_dispatcher(self, obj):
-        if not obj.dispatcher:
-            return None
-        name = f"{obj.dispatcher.first_name} {obj.dispatcher.last_name}".strip()
-        return {"id": obj.dispatcher.id, "full_name": name or obj.dispatcher.username}
-
-
-class DriverAssignSerializer(serializers.Serializer):
-    """Bulk assignment of drivers to a team and/or a dispatcher."""
-
-    driver_ids = serializers.ListField(
-        child=serializers.IntegerField(), allow_empty=False
-    )
-    team = serializers.IntegerField(required=False, allow_null=True)
-    dispatcher = serializers.IntegerField(required=False, allow_null=True)
-
-    def validate(self, attrs):
-        if "team" not in attrs and "dispatcher" not in attrs:
-            raise serializers.ValidationError(
-                "Provide team, dispatcher, or both. Send null to clear one."
-            )
-        return attrs
-
-
 class TrackingDriverSerializer(serializers.ModelSerializer):
     """One row of the Tracking page.
 

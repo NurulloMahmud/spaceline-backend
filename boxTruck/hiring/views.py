@@ -11,25 +11,19 @@ from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
 from rest_framework.request import Request
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework import status, viewsets, views, generics, parsers
 from rest_framework.decorators import action
 from django.db.models import Count, F, Q
-from django.http import Http404, QueryDict
+from django.http import QueryDict
 from hiring.google_maps import geocode_zip
 from hiring.haversine import haversine
-from mobile.models import DriverLocation
-from mobile.serializers import DriverLocationViewSerializer
 from users.pagination import CustomPagination
 from users.permissions import (
-    IsAdminUser,
-    IsDispatch,
-    IsDispatchManager,
     IsInternalService,
-    IsUpdater,
 )
 from .utils import (
     build_change_description,
@@ -41,7 +35,7 @@ from .utils import (
 from .pdf_generation import fill_w9, generate_contract
 from .document_ai import MAX_FILES_PER_REQUEST, build_prefill, parse_document
 from .team import NoVehicle, set_team
-from users.models import CustomUser, Team, Company
+from users.models import CustomUser, Company
 from .models import (
     CompanyFile,
     Deposit,
@@ -59,10 +53,8 @@ from .models import (
     VehicleHistory,
 )
 from .serializers import (
-    DriverAssignSerializer,
     DriverVehicleBlockSerializer,
     is_empty_block,
-    UnassignedDriverSerializer,
     CompanyFileSerializer,
     DepositHistoryViewSerializer,
     DepositHistoryWriteSerializer,
@@ -87,7 +79,6 @@ from .serializers import (
     TrackingDriverSerializer,
     DriverCompanyViewSerializer,
     DriverCompanyWriteSerializer,
-    VehicleEquipmentSerializer,
     CompanyHistoryWriteSerializer,
     CompanyHistoryViewSerializer,
 )
@@ -415,14 +406,6 @@ def _create_vehicle(
     return vehicle
 
 
-class DriverDropdownAPIView(generics.ListAPIView):
-    serializer_class = DriverViewSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        return Driver.objects.all()
-
-
 class DriverFileViewSet(viewsets.ModelViewSet):
     serializer_class = DriverFileSerializer
     permission_classes = [IsAuthenticated]
@@ -460,13 +443,6 @@ class VehicleFileViewSet(viewsets.ModelViewSet):
         if vehicle_id:
             qs = qs.filter(vehicle_id=vehicle_id)
         return qs
-
-
-class VehicleEquipmentViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
-    pagination_class = CustomPagination
-    queryset = VehicleEquipment.objects.all()
-    serializer_class = VehicleEquipmentSerializer
 
 
 class VehicleViewSet(viewsets.ModelViewSet):
@@ -1593,15 +1569,6 @@ class DriverLocationsView(views.APIView):
         return Response(drivers)
 
 
-class DriverLocationByIDAPIView(generics.ListAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = DriverLocationViewSerializer
-
-    def get_queryset(self):
-        driver = self.kwargs.get("pk")
-        return DriverLocation.objects.filter(driver=driver)
-
-
 class DriverNearbyView(views.APIView):
     permission_classes = [IsAuthenticated | IsInternalService]
 
@@ -1681,97 +1648,6 @@ class VehicleDropdownView(generics.ListAPIView):
                 )
             context["requested_date"] = requested_date_parsed
         return context
-
-
-class DriverAssignmentView(views.APIView):
-    """
-    Assign drivers to a dispatch team and/or a dispatcher, in bulk.
-
-    Send `team` or `dispatcher` as null to clear that field. Drivers outside
-    the caller's company are skipped rather than silently reassigned, and the
-    response names them so the UI can say what did not happen.
-    """
-
-    permission_classes = [IsAdminUser | IsDispatchManager | IsDispatch | IsUpdater]
-
-    def post(self, request):
-        serializer = DriverAssignSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        driver_ids = data["driver_ids"]
-
-        drivers = Driver.objects.filter(id__in=driver_ids)
-
-        found = set(drivers.values_list("id", flat=True))
-        rejected = [d for d in driver_ids if d not in found]
-
-        updates = {}
-
-        if "team" in data:
-            team_id = data["team"]
-            if team_id is None:
-                updates["team"] = None
-            else:
-                team = Team.objects.filter(id=team_id).first()
-                if not team:
-                    return Response(
-                        {"team": "Team not found."}, status=status.HTTP_400_BAD_REQUEST
-                    )
-                updates["team"] = team
-
-        if "dispatcher" in data:
-            dispatcher_id = data["dispatcher"]
-            if dispatcher_id is None:
-                updates["dispatcher"] = None
-            else:
-                dispatcher = CustomUser.objects.filter(id=dispatcher_id).first()
-                if not dispatcher:
-                    return Response(
-                        {"dispatcher": "User not found."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                updates["dispatcher"] = dispatcher
-
-        updated = drivers.update(**updates) if updates else 0
-
-        return Response(
-            {
-                "updated": updated,
-                "rejected_driver_ids": rejected,
-                "detail": (
-                    "Drivers outside your company were skipped."
-                    if rejected
-                    else "All drivers updated."
-                ),
-            }
-        )
-
-
-class UnassignedDriversAPIView(generics.ListAPIView):
-    """
-    Drivers missing a team or a dispatcher — the worklist for finishing
-    assignment. `?missing=team|dispatcher|either` (default either).
-    """
-
-    serializer_class = UnassignedDriverSerializer
-    permission_classes = [IsAdminUser | IsDispatchManager | IsDispatch | IsUpdater]
-    pagination_class = CustomPagination
-
-    def get_queryset(self):
-        queryset = Driver.objects.all()
-
-        missing = self.request.query_params.get("missing", "either")
-        if missing == "team":
-            queryset = queryset.filter(team__isnull=True)
-        elif missing == "dispatcher":
-            queryset = queryset.filter(dispatcher__isnull=True)
-        else:
-            queryset = queryset.filter(
-                Q(team__isnull=True) | Q(dispatcher__isnull=True)
-            )
-        return queryset.select_related("status", "team", "dispatcher").order_by(
-            "full_name"
-        )
 
 
 # --- Tracking page --------------------------------------------------------

@@ -8,7 +8,6 @@ from django.conf.urls.static import static
 
 # Simple JWT
 from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
     TokenRefreshView,
 )
 
@@ -35,14 +34,11 @@ urlpatterns = [
     path('api/auth/', include('rest_framework.urls')),
     path('api/analytics/', include('analytics.urls')),
     path('api/users/', include('users.urls')),
-    path('api/ai/', include('ai.urls')),
     path('api/hiring/', include('hiring.urls')),
     path('api/billing/', include('billing.urls')),
     path('api/charge/', include('charge.urls')),
     path('api/payroll/', include('payroll.urls')),
     path('api/accounting/', include('accounting.urls')),
-    path('api/mobile/', include('mobile.urls')),
-    path('api/dispatchers/', include('dispatchers.urls')),
     path('api/salaries/', include('salaries.urls')),
     path('api/hub/', include('hub.urls')),
     path('api/swagger<format>/', schema_view.without_ui(cache_timeout=0), name='schema-json'),

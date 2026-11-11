@@ -10,30 +10,11 @@ from sqlalchemy.orm import Session
 
 from database import models
 from database.connection import session_dependency
-from services.auth import Principal, current_user, scoped_company
-from services.negotiations import shared_mailbox
+from services.auth import Principal, current_user
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/accounts", tags=["accounts"])
-
-
-@router.get("")
-def get_account(
-    company_id: int = Depends(scoped_company),
-    session: Session = Depends(session_dependency),
-):
-    """The company's shared mailbox: the one dispatchers without a mailbox
-    of their own send from."""
-    account = shared_mailbox(session, company_id)
-    if not account:
-        return {"connected": False}
-    return {
-        "connected": True,
-        "email_address": account.email_address,
-        "status": account.status,
-        "connected_at": account.created_at,
-    }
 
 
 @router.get("/me")

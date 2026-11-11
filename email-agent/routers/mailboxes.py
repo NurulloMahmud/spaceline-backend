@@ -249,25 +249,6 @@ async def test_credentials(
     return result.as_dict()
 
 
-@router.post("/shared/test")
-async def test_shared(principal: Principal = Depends(mailbox_admin)):
-    """The shared mailbox as .env has it."""
-    if not config.shared_inbox_enabled():
-        raise HTTPException(409, "no shared mailbox is configured on the server")
-    creds = imap_smtp.Credentials(
-        address=config.SHARED_INBOX_ADDRESS,
-        password=config.SHARED_INBOX_APP_PASSWORD,
-        imap_host=config.SHARED_INBOX_IMAP_HOST,
-        imap_port=993,
-        smtp_host="smtp." + config.SHARED_INBOX_IMAP_HOST.split(".", 1)[-1]
-        if config.SHARED_INBOX_IMAP_HOST.startswith("imap.") else config.SHARED_INBOX_IMAP_HOST,
-        smtp_port=465,
-        folder=config.SHARED_INBOX_FOLDER,
-    )
-    result = await asyncio.to_thread(imap_smtp.check, creds)
-    return result.as_dict()
-
-
 @router.put("/users/{user_id}")
 async def connect_user(
     user_id: int,

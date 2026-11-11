@@ -21,57 +21,6 @@ class TeamSummarySerializer(serializers.ModelSerializer):
         fields = ['id', 'name']
 
 
-class TeamSerializer(serializers.ModelSerializer):
-    lead_name = serializers.SerializerMethodField()
-    member_count = serializers.SerializerMethodField()
-    driver_count = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Team
-        fields = [
-            'id', 'name', 'description',
-            'lead', 'lead_name', 'is_active',
-            'member_count', 'driver_count', 'created_at', 'last_updated',
-        ]
-        read_only_fields = ['created_at', 'last_updated']
-
-    def get_lead_name(self, obj):
-        if not obj.lead:
-            return None
-        return f"{obj.lead.first_name} {obj.lead.last_name}".strip() or obj.lead.username
-
-    def get_member_count(self, obj):
-        # Annotated by the viewset; falls back to a query for single reads.
-        value = getattr(obj, 'members_total', None)
-        return value if value is not None else obj.members.count()
-
-    def get_driver_count(self, obj):
-        value = getattr(obj, 'drivers_total', None)
-        return value if value is not None else obj.drivers.count()
-
-
-class TeamAssignUsersSerializer(serializers.Serializer):
-    user_ids = serializers.ListField(
-        child=serializers.IntegerField(), allow_empty=False,
-        help_text="Users to move onto this team.",
-    )
-
-
-class TeamMemberSerializer(serializers.ModelSerializer):
-    department = serializers.CharField(source='department.name', read_only=True)
-    full_name = serializers.SerializerMethodField()
-
-    class Meta:
-        model = CustomUser
-        fields = ['id', 'username', 'first_name', 'last_name', 'full_name',
-                  'department', 'is_active']
-
-    def get_full_name(self, obj):
-        return f"{obj.first_name} {obj.last_name}".strip() or obj.username
-
-
-
-
 class CompanySerializer(serializers.ModelSerializer):
     class Meta:
         model = Company

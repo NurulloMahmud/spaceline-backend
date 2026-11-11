@@ -48,8 +48,6 @@ def test_health_needs_no_auth(client):
 
 def test_endpoints_require_a_token(client):
     assert client.get("/api/v1/negotiations").status_code == 401
-    assert client.get("/api/v1/suggestions").status_code == 401
-    assert client.get("/api/v1/accounts").status_code == 401
     assert client.post(
         "/api/v1/negotiations", json={"load_uuid": "x", "bid_amount": 1}
     ).status_code == 401
@@ -155,196 +153,6 @@ def test_negotiations_are_company_scoped(client, auth_headers, session, negotiat
 
     assert client.get(f"/api/v1/negotiations/{negotiation.id}", headers=auth_headers).status_code == 200
     assert client.get(f"/api/v1/negotiations/{negotiation.id}", headers=other).status_code == 404
-
-
-def test_suggestions_are_company_scoped(client, auth_headers, session, negotiation):
-    suggestion = models.Suggestion(
-        negotiation_id=negotiation.id,
-        kind=models.KIND_REPLY,
-        draft_subject="Re: Bid",
-        draft_body="We can do $3,200.",
-        status=models.PENDING,
-    )
-    session.add(suggestion)
-    session.commit()
-
-    other = {"Authorization": f"Bearer {make_token(company='Other Carrier LLC', company_id=2)}"}
-    assert client.get("/api/v1/suggestions", headers=auth_headers).json()["total"] == 1
-    assert client.get("/api/v1/suggestions", headers=other).json()["total"] == 0
-
-    resp = client.post(f"/api/v1/suggestions/{suggestion.id}/ignore", headers=other)
-    assert resp.status_code == 404, "another company must not be able to resolve this"
-
-
-def test_ignoring_a_suggestion_resolves_it(client, auth_headers, session, negotiation):
-    suggestion = models.Suggestion(
-        negotiation_id=negotiation.id,
-        kind=models.KIND_REPLY,
-        draft_body="draft",
-        status=models.PENDING,
-    )
-    session.add(suggestion)
-    session.commit()
-
-    resp = client.post(f"/api/v1/suggestions/{suggestion.id}/ignore", headers=auth_headers)
-    assert resp.status_code == 200
-    assert resp.json()["status"] == models.IGNORED
-
-    again = client.post(f"/api/v1/suggestions/{suggestion.id}/ignore", headers=auth_headers)
-    assert again.status_code == 409
-
-
-def test_sending_a_suggestion_replies_on_the_thread(
-    client, auth_headers, account, session, negotiation, monkeypatch
-):
-    sent = []
-
-    async def fake_send(account, **kwargs):
-
-        kwargs["grant_id"] = account.nylas_grant_id
-        sent.append(kwargs)
-        return {"id": "msg-out-2", "thread_id": "thread-1"}
-
-    monkeypatch.setattr(outbound, "send", fake_send)
-
-    inbound_msg = models.EmailMessage(
-        negotiation_id=negotiation.id,
-        nylas_message_id="msg-in-1",
-        rfc_message_id="in-1@acme",
-        direction="inbound",
-        body_text="Can you do 2900?",
-    )
-    session.add(inbound_msg)
-    session.flush()
-    suggestion = models.Suggestion(
-        negotiation_id=negotiation.id,
-        in_reply_to_message_id=inbound_msg.id,
-        kind=models.KIND_REPLY,
-        draft_subject="Re: Bid",
-        draft_body="Our rate is $3,200.",
-        status=models.PENDING,
-    )
-    session.add(suggestion)
-    session.commit()
-
-    resp = client.post(
-        f"/api/v1/suggestions/{suggestion.id}/send", headers=auth_headers, json={}
-    )
-    assert resp.status_code == 200
-    assert resp.json()["status"] == models.SENT
-    assert sent[0]["in_reply_to"] == "in-1@acme"
-    assert "Our rate is $3,200." in sent[0]["body"]
-
-
-def test_sending_a_suggestion_learns_a_missing_thread_id(
-    client, auth_headers, account, session, negotiation, monkeypatch
-):
-    """
-    The thread id is captured on the send that opens a negotiation, but a
-    provider does not always return one there. Without it the broker's replies
-    match only by subject, so every later send is a chance to learn it.
-    """
-    negotiation.nylas_thread_id = None
-    monkeypatch.setattr(outbound, "send",
-        lambda account=None, **k: _async({"id": "msg-out-4", "thread_id": "thread-learned"}),
-    )
-    suggestion = models.Suggestion(
-        negotiation_id=negotiation.id,
-        kind=models.KIND_REPLY,
-        draft_subject="Re: Bid",
-        draft_body="Our rate is $3,200.",
-        status=models.PENDING,
-    )
-    session.add(suggestion)
-    session.commit()
-
-    resp = client.post(
-        f"/api/v1/suggestions/{suggestion.id}/send", headers=auth_headers, json={}
-    )
-    assert resp.status_code == 200
-
-    session.refresh(negotiation)
-    assert negotiation.nylas_thread_id == "thread-learned"
-
-
-def test_sending_a_suggestion_does_not_move_a_known_thread(
-    client, auth_headers, account, session, negotiation, monkeypatch
-):
-    """A send that comes back on another thread must not repoint the thread."""
-    monkeypatch.setattr(outbound, "send",
-        lambda account=None, **k: _async({"id": "msg-out-5", "thread_id": "some-other-thread"}),
-    )
-    suggestion = models.Suggestion(
-        negotiation_id=negotiation.id,
-        kind=models.KIND_REPLY,
-        draft_subject="Re: Bid",
-        draft_body="Our rate is $3,200.",
-        status=models.PENDING,
-    )
-    session.add(suggestion)
-    session.commit()
-
-    resp = client.post(
-        f"/api/v1/suggestions/{suggestion.id}/send", headers=auth_headers, json={}
-    )
-    assert resp.status_code == 200
-
-    session.refresh(negotiation)
-    assert negotiation.nylas_thread_id == "thread-1"
-
-
-def test_editing_before_sending_is_recorded_separately(
-    client, auth_headers, account, session, negotiation, monkeypatch
-):
-    monkeypatch.setattr(outbound, "send",
-        lambda account=None, **k: _async({"id": "msg-out-3", "thread_id": "thread-1"}),
-    )
-    suggestion = models.Suggestion(
-        negotiation_id=negotiation.id,
-        kind=models.KIND_REPLY,
-        draft_subject="Re: Bid",
-        draft_body="Our rate is $3,200.",
-        status=models.PENDING,
-    )
-    session.add(suggestion)
-    session.commit()
-
-    resp = client.post(
-        f"/api/v1/suggestions/{suggestion.id}/send",
-        headers=auth_headers,
-        json={"body": "Best we can do is $3,150."},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["status"] == models.EDITED_SENT
-    assert resp.json()["final_body"] == "Best we can do is $3,150."
-
-
-def test_an_empty_body_is_not_sent(
-    client, auth_headers, account, session, negotiation
-):
-    suggestion = models.Suggestion(
-        negotiation_id=negotiation.id,
-        kind=models.KIND_PARSE_FAILURE,
-        draft_body="",
-        status=models.PENDING,
-    )
-    session.add(suggestion)
-    session.commit()
-
-    resp = client.post(
-        f"/api/v1/suggestions/{suggestion.id}/send", headers=auth_headers, json={}
-    )
-    assert resp.status_code == 422
-    assert resp.json()["detail"]["code"] == "empty_body"
-
-
-def test_booked_negotiations_cannot_be_closed(
-    client, auth_headers, session, negotiation
-):
-    negotiation.status = models.BOOKED
-    session.commit()
-    resp = client.post(f"/api/v1/negotiations/{negotiation.id}/close", headers=auth_headers)
-    assert resp.status_code == 409
 
 
 # --- filtering the negotiations list by who sent the bid --------------------
@@ -473,16 +281,6 @@ def test_pending_and_ignored_suggestions_still_show(
     assert body["pending_suggestions"] == 1
 
 
-def test_sent_suggestions_remain_in_the_suggestions_list(
-    client, session, auth_headers, negotiation
-):
-    """Hiding them from the thread must not lose the record."""
-    _suggestion(session, negotiation, models.SENT)
-
-    body = client.get("/api/v1/suggestions?status=sent", headers=auth_headers).json()
-    assert body["total"] == 1
-
-
 def test_superseded_drafts_leave_the_thread_and_the_badge(
     client, session, auth_headers, negotiation
 ):
@@ -508,22 +306,6 @@ def test_superseded_drafts_leave_the_thread_and_the_badge(
     assert after["pending_suggestions"] == 0
     assert after["suggestions"] == []
     assert after["superseded_suggestions"] == 2
-
-
-def test_a_superseded_draft_still_says_why(client, session, auth_headers, negotiation):
-    """The panel should never have to explain itself."""
-    from services import suggestions as suggestion_service
-
-    _suggestion(session, negotiation, models.PENDING)
-    suggestion_service.supersede_pending(
-        session, negotiation.id, suggestion_service.REPLIED_ELSEWHERE)
-    session.commit()
-
-    body = client.get("/api/v1/suggestions?status=superseded", headers=auth_headers).json()
-    assert body["total"] == 1
-    item = body["items"][0]
-    assert item["status"] == "superseded"
-    assert "mail client" in item["resolved_reason"]
 
 
 def _msg(session, negotiation, direction, from_email):

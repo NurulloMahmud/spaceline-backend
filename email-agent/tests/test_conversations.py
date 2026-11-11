@@ -9,7 +9,6 @@ import pytest
 from database import models
 from services import conversations
 from services import outbound
-from services.outbound import SendError
 from tests.test_auth import make_token
 
 
@@ -157,13 +156,6 @@ def test_others_can_read_but_not_write(client, session, negotiation, account, se
     )
     assert resp.status_code == 403
     assert resp.json()["detail"]["code"] == "not_your_conversation"
-    assert sends == []
-
-    suggestion = models.Suggestion(negotiation_id=negotiation.id, draft_body="draft", status=models.PENDING)
-    session.add(suggestion)
-    session.commit()
-    resp = client.post(f"/api/v1/suggestions/{suggestion.id}/send", json={}, headers=_headers(8))
-    assert resp.status_code == 403
     assert sends == []
 
 

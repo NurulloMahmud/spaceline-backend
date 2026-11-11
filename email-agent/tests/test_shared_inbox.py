@@ -120,8 +120,8 @@ def test_a_reply_to_a_message_read_over_imap_threads_on_its_message_id(
 
     monkeypatch.setattr(outbound, "send", fake_send)
 
-    resp = client.post(f"/api/v1/suggestions/{suggestion.id}/send", headers=_headers(), json={})
-    assert resp.status_code == 200, resp.text
+    resp = client.post(f"/api/v1/conversations/{negotiation.id}/messages", headers=_headers(), json={"body": "Our rate is $3,200."})
+    assert resp.status_code == 201, resp.text
     assert sent[0]["in_reply_to"] == "reply-1@acme"
 
 

@@ -360,14 +360,3 @@ def debounce_recalculate_miles(load_id, delay=3):
         timer.start()
 
 
-
-def broker_missing_info(load):
-    broker = load.broker
-    if not broker:
-        return 'load has no broker assigned'
-    if not broker.mc:
-        return 'broker is missing an MC number'
-    if not broker.address:
-        return 'broker is missing an address'
-    return None
-

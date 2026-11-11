@@ -13,7 +13,6 @@ from services import negotiations as service
 from config.settings import config
 from services import maintenance
 from services import stats as stats_service
-from services import suggestions as suggestion_service
 from services.auth import Principal, current_user, require_internal, scoped_company
 from services.boxtruck import boxtruck
 
@@ -261,32 +260,3 @@ async def get_negotiation(
     return data
 
 
-@router.post("/{negotiation_id}/close")
-def close_negotiation(
-    negotiation_id: str,
-    company_id: int = Depends(scoped_company),
-    session: Session = Depends(session_dependency),
-):
-    negotiation = (
-        session.query(models.Negotiation)
-        .filter(
-            models.Negotiation.id == negotiation_id,
-            models.Negotiation.company_id == company_id,
-        )
-        .first()
-    )
-    if not negotiation:
-        raise HTTPException(404, detail={"error": "Negotiation not found", "code": "not_found"})
-    if negotiation.status == models.BOOKED:
-        raise HTTPException(
-            409,
-            detail={"error": "A booked negotiation cannot be closed.", "code": "already_booked"},
-        )
-
-    negotiation.status = models.CLOSED
-    suggestion_service.supersede_pending(
-        session, negotiation.id, suggestion_service.NEGOTIATION_CLOSED
-    )
-    session.flush()
-    boxtruck.report_bid_status_sync(negotiation, "lost", note="Closed by the dispatcher")
-    return schemas.negotiation_to_out(negotiation)
