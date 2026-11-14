@@ -130,6 +130,10 @@ def _user_account(session: Session, company_id: int, user_id: int) -> Optional[m
 
 
 def _record_check(account: models.EmailAccount, result: imap_smtp.CheckResult) -> None:
+    """What a test from the Mailboxes page leaves on the row. Only a refused
+    password marks the mailbox failing, which stops its bids; a test that
+    could not reach the provider (a timeout, a dropped connection) is kept as
+    the last error and the mailbox stays as it was, as in the inbox reader."""
     account.last_checked_at = result.checked_at
     if result.ok:
         account.last_error = None
@@ -142,7 +146,7 @@ def _record_check(account: models.EmailAccount, result: imap_smtp.CheckResult) -
                 f"SMTP: {result.smtp_error}" if result.smtp_error else "",
             ) if part
         )
-        if account.status == "active":
+        if result.refused and account.status == "active":
             account.status = "failing"
 
 

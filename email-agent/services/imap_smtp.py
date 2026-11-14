@@ -42,6 +42,9 @@ class CheckResult:
     smtp_ok: bool = False
     smtp_error: str = ""
     alerts_today: Optional[int] = None
+    # The provider turned the password down, over IMAP or SMTP. Any other
+    # failure (a timeout, a dropped connection, a busy server) leaves it false.
+    refused: bool = False
     checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
@@ -51,6 +54,7 @@ class CheckResult:
     def as_dict(self) -> dict:
         return {
             "ok": self.ok,
+            "refused": self.refused,
             "imap": {"ok": self.imap_ok, "error": self.imap_error or None, "inbox_messages": self.inbox_messages},
             "smtp": {"ok": self.smtp_ok, "error": self.smtp_error or None},
             "alerts_today": self.alerts_today,
@@ -128,6 +132,7 @@ def check(creds: Credentials, smtp: bool = True) -> CheckResult:
                 pass
     except Exception as e:  # noqa: BLE001 - every failure is reported, not raised
         result.imap_error = _plain(e)
+        result.refused = sign_in_refused(e)
 
     if not smtp:
         result.smtp_ok = True
@@ -138,6 +143,7 @@ def check(creds: Credentials, smtp: bool = True) -> CheckResult:
         result.smtp_ok = True
     except Exception as e:  # noqa: BLE001
         result.smtp_error = _plain(e)
+        result.refused = result.refused or sign_in_refused(e)
     return result
 
 

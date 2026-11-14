@@ -56,7 +56,9 @@ def signs_in(monkeypatch):
 @pytest.fixture
 def refuses(monkeypatch):
     def check(creds, smtp=True):
-        return imap_smtp.CheckResult(imap_ok=False, imap_error="[AUTHENTICATIONFAILED] Invalid credentials", smtp_ok=True)
+        return imap_smtp.CheckResult(
+            imap_ok=False, imap_error="[AUTHENTICATIONFAILED] Invalid credentials", smtp_ok=True, refused=True
+        )
 
     monkeypatch.setattr(imap_smtp, "check", check)
 
@@ -237,13 +239,105 @@ def test_a_retest_records_the_outcome_on_the_row(client, session, account, admin
     client.put("/api/v1/mailboxes/users/4", headers=_h(), json=CREDS)
 
     def now_refused(creds, smtp=True):
-        return imap_smtp.CheckResult(imap_ok=False, imap_error="password revoked", smtp_ok=True)
+        return imap_smtp.CheckResult(imap_ok=False, imap_error="password revoked", smtp_ok=True, refused=True)
 
     monkeypatch.setattr(imap_smtp, "check", now_refused)
     resp = client.post("/api/v1/mailboxes/users/4/test", headers=_h())
     assert resp.status_code == 200
     assert resp.json()["account"]["status"] == "failing"
     assert "password revoked" in resp.json()["account"]["last_error"]
+    assert resp.json()["result"]["refused"] is True
+
+
+def test_a_retest_that_cannot_reach_the_provider_leaves_the_mailbox_connected(
+    client, session, account, admin_on, signs_in, monkeypatch
+):
+    """A timeout says nothing about the password, so it must not stop the
+    dispatcher's bids: the error is kept for the page and the status stays."""
+    client.put("/api/v1/mailboxes/users/4", headers=_h(), json=CREDS)
+
+    def timed_out(creds, smtp=True):
+        return imap_smtp.CheckResult(imap_ok=False, imap_error="timed out", smtp_ok=True)
+
+    monkeypatch.setattr(imap_smtp, "check", timed_out)
+    resp = client.post("/api/v1/mailboxes/users/4/test", headers=_h())
+    assert resp.status_code == 200
+    assert resp.json()["result"]["ok"] is False
+    assert resp.json()["result"]["refused"] is False
+    assert resp.json()["account"]["status"] == "active"
+    assert "timed out" in resp.json()["account"]["last_error"]
+    me = client.get("/api/v1/accounts/me", headers=_h(user_id=4))
+    assert me.json()["connected"] is True and me.json()["status"] == "active"
+
+
+def test_a_passing_retest_brings_a_failing_mailbox_back(client, session, account, admin_on, signs_in, monkeypatch):
+    client.put("/api/v1/mailboxes/users/4", headers=_h(), json=CREDS)
+    row = session.query(models.EmailAccount).filter(models.EmailAccount.user_id == 4).one()
+    row.status = "failing"
+    row.last_error = "IMAP: [AUTHENTICATIONFAILED] Invalid credentials"
+    session.flush()
+    resp = client.post("/api/v1/mailboxes/users/4/test", headers=_h())
+    assert resp.json()["account"]["status"] == "active"
+    assert resp.json()["account"]["last_error"] is None
+
+
+class _ImapThatSignsIn:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def login(self, user, password):
+        return "OK", [b"done"]
+
+    def select(self, folder, readonly=True):
+        return "OK", [b"3"]
+
+    def uid(self, *args):
+        return "OK", [b""]
+
+    def logout(self):
+        return "BYE", [b""]
+
+
+def test_the_check_tells_a_refused_password_from_a_failure_that_passes(monkeypatch):
+    creds = imap_smtp.Credentials(address="alex@spaceline23llc.com", password="x", imap_host="imap.gmail.com", smtp_host="smtp.gmail.com")
+
+    class Refusing(_ImapThatSignsIn):
+        def login(self, user, password):
+            raise imap_smtp.imaplib.IMAP4.error("[AUTHENTICATIONFAILED] Invalid credentials (Failure)")
+
+    monkeypatch.setattr(imap_smtp.imaplib, "IMAP4_SSL", Refusing)
+    result = imap_smtp.check(creds, smtp=False)
+    assert result.ok is False and result.refused is True
+
+    def slow(*args, **kwargs):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(imap_smtp.imaplib, "IMAP4_SSL", slow)
+    result = imap_smtp.check(creds, smtp=False)
+    assert result.ok is False and result.refused is False
+    assert "timed out" in result.imap_error
+
+    class SmtpRefusing:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def login(self, user, password):
+            raise imap_smtp.smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+
+    monkeypatch.setattr(imap_smtp.imaplib, "IMAP4_SSL", _ImapThatSignsIn)
+    monkeypatch.setattr(imap_smtp, "_smtp", lambda c: SmtpRefusing())
+    result = imap_smtp.check(creds)
+    assert result.imap_ok is True and result.smtp_ok is False and result.refused is True
+
+    def smtp_down(c):
+        raise ConnectionResetError("connection reset by peer")
+
+    monkeypatch.setattr(imap_smtp, "_smtp", smtp_down)
+    result = imap_smtp.check(creds)
+    assert result.imap_ok is True and result.smtp_ok is False and result.refused is False
 
 
 def test_disconnecting_forgets_the_password_and_revokes(client, session, account, admin_on, signs_in):
