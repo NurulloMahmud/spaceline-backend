@@ -434,11 +434,15 @@ class DriverListSerializer(serializers.ModelSerializer):
     manager = serializers.SerializerMethodField()
     docs_count = serializers.SerializerMethodField()
     hub_status = serializers.ReadOnlyField()
+    # Loads (and so payouts), expenses or statements on file: such a driver is
+    # set Out of service instead of deleted (hiring/board.py remove_driver).
+    has_records = serializers.SerializerMethodField()
 
     class Meta:
         model = Driver
         fields = [
             "id",
+            "has_records",
             "full_name",
             "email",
             "phone_number",
@@ -462,6 +466,13 @@ class DriverListSerializer(serializers.ModelSerializer):
                 "username": obj.manager.username,
             }
         return None
+
+    def get_has_records(self, obj) -> bool:
+        if hasattr(obj, "has_load"):
+            return bool(obj.has_load or obj.has_expense or obj.has_statement)
+        from .board import driver_has_records
+
+        return driver_has_records(obj)
 
     def get_docs_count(self, obj):
         company = obj.driver_company

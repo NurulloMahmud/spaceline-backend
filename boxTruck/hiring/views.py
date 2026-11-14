@@ -35,6 +35,7 @@ from .utils import (
 from .pdf_generation import fill_w9, generate_contract
 from .document_ai import MAX_FILES_PER_REQUEST, build_prefill, parse_document
 from .team import NoVehicle, set_team
+from . import board as hiring_board
 from users.models import CustomUser, Company
 from .models import (
     CompanyFile,
@@ -206,16 +207,36 @@ class DriverViewSet(viewsets.ModelViewSet):
         return Response(DriverViewSerializer(updated_driver).data)
 
     def destroy(self, request, *args, **kwargs):
-        from billing.models import Load
-
+        """Deletes the driver, or, when they have loads, payouts, expenses or
+        statements, sets them Out of service and answers 200 with
+        `{"outcome": "out_of_service", "driver": ...}`."""
         driver = self.get_object()
-        if Load.objects.filter(driver=driver).exists():
-            raise ValidationError(
-                {"detail": "Cannot delete driver: driver has loads on file."}
-            )
-        with transaction.atomic():
-            driver.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        outcome = hiring_board.remove_driver(driver, request.user)
+        if outcome == "deleted":
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        driver.refresh_from_db()
+        return Response({"outcome": outcome, "driver": DriverViewSerializer(driver).data})
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="hiring-stage",
+        permission_classes=[IsAuthenticated],
+    )
+    def hiring_stage(self, request: Request, pk: str | None = None) -> Response:
+        """POST /hiring/drivers/{id}/hiring-stage/ {stage}: move on the hiring board.
+
+        stage is lead, called, ready or active; the status follows (Active for
+        active, Pending otherwise). Answers the driver's board card."""
+        driver = self.get_object()
+        stage = str((request.data or {}).get("stage", "")).strip().lower()
+        hiring_board.move(driver, stage, request.user)
+        fresh = hiring_board.board_queryset().filter(pk=driver.pk).first()
+        if fresh is None:
+            fresh = hiring_board.with_records(Driver.objects.filter(pk=driver.pk)).select_related(
+                "status", "referral_by", "hiring_moved_by"
+            ).first()
+        return Response(hiring_board.card(fresh, request))
 
     @action(
         detail=True,
@@ -587,6 +608,15 @@ class DepositViewSet(viewsets.ModelViewSet):
         return Response(DepositViewSerializer(updated_deposit).data)
 
 
+class HiringBoardView(views.APIView):
+    """GET /hiring/board/: the hiring board's four columns, newest first."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request: Request) -> Response:
+        return Response(hiring_board.board(request))
+
+
 class DriverListView(generics.ListAPIView):
     serializer_class = DriverListSerializer
     permission_classes = [IsAuthenticated]
@@ -623,7 +653,7 @@ class DriverListView(generics.ListAPIView):
             qs = qs.order_by(sort)
         else:
             qs = qs.order_by("-created_at")
-        return qs.select_related("status", "manager")
+        return hiring_board.with_records(qs).select_related("status", "manager")
 
 
 class DriverCompanyModalView(views.APIView):

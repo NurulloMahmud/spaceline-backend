@@ -102,6 +102,18 @@ class Driver(models.Model):
     hub_invite_id = models.PositiveIntegerField(null=True, blank=True)
     hub_invite_status = models.CharField(max_length=20, null=True, blank=True)
     hub_invited_at = models.DateTimeField(null=True, blank=True)
+    # Hiring board (Lead, Called, Ready, Active). For a Pending driver this is
+    # where the board shows them; null reads as Lead. "active" is written when
+    # the board moved the driver to Active. See hiring/board.py.
+    hiring_stage = models.CharField(max_length=20, null=True, blank=True)
+    hiring_moved_at = models.DateTimeField(null=True, blank=True)
+    hiring_moved_by = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -346,6 +358,28 @@ class DriverHistory(models.Model):
         verbose_name = "Driver History"
         verbose_name_plural = "Driver Histories"
         db_table = "driver_histories"
+
+
+class HiringMove(models.Model):
+    """One move on the hiring board: who put the driver in which stage, and when."""
+
+    driver = models.ForeignKey(
+        Driver, on_delete=models.CASCADE, related_name="hiring_moves"
+    )
+    stage = models.CharField(max_length=20)
+    changed_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f"{self.driver_id} -> {self.stage}"
+
+    class Meta:
+        verbose_name = "Hiring Move"
+        verbose_name_plural = "Hiring Moves"
+        db_table = "hiring_moves"
+        ordering = ["created_at", "id"]
 
 
 class VehicleHistory(models.Model):

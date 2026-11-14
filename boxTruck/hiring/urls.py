@@ -8,7 +8,7 @@ from .views import (DriverBulkCreateHRView, DriverBulkCreateInviteView, DriverEx
                     VehicleViewSet, DriverCompanyViewSet, DepositViewSet, DriverListView, DriverCompanyModalView, DriverBulkView, DriverLocationsView,
                     CompanyHistoryViewSet, VehicleHistoryViewSet, DriverHistoryViewSet, DepositHistoryViewSet,
                     DriverNearbyView, VehicleDropdownView,
-                    TrackingDriverListView, TrackingSummaryView
+                    TrackingDriverListView, TrackingSummaryView, HiringBoardView
                     )
 
 router = SimpleRouter()
@@ -27,6 +27,7 @@ router.register(r'deposit-history', DepositHistoryViewSet, basename='deposit-his
 
 urlpattern = [
     path('driver-list/', DriverListView.as_view(), name='driver-list'), # checked
+    path('board/', HiringBoardView.as_view(), name='hiring-board'),
     path('driver-company-modal/', DriverCompanyModalView.as_view(), name='driver-company-modal'), # checked
     path('hiring/request/', DriverBulkCreateHRView.as_view(), name='driver-create-hr'),
     path('driver/invite/', DriverBulkCreateInviteView.as_view(), name='driver-create-invite'),
