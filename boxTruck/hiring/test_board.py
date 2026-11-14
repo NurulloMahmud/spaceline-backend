@@ -111,3 +111,69 @@ class HiringBoardTests(TestCase):
         res = self.api.delete(f"/api/hiring/drivers/{d.pk}/")
         self.assertEqual(res.json()["outcome"], "out_of_service")
         self.assertTrue(Deduction.objects.filter(driver=d).exists())
+
+
+class HiringLiveTests(TestCase):
+    """Board changes are announced to open boards; location pings are not."""
+
+    def setUp(self) -> None:
+        from unittest.mock import patch
+
+        Company.objects.create(name="Space Line LLC", shipment_number="10001")
+        self.pending = DriverStatus.objects.create(name="Pending")
+        DriverStatus.objects.create(name="Active")
+        self.user = CustomUser.objects.create_user(username="sarah", password="x", first_name="Sarah")
+        self.api = APIClient()
+        self.api.force_authenticate(self.user)
+        on = patch("hiring.live.enabled", return_value=True)
+        on.start()
+        self.addCleanup(on.stop)
+        notify = patch("hiring.live.notify")
+        self.notify = notify.start()
+        self.addCleanup(notify.stop)
+
+    def _ids(self) -> list[int]:
+        return [c.args[0] for c in self.notify.call_args_list]
+
+    def test_new_driver_move_and_first_load_notify(self) -> None:
+        with self.captureOnCommitCallbacks(execute=True):
+            d = Driver.objects.create(full_name="New", status=self.pending)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.api.post(f"/api/hiring/drivers/{d.pk}/hiring-stage/", {"stage": "called"}, format="json")
+        with self.captureOnCommitCallbacks(execute=True):
+            Load.objects.create(driver=d, load_number="1")
+        self.assertEqual(self._ids().count(d.pk), 3)
+
+    def test_location_update_does_not_notify(self) -> None:
+        with self.captureOnCommitCallbacks(execute=True):
+            d = Driver.objects.create(full_name="Mover", status=self.pending)
+        self.notify.reset_mock()
+        with self.captureOnCommitCallbacks(execute=True):
+            d.current_city = "Dayton"
+            d.save()
+        with self.captureOnCommitCallbacks(execute=True):
+            d.current_state = "OH"
+            d.save(update_fields=["current_state"])
+        self.assertEqual(self._ids(), [])
+
+    def test_delete_notifies(self) -> None:
+        d = Driver.objects.create(full_name="Gone", status=self.pending)
+        self.notify.reset_mock()
+        with self.captureOnCommitCallbacks(execute=True):
+            self.api.delete(f"/api/hiring/drivers/{d.pk}/")
+        self.assertEqual(self._ids(), [d.pk])
+
+    def test_send_posts_to_the_agent(self) -> None:
+        from unittest.mock import patch
+
+        from django.test import override_settings
+
+        from hiring import live
+
+        with override_settings(EMAIL_AGENT_INTERNAL_URL="http://agent.test", INTERNAL_SERVICE_SECRET="s3"), patch("hiring.live.requests.post") as post, patch("hiring.live._company_id", None):
+            live._send([4, 9])
+        args, kwargs = post.call_args
+        self.assertEqual(args[0], "http://agent.test/internal/v1/events")
+        self.assertEqual(kwargs["json"]["type"], "hiring_changed")
+        self.assertEqual(kwargs["json"]["payload"], {"driver_ids": [4, 9]})
+        self.assertEqual(kwargs["headers"], {"X-Internal-Secret": "s3"})

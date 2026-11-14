@@ -3,16 +3,42 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from services import events as hub_module
 from services import alerts
-from services.auth import Principal, current_user_sse
+from services.auth import Principal, current_user_sse, require_internal
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/events", tags=["events"])
+# Server-to-server: other services (the Django API) put their own events on the
+# same stream, so a page gets them without opening another connection.
+internal_router = APIRouter(prefix="/internal/v1/events", tags=["internal"])
+
+# Only these types may come from outside: the agent's own events stay its own.
+EXTERNAL_TYPES = {hub_module.HIRING_CHANGED}
+
+
+class PublishRequest(BaseModel):
+    type: str
+    company_id: int
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+@internal_router.post("", status_code=202)
+def publish_event(body: PublishRequest, _: bool = Depends(require_internal)) -> dict[str, Any]:
+    """POST /internal/v1/events {type, company_id, payload}: fan the event out to the
+    company's open streams. Nothing is stored; a page that was not connected catches up
+    by reloading what the event is about."""
+    if body.type not in EXTERNAL_TYPES:
+        raise HTTPException(status_code=400, detail=f"unknown event type {body.type!r}")
+    hub_module.publish(body.type, body.company_id, **body.payload)
+    return {"published": body.type, "subscribers": hub_module.hub.count()}
 
 HEARTBEAT_SECONDS = 25
 

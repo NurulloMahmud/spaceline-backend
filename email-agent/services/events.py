@@ -21,6 +21,9 @@ BOOKING_FAILED = "booking_failed"
 NEGOTIATION_UPDATED = "negotiation_updated"
 # A broker wrote back on a bid: what the dispatcher's bell shows.
 BROKER_REPLIED = "broker_replied"
+# Published by the Django API (internal route): a driver on the hiring board
+# changed, so open boards reload it.
+HIRING_CHANGED = "hiring_changed"
 
 QUEUE_SIZE = 64
 
@@ -56,6 +59,9 @@ class EventHub:
     async def unsubscribe(self, queue: asyncio.Queue) -> None:
         async with self._lock:
             self._subscribers.discard(queue)
+
+    def count(self) -> int:
+        return len(self._subscribers)
 
     def publish(self, event: Event) -> None:
         """Non-blocking: a client too slow to drain its queue loses events, not the pipeline."""

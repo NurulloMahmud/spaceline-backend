@@ -65,6 +65,7 @@ app.include_router(conversations.router)
 app.include_router(accounts.router)
 app.include_router(mailboxes.router)
 app.include_router(events.router)
+app.include_router(events.internal_router)
 
 
 @app.get("/api/v1/health", tags=["health"])

@@ -295,6 +295,9 @@ DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', 'support@boxtruckmanage.com')
 
 # assistant
 INTERNAL_SERVICE_SECRET = config('INTERNAL_SERVICE_SECRET')
+# The email agent on this server, for events the Django API puts on its stream
+# (hiring/live.py). Empty turns the live hiring board off; boards then just refresh.
+EMAIL_AGENT_INTERNAL_URL = config('EMAIL_AGENT_INTERNAL_URL', default='http://127.0.0.1:8100')
 
 # atrek (Go loads/bids service) — for the handful of calls boxTruck makes
 # outbound to it, e.g. telling its broker cache to refresh immediately
