@@ -36,6 +36,8 @@ READS_FAILING_MINUTES = 10
 REPEAT_MINUTES = 60
 # One send-failure alert per mailbox in this window.
 SEND_FAILURE_MINUTES = 10
+# One events-stream failure alert in this window.
+STREAM_FAILURE_MINUTES = 10
 
 _standing: dict[str, datetime] = {}      # condition -> last time it was sent
 _failing_since: dict[str, datetime] = {}  # mailbox -> first pass seen failing
@@ -88,6 +90,20 @@ def send_failed(address: str, error: str, tries: int) -> None:
         return
     _standing[key] = now
     text = f"a bid from {address} could not be sent after {tries} tr{'y' if tries == 1 else 'ies'}: {error}"
+    try:
+        asyncio.get_running_loop().create_task(notify("ALERT: " + text))
+    except RuntimeError:
+        logger.warning(f"alert (no event loop): {text}")
+
+
+def stream_failed(error: str) -> None:
+    """Called when the notifications SSE stream breaks. Fire and forget."""
+    now = _now()
+    last = _standing.get("stream")
+    if last is not None and now - last < timedelta(minutes=STREAM_FAILURE_MINUTES):
+        return
+    _standing["stream"] = now
+    text = f"notifications stream failed: {error}"
     try:
         asyncio.get_running_loop().create_task(notify("ALERT: " + text))
     except RuntimeError:
