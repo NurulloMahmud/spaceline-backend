@@ -12,10 +12,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config('SECRET_KEY')
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = config('DEBUG', default=True, cast=bool)
-
 LOCAL = config('LOCAL', default=False, cast=bool)
+
+# SECURITY WARNING: don't run with debug turned on in production!
+# Off unless asked for: a 500 under DEBUG sends the whole traceback to the browser.
+DEBUG = config('DEBUG', default=LOCAL, cast=bool)
 
 TEST_ENV = config('TEST_ENV', default=False, cast=bool)
 
@@ -320,3 +321,18 @@ BILLING_CARD_RETURN_URL = config(
     'BILLING_CARD_RETURN_URL',
     default=config('FRONTEND_URL', default='http://localhost:5173/').rstrip('/') + '/billing/cards',
 )
+
+
+# Django's default logging writes to the console only while DEBUG is on, so with
+# DEBUG off the request errors and their tracebacks would vanish from the
+# supervisor log. Keep them on stderr either way.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler'},
+    },
+    'loggers': {
+        'django': {'handlers': ['console'], 'level': 'INFO'},
+    },
+}
