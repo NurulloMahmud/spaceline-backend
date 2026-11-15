@@ -1121,7 +1121,14 @@ class TrackingEndpointTests(TestCase):
             'located_before': self.today_start.isoformat(),
             'ordering': 'current_location_updated_at',
         })
-        self.assertEqual([r['full_name'] for r in response.data['results']], ['Owen Hughes', 'Grant Wells', 'Kwame Osei'])
+        # Never located first, by name; then the oldest location.
+        self.assertEqual([r['full_name'] for r in response.data['results']], ['Grant Wells', 'Owen Hughes', 'Kwame Osei'])
+        newest = client.get(self.list_url, {
+            'status': self.active.id,
+            'located_before': self.today_start.isoformat(),
+            'ordering': '-current_location_updated_at',
+        })
+        self.assertEqual([r['full_name'] for r in newest.data['results']], ['Kwame Osei', 'Grant Wells', 'Owen Hughes'])
         self.assertEqual(client.get(self.list_url, {'located_before': 'yesterday'}).status_code, 400)
 
     def test_page_size_is_capped(self):

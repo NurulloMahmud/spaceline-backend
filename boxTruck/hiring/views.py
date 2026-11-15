@@ -1745,6 +1745,10 @@ class TrackingDriverListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = TrackingDriverSerializer
     pagination_class = TrackingPagination
+    # Filtering and ordering are done in get_queryset. The global OrderingFilter
+    # would re-sort `?ordering=` with a plain ORDER BY, which on Postgres puts the
+    # never-located drivers last and drops the name tie-break.
+    filter_backends: list = []
 
     def list(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         from hub.registry import apply_registrations
