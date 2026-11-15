@@ -56,8 +56,10 @@ def set_team(
     first = team_vehicle(driver)
     if first is None:
         raise NoVehicle()
+    # of=("self",): Postgres refuses FOR UPDATE on the nullable side of the
+    # outer join that select_related adds, so lock only the vehicle rows.
     vehicle = (
-        Vehicle.objects.select_for_update()
+        Vehicle.objects.select_for_update(of=("self",))
         .select_related("second_driver")
         .get(pk=first.pk)
     )
@@ -66,7 +68,7 @@ def set_team(
     if second is None or vehicle.second_driver_id != second.id:
         if second is not None:
             others = (
-                Vehicle.objects.select_for_update()
+                Vehicle.objects.select_for_update(of=("self",))
                 .select_related("driver", "second_driver")
                 .filter(second_driver=second)
                 .exclude(pk=vehicle.pk)
