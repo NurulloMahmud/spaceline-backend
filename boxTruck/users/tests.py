@@ -285,3 +285,53 @@ class ConsolidateMigrationTests(TransactionTestCase):
         self.assertEqual(self.old.get_model('billing', 'Load').objects.count(), 3)
         self.assertEqual(self.old.get_model('users', 'CustomUser').objects.count(), 2)
         third.delete()
+
+
+class ThemeReportTests(TestCase):
+    def setUp(self) -> None:
+        self.user = CustomUser.objects.create_user(
+            username='dana', password='x', is_active=True, first_name='Dana', last_name='Lee',
+            department=Department.objects.create(name='Dispatch'),
+        )
+        self.client = APIClient()
+
+    def test_the_app_reports_the_theme_on_screen(self) -> None:
+        self.client.force_authenticate(self.user)
+        response = self.client.post('/api/users/theme/', {'theme': 'cobalt-night'}, format='json')
+        self.assertEqual(response.status_code, 204)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.theme, 'cobalt-night')
+        self.assertIsNotNone(self.user.theme_seen_at)
+
+    def test_an_unknown_theme_is_refused(self) -> None:
+        self.client.force_authenticate(self.user)
+        response = self.client.post('/api/users/theme/', {'theme': 'paper'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.theme, '')
+
+    def test_signed_out_cannot_report(self) -> None:
+        self.assertEqual(self.client.post('/api/users/theme/', {'theme': 'frost'}, format='json').status_code, 401)
+
+    def test_reporting_leaves_the_rest_of_the_account_alone(self) -> None:
+        self.client.force_authenticate(self.user)
+        self.client.post('/api/users/theme/', {'theme': 'frost'}, format='json')
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('x'))
+        self.assertEqual((self.user.first_name, self.user.department.name), ('Dana', 'Dispatch'))
+
+    def test_the_report_counts_each_theme(self) -> None:
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        CustomUser.objects.create_user(username='sam', password='x', is_active=True)
+        self.client.force_authenticate(self.user)
+        self.client.post('/api/users/theme/', {'theme': 'graphite'}, format='json')
+        out = StringIO()
+        call_command('theme_report', stdout=out)
+        text = out.getvalue()
+        self.assertIn('Graphite       dana', text)
+        self.assertRegex(text, r'Graphite\s+1\n')
+        self.assertRegex(text, r'not reported\s+1\n')
+        self.assertRegex(text, r'active users\s+2\n')

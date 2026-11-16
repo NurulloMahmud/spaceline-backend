@@ -86,6 +86,14 @@ class Team(models.Model):
         ordering = ['name']
 
 
+class Theme(models.TextChoices):
+    """The themes a person picks from the Theme button in the app's menu."""
+    COBALT = 'cobalt', 'Cobalt'
+    COBALT_NIGHT = 'cobalt-night', 'Cobalt Night'
+    FROST = 'frost', 'Frost'
+    GRAPHITE = 'graphite', 'Graphite'
+
+
 class CustomUser(AbstractUser):
     first_name = models.CharField(max_length=100, null=False, blank=False)
     last_name = models.CharField(max_length=100, null=False, blank=False)
@@ -95,6 +103,10 @@ class CustomUser(AbstractUser):
     )
     started_working_date = models.DateField(null=True, blank=True)
     is_active = models.BooleanField(default=False)
+    # The theme the app last had on screen for this user, and when it said so. The choice itself
+    # stays in each browser; this is only a record of it. Empty until the app first reports.
+    theme = models.CharField(max_length=20, choices=Theme.choices, blank=True, default='')
+    theme_seen_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.username

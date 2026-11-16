@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from rest_framework import status, generics, views
 from rest_framework.generics import CreateAPIView
+from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import PermissionDenied
@@ -15,7 +16,7 @@ from .models import PasswordReset, Company, CustomUser, Department, UserInvite, 
 from .serializers import (
     InviteUserSerializer, PasswordResetRequestSerializer, PasswordResetSerializer, CompanySerializer, UserProfileSerializer, RegisterWithInviteSerializer, UserRegisterSerializer, CustomTokenObtainPairSerializer,
     UserProfileUpdateSerializer, UserUpdateSerializer, UserListSerializer, DepartmentSerializer, UpdaterUsersSerializer,
-    PageSerializer, UserPageAccessSerializer, MyPageAccessSerializer
+    PageSerializer, UserPageAccessSerializer, MyPageAccessSerializer, ThemeReportSerializer
 )
 
 
@@ -81,6 +82,22 @@ class UserRetrieveAPIView(generics.ListAPIView):
         user = self.request.user
         queryset = CustomUser.objects.filter(id=user.id)
         return queryset
+
+
+class ThemeReportView(APIView):
+    """POST {"theme": "cobalt"}: the app reports the theme the signed-in user has on screen.
+
+    Only a record, so the team can see who uses which theme; nothing reads it back to pick a theme.
+    Written with update() so it never touches the rest of the account."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request: Request) -> Response:
+        serializer = ThemeReportSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        CustomUser.objects.filter(pk=request.user.pk).update(
+            theme=serializer.validated_data['theme'], theme_seen_at=timezone.now()
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 def guard_developer_target(request, target):

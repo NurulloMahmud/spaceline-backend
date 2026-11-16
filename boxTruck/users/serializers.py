@@ -7,7 +7,7 @@ from django.utils import timezone
 from rest_framework.validators import UniqueValidator
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth.password_validation import validate_password
-from users.models import Company, CustomUser, Department, Team, UserInvite, Page, UserPageAccess
+from users.models import Company, CustomUser, Department, Team, Theme, UserInvite, Page, UserPageAccess
 
 
 User = get_user_model()
@@ -305,3 +305,8 @@ class RegisterWithInviteSerializer(serializers.Serializer):
         invite.save(update_fields=["is_used"])
 
         return user
+
+
+class ThemeReportSerializer(serializers.Serializer):
+    """What the app sends when it reports the theme on screen."""
+    theme = serializers.ChoiceField(choices=Theme.choices)
