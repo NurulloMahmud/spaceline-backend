@@ -335,3 +335,39 @@ class ThemeReportTests(TestCase):
         self.assertRegex(text, r'Graphite\s+1\n')
         self.assertRegex(text, r'not reported\s+1\n')
         self.assertRegex(text, r'active users\s+2\n')
+
+
+class ThemeReportListTests(TestCase):
+    def setUp(self) -> None:
+        self.dev = CustomUser.objects.create_user(
+            username='devon', password='x', is_active=True, first_name='Devon',
+            department=Department.objects.create(name='Developer'),
+        )
+        self.boss = CustomUser.objects.create_user(
+            username='boss', password='x', is_active=True, first_name='Boss',
+            department=Department.objects.create(name='Management'),
+        )
+        CustomUser.objects.create_user(username='gone', password='x', is_active=False, theme='frost')
+        self.client = APIClient()
+
+    def test_a_developer_sees_every_active_user_and_the_counts(self) -> None:
+        self.client.force_authenticate(self.boss)
+        self.client.post('/api/users/theme/', {'theme': 'cobalt-night'}, format='json')
+        self.client.force_authenticate(self.dev)
+        response = self.client.get('/api/users/theme-report/')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['total'], 2)
+        self.assertEqual(response.data['counts'], {'cobalt': 0, 'cobalt-night': 1, 'frost': 0, 'graphite': 0, '': 1})
+        by = {row['username']: row for row in response.data['users']}
+        self.assertEqual(set(by), {'devon', 'boss'})
+        self.assertEqual(by['boss']['theme'], 'cobalt-night')
+        self.assertEqual(by['boss']['department'], 'Management')
+        self.assertIsNotNone(by['boss']['theme_seen_at'])
+        self.assertEqual(by['devon']['theme'], '')
+
+    def test_management_cannot_read_it(self) -> None:
+        self.client.force_authenticate(self.boss)
+        self.assertEqual(self.client.get('/api/users/theme-report/').status_code, 403)
+
+    def test_signed_out_cannot_read_it(self) -> None:
+        self.assertEqual(self.client.get('/api/users/theme-report/').status_code, 401)

@@ -11,8 +11,8 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework import viewsets
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .permissions import IsAdminUser, IsDispatchManager, IsInternalService, IsUpdater, is_developer
-from .models import PasswordReset, Company, CustomUser, Department, UserInvite, Page, UserPageAccess
+from .permissions import IsAdminUser, IsDeveloper, IsDispatchManager, IsInternalService, IsUpdater, is_developer
+from .models import PasswordReset, Company, CustomUser, Department, Theme, UserInvite, Page, UserPageAccess
 from .serializers import (
     InviteUserSerializer, PasswordResetRequestSerializer, PasswordResetSerializer, CompanySerializer, UserProfileSerializer, RegisterWithInviteSerializer, UserRegisterSerializer, CustomTokenObtainPairSerializer,
     UserProfileUpdateSerializer, UserUpdateSerializer, UserListSerializer, DepartmentSerializer, UpdaterUsersSerializer,
@@ -98,6 +98,37 @@ class ThemeReportView(APIView):
             theme=serializer.validated_data['theme'], theme_seen_at=timezone.now()
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ThemeReportListView(APIView):
+    """GET: which theme each active user had on screen when the app last reported it, with a count
+    per theme. Developers only (the Direct board shows it). `theme` is '' for a user the app has
+    not reported for yet."""
+    permission_classes = [IsDeveloper]
+
+    def get(self, request: Request) -> Response:
+        users = (
+            CustomUser.objects.filter(is_active=True)
+            .select_related('department')
+            .order_by('first_name', 'last_name', 'username')
+        )
+        rows = [
+            {
+                'id': u.id,
+                'username': u.username,
+                'first_name': u.first_name,
+                'last_name': u.last_name,
+                'department': u.department.name if u.department else None,
+                'theme': u.theme,
+                'theme_seen_at': u.theme_seen_at,
+            }
+            for u in users
+        ]
+        counts = {value: 0 for value in Theme.values}
+        counts[''] = 0
+        for row in rows:
+            counts[row['theme'] if row['theme'] in counts else ''] += 1
+        return Response({'counts': counts, 'total': len(rows), 'users': rows})
 
 
 def guard_developer_target(request, target):

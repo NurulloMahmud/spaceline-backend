@@ -4,7 +4,8 @@ from rest_framework.routers import SimpleRouter
 from .views import (CompanyProfileView, RegisterAPIView, PasswordResetRequestView, PasswordResetView, DispatchUsers,
                     UserProfileUpdateView, UserUpdateView, UserListAPIView, UserRetrieveAPIView, DepartmentViewSet,
                     UpdaterUsersAPIView, CreateInviteView, InviteDetailView, RegisterWithInviteView, UserBulkView,
-                    PageViewSet, UserPageAccessViewSet, MyPageAccessView, ThemeReportView
+                    PageViewSet, UserPageAccessViewSet, MyPageAccessView, ThemeReportView,
+                    ThemeReportListView
                     )
 
 router = SimpleRouter()
@@ -27,6 +28,7 @@ urlpatterns = [
     path('users-bulk/', UserBulkView.as_view(), name='user-bulk'),
     path('my-pages/', MyPageAccessView.as_view(), name='my-pages'),
     path('theme/', ThemeReportView.as_view(), name='theme'),
+    path('theme-report/', ThemeReportListView.as_view(), name='theme-report'),
 
     path('invite/create/', CreateInviteView.as_view(), name='invite-create'),
     path('invite-detail/<uuid:token>/', InviteDetailView.as_view(), name='invite-detail'),
