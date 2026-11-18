@@ -11,7 +11,7 @@ Change the two together.
 
 Placeholders come from three places:
   All in          the dispatcher's bid amount
-  Miles out, ETA  deadhead from the driver's current position to pickup
+  Miles out       deadhead from the driver's current position to pickup
   Dimensions      the driver's vehicle cargo box (what we can carry)
   Type            the driver's vehicle type
   letterhead      the company profile in the TMS
@@ -79,17 +79,6 @@ def miles_out(driver: Optional[dict], load: dict) -> str:
         return ""
 
 
-def eta_text(miles: str) -> str:
-    """Driving time for the deadhead: "9mins", "1h 25mins", "2h"."""
-    if not miles:
-        return ""
-    total = max(5, round(float(miles) * 0.92 + 5))
-    hours, mins = divmod(total, 60)
-    if not hours:
-        return f"{mins}mins"
-    return f"{hours}h {mins}mins" if mins else f"{hours}h"
-
-
 # The reference a broker recognises, in the order we prefer it. `order_number`
 # is the broker's own number for the load and is the only one of these that
 # means anything on their side — it is what the bid board shows as
@@ -137,7 +126,6 @@ def build_html_body(
     offer = (
         _row("All in", f"${_fmt_money(bid_amount)}", True)
         + _row("Miles out", out)
-        + _row("ETA", eta_text(out))
         + _row("Dimensions", vehicle_dimensions(vehicle))
         + _row("Type", vehicle_type(driver))
         + _row("MC", mc)

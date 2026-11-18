@@ -19,7 +19,6 @@ def test_body_matches_the_load_window_composer(load_snapshot, company_profile, d
     assert body == (
         "All in: $3,200\n"
         "Miles out: 4\n"
-        "ETA: 9mins\n"
         "Dimensions: 288 x 96 x 96 in\n"
         "Type: Large straight\n"
         "MC: 846834\n"
@@ -85,7 +84,7 @@ def test_missing_driver_leaves_only_the_price_and_mc(load_snapshot, company_prof
         dispatcher=None,
     )
     assert body.startswith("All in: $900\nMC: 846834\nALL BIDS")
-    for label in ("Miles out", "ETA", "Dimensions", "Type"):
+    for label in ("Miles out", "Dimensions", "Type"):
         assert label not in body
     assert "N/A" not in body
 
@@ -128,14 +127,6 @@ def test_values_are_escaped(load_snapshot, company_profile, driver_profile):
     )
     assert "A&amp;B &lt;Freight&gt;" in html
     assert "<Freight>" not in html
-
-
-@pytest.mark.parametrize(
-    "miles, eta",
-    [("", ""), ("0", "5mins"), ("4", "9mins"), ("60", "1h"), ("120", "1h 55mins"), ("125", "2h")],
-)
-def test_eta_matches_the_board(miles, eta):
-    assert bid_email.eta_text(miles) == eta
 
 
 @pytest.mark.parametrize(
