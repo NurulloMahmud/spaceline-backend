@@ -123,12 +123,34 @@ def set_payment_type(payout, new_type, user, why='', write_load=True):
     return True
 
 
+# A load in one of these will not be paid as booked, so its payout never takes expenses on its own.
+DEAD_LOAD_STATUSES = ('rejected', 'cancelled')
+
+
+def is_dead_load(load):
+    return bool(load.status_id) and load.status.name.strip().lower() in DEAD_LOAD_STATUSES
+
+
+def takes_expenses(payout):
+    """Only a pending payout on a live load takes expenses on its own. On hold, confirmed, paid and
+    rejected-load payouts keep what they already carry; accounting can still add one by hand."""
+    return payout.status == Payout.PENDING and bool(payout.load.driver_id) and not is_dead_load(payout.load)
+
+
+def expense_takers(driver):
+    """The driver's payouts a new expense may land on, see takes_expenses."""
+    qs = Payout.objects.filter(load__driver=driver, status=Payout.PENDING)
+    for name in DEAD_LOAD_STATUSES:
+        qs = qs.exclude(load__status__name__iexact=name)
+    return qs
+
+
 def take_open_expenses(payout, user=None, exclude=None):
     """Put the driver's open expenses on this payout, oldest first, up to what it can carry.
 
-    Returns the links made. Used when the payout is created and when a new expense arrives.
+    Returns the links made. Used when the payout is created.
     """
-    if payout.status == Payout.PAID or not payout.load.driver_id:
+    if not takes_expenses(payout):
         return []
     taken = []
     room = payout.amount
@@ -152,13 +174,13 @@ def take_open_expenses(payout, user=None, exclude=None):
 
 
 def take_expense_everywhere(deduction, user=None, exclude_payout=None):
-    """A new or raised expense goes onto the driver's open payouts, oldest pick-up first.
+    """A new or raised expense goes onto the driver's pending payouts, oldest pick-up first.
 
     A payout that already takes part of it takes more if it has room.
     """
     taken = []
     name = deduction.type.name if deduction.type_id else 'Expense'
-    payouts = Payout.objects.filter(load__driver=deduction.driver).exclude(status=Payout.PAID).exclude(id=exclude_payout or 0)
+    payouts = expense_takers(deduction.driver).exclude(id=exclude_payout or 0)
     for p in payouts.select_related('load').order_by('load__pickup_date', 'id'):
         _, held, owed = debt_of(deduction)
         remaining = owed - held

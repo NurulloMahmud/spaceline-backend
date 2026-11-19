@@ -480,6 +480,34 @@ class ExpenseRules(AccountingBase):
         self.assertEqual((r.data['amount'], r.data['owed']), (D('300'), D('300')))
         self.assertEqual(Payout.objects.get(load=l2).amount, D('100'))
 
+    def test_new_expense_lands_only_on_pending_payouts_of_live_loads(self):
+        rejected = LoadStatus.objects.create(name='Rejected')
+        held = self.load(10030, days_ago=6).payout
+        Payout.objects.filter(pk=held.pk).update(status=Payout.HOLD)
+        confirmed = self.load(10031, days_ago=5).payout
+        Payout.objects.filter(pk=confirmed.pk).update(status=Payout.CONFIRMED)
+        dead = self.load(10032, days_ago=4, status=rejected).payout
+        no_status = self.load(10033, driver_pay='100', days_ago=3)
+        Load.objects.filter(pk=no_status.pk).update(status=None)
+        live = self.load(10034, days_ago=1).payout
+        c = self.api(self.acct)
+        r = c.post(reverse('accounting-expenses'), {'driver': self.driver.id, 'type': self.fuel.id, 'amount': '250'})
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual([(t['shipment'], t['amount']) for t in r.data['taken']], [('SH - 10033', D('100')), ('SH - 10034', D('150'))])
+        for p in (held, confirmed, dead):
+            self.assertFalse(p.expenses.exists())
+        r = c.patch(reverse('accounting-expense', args=[r.data['id']]), {'amount': '400'})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(live.applied_total, D('300'))
+        for p in (held, confirmed, dead):
+            self.assertFalse(p.expenses.exists())
+
+    def test_a_payout_made_for_a_rejected_load_takes_no_open_expenses(self):
+        rejected = LoadStatus.objects.create(name='Rejected')
+        self.expense('120')
+        self.assertFalse(self.load(10040, status=rejected).payout.expenses.exists())
+        self.assertEqual(self.load(10041).payout.applied_total, D('120'))
+
     def test_open_expense_waits_and_can_be_deleted(self):
         c = self.api(self.acct)
         r = c.post(reverse('accounting-expenses'), {'driver': self.driver.id, 'type': self.fuel.id, 'amount': '75'})
