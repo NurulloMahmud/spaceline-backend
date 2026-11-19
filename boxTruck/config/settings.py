@@ -257,13 +257,16 @@ AWS_S3_OBJECT_PARAMETERS = {
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/static/'
 
-# Media files (Uploads)
-MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/'
+# Media files (Uploads). Production sets MEDIA_DOMAIN to our own server (nginx /files/ streams
+# them from S3), which the office reaches far faster than S3 in Stockholm. Unset, links point at S3.
+MEDIA_DOMAIN = config('MEDIA_DOMAIN', default=AWS_S3_CUSTOM_DOMAIN)
+MEDIA_URL = f'https://{MEDIA_DOMAIN}/'
 
 # Configure Django to use the custom storage backends
 STORAGES = {
     "default": {
         "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+        "OPTIONS": {"custom_domain": MEDIA_DOMAIN},
     },
     "staticfiles": {
         "BACKEND": "storages.backends.s3boto3.S3StaticStorage",
