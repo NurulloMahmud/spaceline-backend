@@ -137,6 +137,15 @@ def upsert_driver(payload: dict[str, Any]) -> Driver:
         data = {}
     email = _text(data.get("email"))
 
+    position = _position(data)
+    place = None
+    if position is not None:
+        # Naming the position calls Google, so it happens before the
+        # transaction, and only for a position this carrier has not seen.
+        known = find_driver(hub_driver_id, email)
+        if known is None or _is_new_position(known, position):
+            place = place_for_position(*position)
+
     with profiles.syncing(), transaction.atomic():
         driver = find_driver(hub_driver_id, email)
         if driver is None:
@@ -147,14 +156,13 @@ def upsert_driver(payload: dict[str, Any]) -> Driver:
         driver.hub_driver_id = hub_driver_id
         driver.hub_invite_status = "active"
 
-        position = _position(data)
         moved = position is not None and _is_new_position(driver, position)
         if moved:
+            # The exact coordinates are kept; the web shows "City, ST ZIP".
+            # The mailing address stays the carrier's.
             driver.current_latitude, driver.current_longitude = position
             driver.current_location_updated_at = timezone.now()
-            # The place the Tracking page shows, from the nearest known ZIP.
-            # The mailing address stays the carrier's.
-            for key, value in place_for_position(*position).items():
+            for key, value in (place or place_for_position(*position)).items():
                 setattr(driver, key, value)
 
         # Most pushes only move the position: rows whose values did not change

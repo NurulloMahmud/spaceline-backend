@@ -33,7 +33,7 @@ from rest_framework.response import Response
 from rest_framework.test import APIClient
 
 from billing.models import Broker, BrokerBlacklist, Load
-from hiring.google_maps import geocode_zip
+from hiring.google_maps import geocode_zip, reverse_geocode
 from hiring.models import (
     Driver,
     DriverCompany,
@@ -60,13 +60,18 @@ HUB = dict(DRIVER_HUB_URL="https://hub.test", DRIVER_HUB_TOKEN="tenant-token")
 # Outside the tests written for them they are dropped, so no thread outlives a
 # test or reaches a network; those tests patch the runner to run inline.
 _drop_profile_pushes = patch("hub.profiles._in_background", lambda work: None)
+# No test reaches Google: a position is named from the known ZIPs unless a
+# test gives reverse_geocode an answer.
+_no_google = patch("hiring.places.reverse_geocode", return_value=None)
 
 
 def setUpModule() -> None:
     _drop_profile_pushes.start()
+    _no_google.start()
 
 
 def tearDownModule() -> None:
+    _no_google.stop()
     _drop_profile_pushes.stop()
 LOCAL_FILES = dict(
     STORAGES={
@@ -1324,18 +1329,94 @@ class AppLocationTests(HubPushTestCase):
             ("Akron", "OH", "44301"),
         )
 
-    def test_a_far_position_is_a_distance_and_an_unknown_one_coordinates(self) -> None:
-        # About 50 miles south of Akron.
+    def test_google_names_the_exact_position(self) -> None:
+        answer = {"city": "Fairlawn", "state": "OH", "zip": "44333"}
+        with patch("hiring.places.reverse_geocode", return_value=answer) as google:
+            driver, _ = self.push(_profile(lat=41.1278, lng=-81.6098))
+        google.assert_called_once_with(41.1278, -81.6098)
+        # The exact coordinates are kept; the place is City, ST ZIP.
+        self.assertEqual(
+            (driver.current_latitude, driver.current_longitude), (41.1278, -81.6098)
+        )
+        self.assertEqual(
+            (
+                driver.current_zip,
+                driver.current_city,
+                driver.current_state,
+                driver.current_address,
+            ),
+            ("44333", "Fairlawn", "OH", "Fairlawn, OH 44333"),
+        )
+
+        # The hub resends the same position with a document change: no new call.
+        with patch("hiring.places.reverse_geocode", return_value=answer) as google:
+            self.push(_profile(lat=41.1278, lng=-81.6098, phone="5550003"))
+        google.assert_not_called()
+
+    def test_without_google_a_far_position_is_never_raw_coordinates(self) -> None:
+        # About 50 miles south of Akron: no known ZIP is close enough.
         driver, _ = self.push(_profile(lat=40.36, lng=-81.52))
         self.assertEqual(
-            (driver.current_zip, driver.current_city, driver.current_state),
-            ("", "", ""),
+            (
+                driver.current_zip,
+                driver.current_city,
+                driver.current_state,
+                driver.current_address,
+            ),
+            ("", "", "", ""),
         )
-        self.assertRegex(driver.current_address, r"^\d+ mi from Akron, OH 44301$")
+        self.assertEqual(
+            (driver.current_latitude, driver.current_longitude), (40.36, -81.52)
+        )
 
         driver, _ = self.push(_profile(lat=33.4484, lng=-112.074))
-        self.assertEqual((driver.current_zip, driver.current_city), ("", ""))
-        self.assertEqual(driver.current_address, "33.4484, -112.0740")
+        self.assertEqual(driver.current_address, "")
+        self.assertEqual(driver.current_latitude, 33.4484)
+
+    def test_name_app_positions_names_only_unnamed_app_positions(self) -> None:
+        # Pushed while Google was unreachable and far from any known ZIP.
+        unnamed, _ = self.push(_profile(lat=40.36, lng=-81.52))
+        # A dispatcher typed a ZIP after the app's position.
+        typed, _ = self.push(
+            _profile(email="typed@example.com", lat=40.5, lng=-81.4)
+            | {"hub_driver_id": 77}
+        )
+        Driver.objects.filter(pk=typed.pk).update(
+            current_zip="44101",
+            current_city="Cleveland",
+            current_state="OH",
+            current_address="Cleveland, OH 44101, USA",
+            current_latitude=41.4995,
+            current_longitude=-81.6954,
+        )
+        # The app sent coordinates, then the dispatcher cleared the ZIP and
+        # moved the truck by hand: not the app's position any more.
+        moved, _ = self.push(
+            _profile(email="moved@example.com", lat=40.6, lng=-81.3)
+            | {"hub_driver_id": 78}
+        )
+        Driver.objects.filter(pk=moved.pk).update(
+            current_latitude=39.0, current_longitude=-80.0
+        )
+        stamp = Driver.objects.get(pk=unnamed.pk).current_location_updated_at
+
+        answer = {"city": "New Philadelphia", "state": "OH", "zip": "44663"}
+        out = StringIO()
+        with patch("hiring.places.reverse_geocode", return_value=answer) as google:
+            call_command("name_app_positions", stdout=out)
+        google.assert_called_once_with(40.36, -81.52)
+        self.assertIn("Named 1 position(s)", out.getvalue())
+
+        unnamed.refresh_from_db()
+        self.assertEqual(
+            (unnamed.current_address, unnamed.current_zip, unnamed.current_latitude),
+            ("New Philadelphia, OH 44663", "44663", 40.36),
+        )
+        self.assertEqual(unnamed.current_location_updated_at, stamp)
+        typed.refresh_from_db()
+        self.assertEqual(typed.current_zip, "44101")
+        moved.refresh_from_db()
+        self.assertEqual(moved.current_address, "")
 
     def test_no_position_or_zero_leaves_the_location_alone(self) -> None:
         driver, _ = self.push(_profile(lat=None, lng=None))
@@ -1423,6 +1504,92 @@ class AppLocationTests(HubPushTestCase):
         self.assertFalse(
             ZipLocation.objects.filter(zip_code__in=["44114", "44199"]).exists()
         )
+
+    def test_reverse_geocode_reads_city_state_and_zip(self) -> None:
+        def google(body: dict) -> MagicMock:
+            resp = MagicMock()
+            resp.json.return_value = body
+            return resp
+
+        street = {
+            "status": "OK",
+            "results": [
+                {
+                    "address_components": [
+                        {"long_name": "1600", "types": ["street_number"]},
+                        {"long_name": "Main St", "types": ["route"]},
+                        {"long_name": "Columbus", "types": ["locality", "political"]},
+                        {
+                            "long_name": "Franklin County",
+                            "short_name": "Franklin County",
+                            "types": ["administrative_area_level_2", "political"],
+                        },
+                        {
+                            "long_name": "Ohio",
+                            "short_name": "OH",
+                            "types": ["administrative_area_level_1", "political"],
+                        },
+                        {"long_name": "43215", "types": ["postal_code"]},
+                        {"long_name": "1234", "types": ["postal_code_suffix"]},
+                    ]
+                },
+                {
+                    "address_components": [
+                        {"long_name": "43216", "types": ["postal_code"]},
+                    ]
+                },
+            ],
+        }
+        with patch(
+            "hiring.google_maps.requests.get", return_value=google(street)
+        ) as get:
+            self.assertEqual(
+                reverse_geocode(39.9612, -82.9988),
+                {"city": "Columbus", "state": "OH", "zip": "43215"},
+            )
+        self.assertEqual(
+            get.call_args.kwargs["params"]["latlng"], "39.961200,-82.998800"
+        )
+
+        # Rural: no locality anywhere, the township names the place.
+        rural = {
+            "status": "OK",
+            "results": [
+                {
+                    "address_components": [
+                        {"long_name": "County Rd 12", "types": ["route"]},
+                        {
+                            "long_name": "Sugar Creek Township",
+                            "types": ["administrative_area_level_3", "political"],
+                        },
+                        {
+                            "long_name": "Ohio",
+                            "short_name": "OH",
+                            "types": ["administrative_area_level_1", "political"],
+                        },
+                        {"long_name": "44681", "types": ["postal_code"]},
+                    ]
+                }
+            ],
+        }
+        with patch("hiring.google_maps.requests.get", return_value=google(rural)):
+            self.assertEqual(
+                reverse_geocode(40.5, -81.6),
+                {"city": "Sugar Creek Township", "state": "OH", "zip": "44681"},
+            )
+
+        for body in (
+            {"status": "ZERO_RESULTS", "results": []},
+            {"status": "REQUEST_DENIED", "error_message": "bad key"},
+            {"status": "OK", "results": [{"address_components": []}]},
+        ):
+            with patch("hiring.google_maps.requests.get", return_value=google(body)):
+                self.assertIsNone(reverse_geocode(10.0, 10.0))
+        with patch(
+            "hiring.google_maps.requests.get",
+            side_effect=requests.ConnectionError("down"),
+        ):
+            self.assertIsNone(reverse_geocode(10.0, 10.0))
 
     def test_the_migration_seeds_zips_from_typed_driver_locations(self) -> None:
         ZipLocation.objects.all().delete()

@@ -144,6 +144,8 @@ if selected box; then
     run ./venv/bin/python manage.py sync_hub_blacklist || true
     run ./venv/bin/python manage.py sync_hub_tenant || true
     run ./venv/bin/python manage.py sync_hub_payouts || true
+    # Driver-app positions with no City, ST ZIP yet (Google was unreachable).
+    run ./venv/bin/python manage.py name_app_positions || true
 
     # Static files live on S3, so collectstatic is a slow upload rather than a
     # local copy. It is opt-in: most deploys do not change a static asset.

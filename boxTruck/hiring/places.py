@@ -1,9 +1,10 @@
-"""Name a GPS position after the nearest ZIP code this server has geocoded.
+"""Name a driver-app GPS position as "City, ST ZIP".
 
-There is no reverse geocoding here. Every ZIP that Google geocoded for us is
-kept in ZipLocation (see geocode_zip), and a position from the driver app takes
-the nearest of those. That costs no API call, and the answers get better as
-dispatchers type more ZIPs.
+The exact coordinates are always kept on the driver; these helpers only give
+the place the web shows. Google reverse geocoding names the position. When
+Google cannot answer, the nearest ZIP this server has geocoded (kept in
+ZipLocation, see geocode_zip) names it if one is close; otherwise the place is
+left blank rather than showing raw coordinates.
 """
 
 import logging
@@ -11,17 +12,16 @@ import math
 import re
 from typing import Any
 
+from .google_maps import reverse_geocode
 from .haversine import haversine
 from .models import ZipLocation
 
 logger = logging.getLogger(__name__)
 
 ZIP_RE = re.compile(r"^\d{5}$")
-# A known ZIP centre this close names the position outright. Further out the
-# position is described as a distance from it, and past FAR_MILES only the
-# coordinates are shown.
+# Without Google, a known ZIP centre this close names the position. Further
+# out a city or ZIP would be wrong, so the place stays blank.
 NEAR_MILES = 20.0
-FAR_MILES = 100.0
 MILES_PER_DEGREE = 69.0
 
 
@@ -50,7 +50,7 @@ def remember_zip(zip_code: Any, geo: dict[str, Any]) -> None:
 
 
 def nearest_zip(
-    latitude: float, longitude: float, within_miles: float = FAR_MILES
+    latitude: float, longitude: float, within_miles: float = NEAR_MILES
 ) -> tuple[ZipLocation, float] | None:
     """The closest known ZIP centre and its distance in miles, or None if none is that close."""
     dlat = within_miles / MILES_PER_DEGREE
@@ -69,32 +69,30 @@ def nearest_zip(
     return best
 
 
-def zip_label(place: ZipLocation) -> str:
-    city_state = ", ".join(p for p in (place.city, place.state) if p)
-    return f"{city_state} {place.zip_code}".strip()
+def place_label(city: str, state: str, zip_code: str) -> str:
+    """Like "Columbus, OH 43215", with whatever parts are known."""
+    city_state = ", ".join(p for p in (city, state) if p)
+    return f"{city_state} {zip_code}".strip()
+
+
+def _place_fields(city: str, state: str, zip_code: str) -> dict[str, str]:
+    return {
+        "current_zip": zip_code[:255],
+        "current_city": city[:255],
+        "current_state": state[:255],
+        "current_address": place_label(city, state, zip_code)[:255],
+    }
 
 
 def place_for_position(latitude: float, longitude: float) -> dict[str, str]:
     """The driver's current_* place fields for a GPS position. Never the mailing address."""
+    geo = reverse_geocode(latitude, longitude)
+    if geo:
+        return _place_fields(geo["city"], geo["state"], geo["zip"])
     found = nearest_zip(latitude, longitude)
-    if found and found[1] <= NEAR_MILES:
-        place = found[0]
-        return {
-            "current_zip": place.zip_code,
-            "current_city": place.city,
-            "current_state": place.state,
-            "current_address": zip_label(place),
-        }
     if found:
-        place, miles = found
-        description = f"{round(miles):.0f} mi from {zip_label(place)}"
-    else:
-        description = f"{latitude:.4f}, {longitude:.4f}"
-    # A city or ZIP that far off would be wrong; the Tracking page shows the
-    # description instead (it falls back to current_address).
-    return {
-        "current_zip": "",
-        "current_city": "",
-        "current_state": "",
-        "current_address": description,
-    }
+        place = found[0]
+        return _place_fields(place.city, place.state, place.zip_code)
+    # Google is unreachable and no known ZIP is close: no place rather than
+    # raw coordinates. The next position push, or name_app_positions, tries again.
+    return _place_fields("", "", "")
