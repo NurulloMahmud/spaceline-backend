@@ -6,39 +6,19 @@ viewsets scope every query to `request.user`, which internal callers do not
 have. Authentication is the shared `X-Internal-Secret` header.
 """
 import logging
-from decimal import Decimal, InvalidOperation
 
-from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from .ratecon_time import parse_ratecon_datetime
 from rest_framework import status, views
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 
-from accounting.services import normalise_payment_type
 from users.models import Company, CustomUser
 from users.permissions import IsInternalService
 
-from .models import Broker, BrokerBlacklist, Load, LoadFile, LoadHistory, LoadStatus, LoadStop
+from .models import Broker, BrokerBlacklist, Load
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_stop_datetime(value):
-    """Ratecon dates arrive as a string or a list of strings per stop."""
-    return parse_ratecon_datetime(value)
-
-
-def _money(value):
-    """A pay from JSON (often a float) as a Decimal, so accounting math works on the new load.
-    None stays None; anything that is not a number raises ValueError."""
-    if value is None or value == '':
-        return None
-    try:
-        return Decimal(str(value)).quantize(Decimal('0.01'))
-    except (InvalidOperation, ValueError, TypeError):
-        raise ValueError(f'not a number: {value!r}')
 
 
 class InternalCompanyProfileView(views.APIView):
@@ -189,113 +169,6 @@ class InternalRateConParseView(views.APIView):
             )
 
         return Response({"parsed_data": parsed_data}, status=status.HTTP_200_OK)
-
-
-class InternalBookLoadView(views.APIView):
-    """
-    Create a load, its stops and its rate confirmation file in one transaction.
-
-    The email-agent calls this only after it has verified the ratecon against
-    the negotiated terms, so there is no approval step here. Everything is
-    written or nothing is.
-    """
-    permission_classes = [IsInternalService]
-    parser_classes = [MultiPartParser, FormParser]
-
-    def post(self, request, *args, **kwargs):
-        import json
-
-        payload = request.data.get('payload')
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except json.JSONDecodeError:
-                return Response({"error": "payload is not valid JSON"}, status=status.HTTP_400_BAD_REQUEST)
-        if not payload:
-            payload = request.data
-
-        driver_id = payload.get('driver_id')
-        broker_id = payload.get('broker_id')
-
-        load_number = (payload.get('load_number') or '').strip() or None
-        if load_number:
-            existing = Load.objects.filter(load_number=load_number).first()
-            if existing:
-                return Response({
-                    "load_id": existing.id,
-                    "shipment": existing.shipment,
-                    "load_number": existing.load_number,
-                    "already_existed": True,
-                }, status=status.HTTP_200_OK)
-
-        booked_by_id = payload.get('booked_by_id')
-        booked_by = CustomUser.objects.filter(id=booked_by_id).first() if booked_by_id else None
-
-        try:
-            carrier_pay = _money(payload.get('carrier_pay'))
-            driver_pay = _money(payload.get('driver_pay'))
-        except ValueError as e:
-            return Response({"error": f"Bad pay: {e}"}, status=status.HTTP_400_BAD_REQUEST)
-
-        status_name = payload.get('status_name') or 'Booked'
-        load_status = LoadStatus.objects.filter(name__iexact=status_name).first()
-
-        try:
-            with transaction.atomic():
-                load = Load.objects.create(
-                    driver_id=driver_id,
-                    broker_id=broker_id,
-                    booked_by=booked_by,
-                    created_by=booked_by,
-                    status=load_status,
-                    load_number=load_number,
-                    carrier_pay=carrier_pay,
-                    driver_pay=driver_pay,
-                    pickup_date=_parse_stop_datetime(payload.get('pickup_date')),
-                    drop_date=_parse_stop_datetime(payload.get('drop_date')),
-                    note=payload.get('note'),
-                    dispatcher_note=payload.get('dispatcher_note'),
-                    payment_type=normalise_payment_type(payload['payment_type']) if payload.get('payment_type') else None,
-                )
-
-                stops = payload.get('stops') or []
-                for order, stop in enumerate(stops, start=1):
-                    LoadStop.objects.create(
-                        load=load,
-                        address=stop.get('address'),
-                        city=stop.get('city'),
-                        state=(stop.get('state') or '')[:2] or None,
-                        zipcode=stop.get('zip_code') or stop.get('zipcode'),
-                        order=order,
-                        load_pickup=bool(stop.get('load_pickup')),
-                        load_drop=bool(stop.get('load_drop')),
-                        last_location=order == len(stops),
-                        requirements=stop.get('driver_instructions') or None,
-                        note=stop.get('note') or None,
-                    )
-
-                ratecon = request.FILES.get('ratecon')
-                if ratecon:
-                    LoadFile.objects.create(load=load, name='RateCon', file=ratecon)
-
-                LoadHistory.objects.create(
-                    load=load,
-                    changed_by=booked_by,
-                    description=payload.get('history_note') or 'Booked automatically from a verified rate confirmation.',
-                )
-        except Exception as e:
-            logger.exception("internal book-load failed | error=%s", e)
-            return Response(
-                {"error": f"Failed to create load: {e}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        return Response({
-            "load_id": load.id,
-            "shipment": load.shipment,
-            "load_number": load.load_number,
-            "already_existed": False,
-        }, status=status.HTTP_201_CREATED)
 
 
 class InternalBusyDriversView(views.APIView):

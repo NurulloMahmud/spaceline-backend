@@ -42,26 +42,3 @@ async def send_message(
         logger.error(f"telegram sendMessage to {chat_id} -> {resp.status_code}: {resp.text}")
         return False
     return True
-
-
-def format_booked_notice(
-    driver_name: str,
-    pickup: str,
-    delivery: str,
-    pickup_date: str,
-    driver_amount: float | None,
-    load_number: str | None,
-) -> str:
-    rate_line = f"💰 Your rate: *${driver_amount:,.2f}*\n" if driver_amount else ""
-    ref_line = f"📄 Load #: {load_number}\n" if load_number else ""
-    return (
-        f"✅ *Load booked!*\n\n"
-        f"👤 {driver_name}\n"
-        f"📍 Pick-up: {pickup}\n"
-        f"📍 Delivery: {delivery}\n"
-        f"📅 Pick-up date: {pickup_date}\n"
-        f"{rate_line}"
-        f"{ref_line}\n"
-        f"The rate confirmation is in, and the load is on your board. "
-        f"Your dispatcher will follow up with the details."
-    )

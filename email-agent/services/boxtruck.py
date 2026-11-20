@@ -1,6 +1,6 @@
 """Client for the TMS. All calls use the shared internal secret."""
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 import httpx
 
@@ -120,30 +120,6 @@ class BoxTruckService:
         if not parsed:
             raise BoxTruckError("ratecon parse returned no data")
         return parsed
-
-    async def book_load(
-        self,
-        payload: dict[str, Any],
-        ratecon: Optional[tuple[str, bytes]] = None,
-    ) -> dict:
-        """Create the load, its stops and its ratecon file in one transaction."""
-        import json
-
-        files = {}
-        if ratecon:
-            files["ratecon"] = (ratecon[0], ratecon[1], "application/pdf")
-
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                f"{self.base_url}/api/billing/internal/book-load/",
-                data={"payload": json.dumps(payload)},
-                files=files or None,
-                headers=self.headers,
-            )
-        if resp.status_code not in (200, 201):
-            raise BoxTruckError(f"book-load failed ({resp.status_code}): {resp.text[:500]}")
-        return resp.json()
-
 
     # -- driver hub relay ---------------------------------------------------
 

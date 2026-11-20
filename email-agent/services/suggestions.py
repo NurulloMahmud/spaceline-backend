@@ -49,7 +49,6 @@ ANSWERED_ALREADY = (
     "Not needed — this conversation was answered after the draft was written."
 )
 NEGOTIATION_CLOSED = "Not needed — the bid was closed before the draft was sent."
-LOAD_BOOKED = "Not needed — the load was booked before the draft was sent."
 
 
 def supersede_pending(

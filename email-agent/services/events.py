@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 SUGGESTION_CREATED = "suggestion_created"
 RATECON_MISMATCH = "ratecon_mismatch"
 RATECON_PARSE_FAILED = "ratecon_parse_failed"
-LOAD_BOOKED = "load_booked"
-BOOKING_FAILED = "booking_failed"
 NEGOTIATION_UPDATED = "negotiation_updated"
 # A broker wrote back on a bid: what the dispatcher's bell shows.
 BROKER_REPLIED = "broker_replied"

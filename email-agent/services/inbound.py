@@ -3,10 +3,11 @@ What happens when a broker replies.
 
 Every inbound message produces exactly one dispatcher-visible outcome:
   - a drafted reply awaiting approval, or
-  - a booked load, or
-  - an alert (mismatch, unreadable ratecon, failed booking).
+  - a checked rate confirmation, or
+  - an alert (mismatch, unreadable ratecon).
 
-Nothing is ever sent to the broker from here.
+Nothing is ever sent to the broker from here, and no load is ever created here:
+dispatchers book loads by hand, even when the rate confirmation matches.
 """
 import asyncio
 import logging
@@ -19,7 +20,7 @@ from sqlalchemy import func, or_, true
 from sqlalchemy.orm import Session
 
 from database import models
-from services import booking, events, suggestions
+from services import events, suggestions
 from services.ai import ai
 from services.boxtruck import BoxTruckError, boxtruck
 from services.negotiations import load_summary_text, reply_subject
@@ -779,8 +780,9 @@ async def handle_ratecon(
     nylas_message_id: str,
 ) -> None:
     """
-    Parse, verify, and only then book. A failure at any step is surfaced to
-    dispatch — a rate confirmation is never dropped silently.
+    Parse and verify against the agreed terms. A mismatch or an unreadable
+    document is surfaced to dispatch; a match only records the check. No load
+    is created: dispatchers book loads by hand.
     """
     negotiation.status = models.RATECON_RECEIVED
     session.flush()
@@ -884,11 +886,9 @@ async def handle_ratecon(
         await record_mismatch(session, negotiation, message_row, check, discrepancies)
         return
 
-    await booking.book_verified_load(
-        session=session,
-        negotiation=negotiation,
-        parsed=parsed,
-        ratecon=(filename, content),
+    logger.info(
+        f"negotiation {negotiation.id}: ratecon matches the agreed ${agreed:,.2f}; "
+        f"no load created (dispatch books it by hand)"
     )
 
 

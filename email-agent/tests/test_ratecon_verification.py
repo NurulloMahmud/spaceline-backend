@@ -1,11 +1,11 @@
 """
-The rule the whole feature rests on: a rate confirmation that does not match
-the agreed terms must never become a load in the TMS.
+A rate confirmation is checked against the agreed terms, and never becomes a
+load in the TMS by itself: dispatchers book loads by hand, even on a match.
 """
 import pytest
 
 from database import models
-from services import booking, events, inbound
+from services import events, inbound
 from services.ai import ai
 from services.boxtruck import BoxTruckError, boxtruck
 
@@ -38,14 +38,10 @@ PARSED_RATECON = {
 @pytest.fixture
 def wire(monkeypatch, session):
     """Stubs every outbound call and records what the pipeline tried to do."""
-    calls = {"booked": [], "telegram": [], "events": []}
+    calls = {"telegram": [], "events": []}
 
     async def fake_resolve_broker(**k):
         return {"id": 501, "name": "Acme Logistics", "mc": "123456", "ai_type": "Gemini"}
-
-    async def fake_book_load(payload, ratecon=None):
-        calls["booked"].append(payload)
-        return {"load_id": 9001, "load_number": payload.get("load_number"), "shipment": 1207}
 
     async def fake_send_message(chat_id, text):
         calls["telegram"].append((chat_id, text))
@@ -55,7 +51,6 @@ def wire(monkeypatch, session):
         calls["events"].append(event)
 
     monkeypatch.setattr(boxtruck, "resolve_broker", fake_resolve_broker)
-    monkeypatch.setattr(boxtruck, "book_load", fake_book_load)
     monkeypatch.setattr("services.telegram.send_message", fake_send_message)
     monkeypatch.setattr(events.hub, "publish", fake_publish)
     return calls
@@ -127,7 +122,7 @@ async def test_price_mismatch_blocks_booking(
 
     await run_ratecon(session, account, negotiation, parsed, monkeypatch)
 
-    assert wire["booked"] == [], "a mismatched ratecon must not create a load"
+    assert negotiation.tms_load_id is None, "a mismatched ratecon must not create a load"
     assert negotiation.status == models.MISMATCH
     assert negotiation.tms_load_id is None
 
@@ -165,9 +160,9 @@ async def test_price_agreement_is_read_from_the_thread(
 
     await run_ratecon(session, account, negotiation, parsed, monkeypatch)
 
-    assert len(wire["booked"]) == 1
-    assert negotiation.status == models.BOOKED
-    assert wire["booked"][0]["carrier_pay"] == 3000.0
+    assert negotiation.agreed_amount == 3000.0
+    assert session.query(models.RateconCheck).one().outcome == models.OUTCOME_PASSED
+    assert negotiation.tms_load_id is None
 
 
 async def test_location_mismatch_blocks_booking(
@@ -187,7 +182,7 @@ async def test_location_mismatch_blocks_booking(
 
     await run_ratecon(session, account, negotiation, PARSED_RATECON, monkeypatch)
 
-    assert wire["booked"] == []
+    assert negotiation.tms_load_id is None
     assert negotiation.status == models.MISMATCH
     assert session.query(models.RateconCheck).one().locations_ok is False
 
@@ -209,13 +204,14 @@ async def test_date_mismatch_blocks_booking(
 
     await run_ratecon(session, account, negotiation, PARSED_RATECON, monkeypatch)
 
-    assert wire["booked"] == []
+    assert negotiation.tms_load_id is None
     assert negotiation.status == models.MISMATCH
 
 
-async def test_verified_ratecon_books_and_notifies(
+async def test_verified_ratecon_creates_no_load(
     session, account, negotiation, wire, monkeypatch
 ):
+    """A matching ratecon is recorded as checked; booking stays with dispatch."""
     stub_ai(
         monkeypatch,
         agreed=3200.0,
@@ -230,28 +226,12 @@ async def test_verified_ratecon_books_and_notifies(
 
     await run_ratecon(session, account, negotiation, PARSED_RATECON, monkeypatch)
 
-    assert negotiation.status == models.BOOKED
-    assert negotiation.tms_load_id == 9001
-
-    payload = wire["booked"][0]
-    assert payload["carrier_pay"] == 3200.0, "broker rate goes to carrier_pay"
-    assert payload["driver_pay"] == 2400.0, "the driver's own bid goes to driver_pay"
-    assert payload["company_id"] == 1
-    assert payload["driver_id"] == 42
-    assert payload["broker_id"] == 501
-    assert payload["load_number"] == "ACME-99871"
-    assert len(payload["stops"]) == 2
-    assert payload["stops"][0]["load_pickup"] is True
-    assert payload["stops"][1]["load_drop"] is True
-
-    chat_id, text = wire["telegram"][0]
-    assert chat_id == "-1001234567890"
-    assert "Load booked" in text
-    assert "2,400" in text, "the driver sees their own rate"
-    assert "3,200" not in text, "the driver must not see the broker rate"
-
-    assert events.LOAD_BOOKED in [e.type for e in wire["events"]]
-
+    assert not hasattr(boxtruck, "book_load"), "the agent must have no way to create a load"
+    assert negotiation.status == models.RATECON_RECEIVED
+    assert negotiation.tms_load_id is None
+    assert wire["telegram"] == [], "the driver is not told about a load nobody booked"
+    assert wire["events"] == []
+    assert session.query(models.Suggestion).count() == 0
     check = session.query(models.RateconCheck).one()
     assert check.outcome == models.OUTCOME_PASSED
 
@@ -264,7 +244,7 @@ async def test_unreadable_ratecon_alerts_dispatch(
 
     await run_ratecon(session, account, negotiation, error, monkeypatch)
 
-    assert wire["booked"] == []
+    assert negotiation.tms_load_id is None
     check = session.query(models.RateconCheck).one()
     assert check.outcome == models.OUTCOME_PARSE_FAILED
     assert "unreadable scan" in check.error
@@ -283,42 +263,5 @@ async def test_failed_verification_call_does_not_book(
 
     await run_ratecon(session, account, negotiation, PARSED_RATECON, monkeypatch)
 
-    assert wire["booked"] == []
+    assert negotiation.tms_load_id is None
     assert session.query(models.RateconCheck).one().outcome == models.OUTCOME_PARSE_FAILED
-
-
-async def test_booking_is_idempotent(session, account, negotiation, wire, monkeypatch):
-    negotiation.tms_load_id = 9001
-    session.flush()
-
-    await booking.book_verified_load(
-        session=session,
-        negotiation=negotiation,
-        parsed=PARSED_RATECON,
-        ratecon=("ratecon.pdf", b"%PDF"),
-    )
-
-    assert wire["booked"] == [], "an already-booked negotiation must not book twice"
-
-
-async def test_tms_failure_surfaces_to_dispatch(
-    session, account, negotiation, wire, monkeypatch
-):
-    async def failing_book(payload, ratecon=None):
-        raise BoxTruckError("book-load failed (400): company has no shipment number")
-
-    monkeypatch.setattr(boxtruck, "book_load", failing_book)
-
-    await booking.book_verified_load(
-        session=session,
-        negotiation=negotiation,
-        parsed=PARSED_RATECON,
-        ratecon=("ratecon.pdf", b"%PDF"),
-    )
-    session.commit()
-    session.refresh(negotiation)
-
-    assert negotiation.status == models.FAILED
-    assert "shipment number" in negotiation.failure_reason
-    assert events.BOOKING_FAILED in [e.type for e in wire["events"]]
-    assert wire["telegram"] == []
