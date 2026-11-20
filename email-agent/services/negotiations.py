@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from config.settings import config
 from database import models
-from services import bid_email, events
+from services import bid_email, bid_health, events
 from services.atrek import atrek
 from services.boxtruck import boxtruck
 from services import outbound
@@ -169,8 +169,19 @@ async def create_negotiation(
     again: bool = False,
     body_html: Optional[str] = None,
 ) -> models.Negotiation:
-    account = sending_mailbox(session, company_id, dispatcher_user_id)
+    try:
+        account = sending_mailbox(session, company_id, dispatcher_user_id)
+    except NegotiationError as e:
+        if e.code == "mailbox_not_connected":
+            bid_health.record_attempt(
+                company_id, dispatcher_user_id, models.ATTEMPT_BLOCKED, e.message, load_uuid=load_uuid
+            )
+        raise
     if not account:
+        bid_health.record_attempt(
+            company_id, dispatcher_user_id, models.ATTEMPT_BLOCKED,
+            "No dispatch mailbox is connected for this company.", load_uuid=load_uuid,
+        )
         raise NegotiationError(
             "No dispatch mailbox is connected for this company. "
             "Connect one under Settings before bidding.",
@@ -288,6 +299,10 @@ async def create_negotiation(
         )
     except outbound.SendError as e:
         logger.error(f"bid email failed for load {load_uuid}: {e}")
+        bid_health.record_attempt(
+            company_id, dispatcher_user_id, models.ATTEMPT_FAILED, str(e),
+            mailbox=account.email_address, load_uuid=load_uuid,
+        )
         raise NegotiationError(
             f"Could not send the bid email: {e}",
             status_code=502,

@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/v1/events", tags=["events"])
 internal_router = APIRouter(prefix="/internal/v1/events", tags=["internal"])
 
 # Only these types may come from outside: the agent's own events stay its own.
-EXTERNAL_TYPES = {hub_module.HIRING_CHANGED}
+EXTERNAL_TYPES = {hub_module.HIRING_CHANGED, hub_module.LEAD_ASSIGNED}
 
 
 class PublishRequest(BaseModel):
@@ -78,7 +78,7 @@ async def stream(
                     yield ": keep-alive\n\n"
                     continue
 
-                if event.company_id != company_id:
+                if not event.visible_to(company_id, principal.user_id):
                     continue
                 yield f"event: {event.type}\ndata: {json.dumps(event.to_dict(), default=str)}\n\n"
         except Exception as e:  # noqa: BLE001 - reported, then the stream ends

@@ -294,6 +294,30 @@ class ConversationRead(Base):
     read_at = Column(DateTime(timezone=True), default=_now, nullable=False)
 
 
+# bid_attempts.outcome
+ATTEMPT_FAILED = "failed"
+ATTEMPT_BLOCKED = "blocked"
+
+
+class BidAttempt(Base):
+    """
+    A bid that did not go out: the send failed, or the dispatcher had no
+    connected mailbox. A sent bid is a negotiation with an outbound message,
+    so only the two outcomes that leave no negotiation behind are kept here.
+    Written in its own session, since the request's one rolls back.
+    """
+    __tablename__ = "bid_attempts"
+
+    id = _uuid_pk()
+    company_id = Column(Integer, nullable=False, index=True)
+    user_id = Column(Integer, nullable=True, index=True)
+    outcome = Column(String, nullable=False)  # failed | blocked
+    reason = Column(Text, nullable=True)
+    mailbox = Column(String, nullable=True)
+    load_uuid = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_now, nullable=False, index=True)
+
+
 class ProcessedWebhook(Base):
     """One row per message the IMAP reader has handled, keyed
     "imap:<mailbox>:<uidvalidity>:<uid>", so a message is never run through

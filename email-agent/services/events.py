@@ -24,6 +24,9 @@ BROKER_REPLIED = "broker_replied"
 # Published by the Django API (internal route): a driver on the hiring board
 # changed, so open boards reload it.
 HIRING_CHANGED = "hiring_changed"
+# Published by the Django API: a lead was assigned to a dispatcher. Its payload
+# carries `user_ids`, so only those people's streams receive it.
+LEAD_ASSIGNED = "lead_assigned"
 
 QUEUE_SIZE = 64
 
@@ -43,6 +46,23 @@ class Event:
         data = asdict(self)
         data.pop("company_id", None)
         return data
+
+    def visible_to(self, company_id: Optional[int], user_id: Optional[int]) -> bool:
+        """Whether a stream of this company and user receives the event. An event
+        whose payload has a `user_ids` list goes only to the users in it; every
+        other event goes to the whole company."""
+        if self.company_id != company_id:
+            return False
+        targets = self.payload.get("user_ids")
+        if not isinstance(targets, list):
+            return True
+        wanted = set()
+        for value in targets:
+            try:
+                wanted.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        return user_id is not None and int(user_id) in wanted
 
 
 class EventHub:

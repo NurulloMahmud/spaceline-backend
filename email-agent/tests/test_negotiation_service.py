@@ -58,6 +58,9 @@ async def test_a_send_failure_leaves_no_negotiation_behind(
             bid_amount=3200,
         )
     assert e.value.status_code == 502
+    attempt = session.query(models.BidAttempt).one()
+    assert (attempt.outcome, attempt.user_id) == ("failed", 7)
+    assert "rejected" in attempt.reason
 
     session.rollback()
     assert session.query(models.Negotiation).count() == 0, (
