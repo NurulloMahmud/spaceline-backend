@@ -270,6 +270,71 @@ def replace_blacklist(brokers):
     return _request("PUT", "/t/v1/blacklist", json={"brokers": rows})
 
 
+# --- BTM Dispatch, the dispatcher phone app (SPEC-1.0 section 5, tenant calls) ---
+
+# Unlink and status run after the change; a notification is fire and forget.
+DISPATCH_TIMEOUT = 5
+DISPATCH_NOTIFY_TIMEOUT = 3
+
+
+def dispatch_link_code(
+    btm_user_id: int, first_name: str, last_name: str, email: str, active: bool
+) -> dict[str, Any] | None:
+    """POST /t/v1/dispatch/link-codes -> {code, qr_text, expires_at}.
+
+    409 with code user_inactive when `active` is false.
+    """
+    return _request(
+        "POST",
+        "/t/v1/dispatch/link-codes",
+        json={
+            "btm_user_id": int(btm_user_id),
+            "first_name": first_name or "",
+            "last_name": last_name or "",
+            "email": email or "",
+            "active": bool(active),
+        },
+    )
+
+
+def dispatch_unlink(btm_user_id: int) -> dict[str, Any] | None:
+    """POST /t/v1/dispatch/unlink -> {unlinked: bool}: the user's workspace leaves the phone."""
+    return _request(
+        "POST",
+        "/t/v1/dispatch/unlink",
+        json={"btm_user_id": int(btm_user_id)},
+        timeout=DISPATCH_TIMEOUT,
+    )
+
+
+def dispatch_user_status(btm_user_id: int, active: bool) -> dict[str, Any] | None:
+    """POST /t/v1/dispatch/users/status: the workspace turns inactive or active."""
+    return _request(
+        "POST",
+        "/t/v1/dispatch/users/status",
+        json={"btm_user_id": int(btm_user_id), "active": bool(active)},
+        timeout=DISPATCH_TIMEOUT,
+    )
+
+
+def dispatch_notify(
+    btm_user_id: int, kind: str, title: str, body: str, data: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """POST /t/v1/dispatch/notify -> {delivered: bool}."""
+    return _request(
+        "POST",
+        "/t/v1/dispatch/notify",
+        json={
+            "btm_user_id": int(btm_user_id),
+            "kind": kind,
+            "title": title,
+            "body": body,
+            "data": data or {},
+        },
+        timeout=DISPATCH_NOTIFY_TIMEOUT,
+    )
+
+
 def rfc3339(value: date | datetime | str | None) -> str | None:
     """RFC 3339 for the hub: a date is UTC midnight, a datetime keeps its offset.
 

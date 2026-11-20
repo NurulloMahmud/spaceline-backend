@@ -10,8 +10,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from services import events as hub_module
-from services import alerts
-from services.auth import Principal, current_user_sse, require_internal
+from services import alerts, dispatch
+from services.auth import Principal, check_device, current_user_sse, require_internal
 
 logger = logging.getLogger(__name__)
 
@@ -67,15 +67,27 @@ async def stream(
     client_ip = _client_ip(request)
     logger.info("SSE stream opened: user=%s company=%s ip=%s", principal.user_id, company_id, client_ip)
 
+    # A phone token's stream ends within 15 seconds of the phone being unlinked.
+    wait = dispatch.STREAM_RECHECK_SECONDS if principal.dsid else HEARTBEAT_SECONDS
+    loop = asyncio.get_running_loop()
+
     async def generator():
         queue = await hub_module.hub.subscribe()
         yield "event: connected\ndata: {}\n\n"
+        next_check = loop.time() + dispatch.STREAM_RECHECK_SECONDS
         try:
             while True:
                 if await request.is_disconnected():
                     break
+                if principal.dsid and loop.time() >= next_check:
+                    next_check = loop.time() + dispatch.STREAM_RECHECK_SECONDS
+                    try:
+                        await asyncio.to_thread(check_device, principal.dsid)
+                    except HTTPException:
+                        logger.info("SSE stream of phone %s ended: device check failed", principal.dsid)
+                        break
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_SECONDS)
+                    event = await asyncio.wait_for(queue.get(), timeout=wait)
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
                     continue

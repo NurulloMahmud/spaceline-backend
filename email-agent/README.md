@@ -65,6 +65,13 @@ must match atrek's `INTERNAL_SECRET_KEY` and boxTruck's `INTERNAL_SERVICE_SECRET
 `TELEGRAM_BOT_TOKEN` is the same bot agent_bot runs, so booking notices arrive in
 the group the driver already talks to.
 
+`DISPATCH_REDIS_URL` (default `redis://localhost:6379/0`) is the Redis Django
+writes `dispatch:dsid:<dsid>` to: a BTM Dispatch phone token (one with a `dsid`
+claim) is accepted only while that key says `active` (see
+`services/dispatch.py` and `boxTruck/dispatch_app/README.md`). Web tokens never
+touch Redis. Broker replies and won or booked bids are passed to Django's
+`/api/dispatch-app/internal/notify/` with `BOXTRUCK_INTERNAL_SECRET`.
+
 `PRICE_TOLERANCE_CENTS` is `0` and should stay there: it is the guard that stops
 a $3,000 ratecon from booking a $3,200 agreement.
 

@@ -58,6 +58,7 @@ MY_APPS = [
     'salaries',
     'hub',
     'devconsole',
+    'dispatch_app',
 ]
 
 INSTALLED_APPS = DJANGO_DEFAULT_APPS + THIRD_APPS + MY_APPS
@@ -175,8 +176,10 @@ SWAGGER_SETTINGS = {
 }
 
 REST_FRAMEWORK = {
+    # simplejwt's JWTAuthentication, unchanged for every token without a `dsid`
+    # claim; BTM Dispatch phone tokens also need a live device (dispatch_app).
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'dispatch_app.authentication.DispatchJWTAuthentication',
     ),
     'DEFAULT_FILTER_BACKENDS': (
         'django_filters.rest_framework.DjangoFilterBackend',
@@ -316,6 +319,11 @@ ATREK_BASE_URL = config('ATREK_BASE_URL', default='https://spaceline.boxtruckman
 DRIVER_HUB_URL = config('DRIVER_HUB_URL', default='https://drivers.boxtruckmanage.com')
 DRIVER_HUB_TOKEN = config('DRIVER_HUB_TOKEN', default='')
 
+# BTM Dispatch (dispatcher phone app, dispatch_app): the Redis the Go loads
+# service and the email agent read `dispatch:dsid:<dsid>` from. Same server and
+# database as Celery's broker and the loads service's REDIS_ADDR / REDIS_DB.
+DISPATCH_REDIS_URL = config('DISPATCH_REDIS_URL', default='redis://localhost:6379/0')
+
 # billing service (FastAPI + Stripe) — the `charge` app proxies the frontend's
 # card / transaction / recurring calls to it, authenticated with our project API key.
 BILLING_BASE_URL = config('BILLING_BASE_URL', default='https://billing.nahl-group.com/api')
@@ -350,7 +358,7 @@ LOGGING = {
             for name in (
                 'users', 'billing', 'charge', 'accounting', 'hub',
                 'devconsole', 'payroll', 'salaries', 'analytics', 'ai', 'mobile',
-                'dispatchers',
+                'dispatchers', 'dispatch_app',
             )
         },
     },

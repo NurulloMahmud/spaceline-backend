@@ -74,6 +74,10 @@ class Config:
     ATREK_BASE_URL: str = _base_url("ATREK_BASE_URL")
     ATREK_INTERNAL_SECRET: str = os.getenv("ATREK_INTERNAL_SECRET", "")
 
+    # BTM Dispatch phone tokens (services/dispatch.py): the Redis Django writes
+    # `dispatch:dsid:<dsid>` to, the same one the Go loads service reads.
+    DISPATCH_REDIS_URL: str = os.getenv("DISPATCH_REDIS_URL", "redis://localhost:6379/0")
+
     # Test servers only: when set, every outgoing email goes to this address
     # instead of the real recipient, so a test bid can never reach a broker.
     EMAIL_REDIRECT_TO: str = os.getenv("EMAIL_REDIRECT_TO", "").strip()

@@ -20,7 +20,7 @@ from sqlalchemy import func, or_, true
 from sqlalchemy.orm import Session
 
 from database import models
-from services import events, suggestions
+from services import dispatch, events, suggestions
 from services.ai import ai
 from services.boxtruck import BoxTruckError, boxtruck
 from services.negotiations import load_summary_text, reply_subject
@@ -570,6 +570,8 @@ async def handle_inbound_message(
         status=negotiation.status,
         has_attachments=bool(attachments),
     )
+    # The owner's BTM Dispatch phone too, once this message is committed.
+    dispatch.broker_replied(session, negotiation, from_email, body_text)
 
     if negotiation.status in (models.BOOKED, models.CLOSED):
         return

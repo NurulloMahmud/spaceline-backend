@@ -11,5 +11,6 @@ openai==1.59.6
 PyJWT==2.10.1
 python-multipart==0.0.20
 pytest==8.3.4
+redis==5.2.1
 pytest-asyncio==0.25.2
 cryptography==50.0.2

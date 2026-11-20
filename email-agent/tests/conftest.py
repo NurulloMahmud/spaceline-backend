@@ -76,6 +76,20 @@ def bid_status_reports(monkeypatch):
     return reports
 
 
+@pytest.fixture(autouse=True)
+def dispatch_notices(monkeypatch):
+    """
+    Every BTM Dispatch notice handed over for sending (services/dispatch.py),
+    in order. Stubbed for every test so none reaches the TMS; tests that care
+    read the list.
+    """
+    from services import dispatch
+
+    sent = []
+    monkeypatch.setattr(dispatch, "_submit", sent.append)
+    return sent
+
+
 @pytest.fixture(scope="session", autouse=True)
 def schema():
     models.Base.metadata.drop_all(engine)

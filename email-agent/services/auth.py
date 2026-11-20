@@ -11,6 +11,7 @@ import jwt
 from fastapi import Depends, Header, HTTPException, Query, Request, status
 
 from config.settings import config
+from services import dispatch
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,8 @@ class Principal:
     company_id: Optional[int]
     department: Optional[str]
     company_name: Optional[str] = None
+    # Set on BTM Dispatch phone tokens (services/dispatch.py).
+    dsid: Optional[str] = None
 
     @property
     def is_developer(self) -> bool:
@@ -99,12 +102,44 @@ def _decode(token: str) -> Principal:
     except (TypeError, ValueError):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "token has an invalid user_id")
 
+    dsid = claims.get(dispatch.DSID_CLAIM)
+    if dsid is not None:
+        check_device(dsid)
+
     return Principal(
         user_id=user_id,
         company_id=_company_id_from(claims),
         department=department,
         company_name=company_name,
+        dsid=None if dsid is None else str(dsid),
     )
+
+
+def check_device(dsid) -> None:
+    """A phone token is good only while Django's Redis key says active.
+
+    Missing: the phone was unlinked or replaced. Inactive: the user is turned
+    off, and the Inbox is locked for them, so nothing here is open. Redis
+    failing rejects phone tokens only (fail closed).
+    """
+    try:
+        state = dispatch.device_state(dsid)
+    except Exception as e:  # noqa: BLE001 - any Redis failure
+        logger.warning(f"dispatch device check failed: {e}")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            {"error": "Could not check this phone. Try again.", "code": "auth_unavailable"},
+        )
+    if state is None:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            {"error": "device revoked", "code": "device_revoked"},
+        )
+    if state != dispatch.ACTIVE:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {"error": "Your account is turned off.", "code": "user_inactive"},
+        )
 
 
 def current_user(authorization: str = Header(default="")) -> Principal:
