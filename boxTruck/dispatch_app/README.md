@@ -25,9 +25,12 @@ Web, normal JWT (`Authorization: Bearer <access>`):
 
 | Method and path | Reply |
 | --- | --- |
-| `POST /api/dispatch-app/link-code/` | `201 {code, qr_text, expires_at}` from the hub's `/t/v1/dispatch/link-codes`. `503 hub_not_configured` without `DRIVER_HUB_URL` / `DRIVER_HUB_TOKEN`, `409 user_inactive`, `502 hub_unreachable` |
+| `POST /api/dispatch-app/link-code/` | `201 {code, qr_text, expires_at, created_at}` from the hub's `/t/v1/dispatch/link-codes`; `created_at` is Django's clock (`2026-11-21T10:00:00Z`), to compare with `linked_at`. `503 hub_not_configured` without `DRIVER_HUB_URL` / `DRIVER_HUB_TOKEN`, `409 user_inactive`, `502 hub_unreachable` |
+| `DELETE /api/dispatch-app/link-code/` | The dialog closed: the hub's `/t/v1/dispatch/link-codes/cancel {btm_user_id}` kills the user's unused codes (background, best effort). `{ok: true}` |
 | `GET /api/dispatch-app/device/` | `{device: null}` or `{device: {platform, device_label, linked_at, last_seen_at}}` |
 | `DELETE /api/dispatch-app/device/` | Revokes the live device (`unlinked`), then the hub's `/t/v1/dispatch/unlink` after commit in a background thread (also when nothing was live). `{ok: true}` |
+
+A phone's own token (one with `dsid`) is refused on all four: `403 {"code": "phone_token"}`. Only the web makes codes and unlinks.
 
 Hub, header `X-Hub-Token: <DRIVER_HUB_TOKEN>` (no JWT):
 
@@ -35,7 +38,7 @@ Hub, header `X-Hub-Token: <DRIVER_HUB_TOKEN>` (no JWT):
 | --- | --- | --- |
 | `POST /api/dispatch-app/devices/` | `{btm_user_id, hub_workspace_id, platform, device_label}` | `201 {device_id, device_token, user: {id, first_name, last_name, email, is_active}, mailbox}`. Revokes the user's other live devices first (`replaced`, no hub call: the hub asked and applies the rule itself). `404 user_not_found`, `409 user_inactive` |
 | `POST /api/dispatch-app/session/` | `{device_token}` | `200 {access, expires_at, user, mailbox}` (`expires_at` RFC 3339 UTC, `2026-11-21T10:10:00Z`); `401 device_revoked`. Also for an inactive user (`user.is_active` false) |
-| `POST /api/dispatch-app/devices/revoke/` | `{device_token}` | `200 {revoked: bool}`, also when already revoked or unknown |
+| `POST /api/dispatch-app/devices/revoke/` | `{device_id}` or `{device_token}` | `200 {revoked: bool}`, also when already revoked or unknown |
 
 Email agent, header `X-Internal-Secret: <INTERNAL_SERVICE_SECRET>`:
 
@@ -76,12 +79,12 @@ email agent check Redis: `dispatch:dsid:<dsid>` = `active` or `inactive`.
 
 | Event | Redis | Hub |
 | --- | --- | --- |
-| Device created | set `active`, TTL 30 min (after commit) | (the hub asked) |
-| Session exchange | set `active` / `inactive`, TTL 30 min | |
+| Device created | set `active`, TTL 11 min (after commit) | (the hub asked) |
+| Session exchange | set `active` / `inactive`, TTL 11 min, then the device and user are read again: revoked meanwhile -> key deleted and `401 device_revoked`; `is_active` changed meanwhile -> value rewritten | |
 | Revoke (replaced, web unlink, hub revoke, user deleted) | key deleted (after commit) | web unlink and user delete call `/t/v1/dispatch/unlink` |
 | `is_active` changes (admin, users API; any `save()`) | flipped for the live device | `/t/v1/dispatch/users/status` (background, after commit) |
 
-A missing key means revoked (or idle for 30 minutes, when the last 10 minute
+A missing key means revoked (or idle for 11 minutes, when the last 10 minute
 token has long expired). `QuerySet.update(is_active=...)` skips the signals;
 nothing in the app does that outside tests, and the next session exchange
 writes the right value anyway.
@@ -100,6 +103,24 @@ password). A Redis failure is logged and never breaks a Django request.
   `user_inactive` (the Inbox is locked for inactive users, so nothing there is
   open), Redis down 503 `auth_unavailable`. Its event stream rechecks every
   15 s and ends when the check fails. Web tokens never touch Redis.
+
+## Link email
+
+When the hub links a phone (`devices/`), the BTM user gets an email after
+commit, in a background thread, through Django's own mail path
+(`EMAIL_BACKEND`, anymail with Resend, from `DEFAULT_FROM_EMAIL`): subject "BTM
+Dispatch linked to your account", body "BTM Dispatch was linked to <device
+label> on Nov 21, 2026 at 4:02 PM CST. If this was not you, unlink it in
+Profile > Mobile app." (the deployment's `TIME_ZONE`). Skipped quietly without
+`RESEND_API_KEY` or without an email address on the user.
+
+## Secrets and retries
+
+`X-Hub-Token` and `X-Internal-Secret` are compared in constant time
+(`hmac.compare_digest`), and an empty configured secret lets nobody in.
+A Redis delete that fails on revoke is tried again in a background thread
+after 0.5, 1, 2, 4 and 8 seconds (about 15 s), then logged as an error; the
+11 minute TTL is the backstop.
 
 ## Background hub calls
 

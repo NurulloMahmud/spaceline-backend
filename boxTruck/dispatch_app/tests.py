@@ -216,7 +216,7 @@ class PhoneTokenTests(DispatchBase):
     def test_live_device_passes_and_last_seen_moves_once_a_minute(self) -> None:
         device, _ = self.link()
         self.auth(self.phone_token(device))
-        self.assertEqual(self.client.get("/api/dispatch-app/device/").status_code, 200)
+        self.assertEqual(self.client.get("/api/salaries/leaderboard/" + MONTH).status_code, 200)
         device.refresh_from_db()
         first = device.last_seen_at
         self.assertIsNotNone(first)
@@ -224,7 +224,7 @@ class PhoneTokenTests(DispatchBase):
         device.refresh_from_db()
         self.assertEqual(device.last_seen_at, first)
         DispatchDevice.objects.filter(pk=device.pk).update(last_seen_at=first - timedelta(seconds=61))
-        self.client.get("/api/dispatch-app/device/")
+        self.client.get("/api/salaries/leaderboard/" + MONTH)
         device.refresh_from_db()
         self.assertGreater(device.last_seen_at, first)
 
@@ -300,7 +300,7 @@ class HubEndpointTests(DispatchBase):
         )
         self.assertEqual(reply.data["mailbox"], "dana@spaceline.test")
         self.assertEqual(self.redis.get(f"dispatch:dsid:{device.id}"), "active")
-        self.assertEqual(self.redis.ttls[f"dispatch:dsid:{device.id}"], 1800)
+        self.assertEqual(self.redis.ttls[f"dispatch:dsid:{device.id}"], 660)
 
     def test_a_new_device_replaces_the_old_one(self) -> None:
         first = self.create().data
@@ -340,11 +340,11 @@ class HubEndpointTests(DispatchBase):
         access = AccessToken(reply.data["access"])
         self.assertEqual(access["dsid"], created["device_id"])
         self.assertEqual(access["user_id"], self.user.id)
-        self.assertEqual(self.redis.ttls[f"dispatch:dsid:{created['device_id']}"], 1800)
+        self.assertEqual(self.redis.ttls[f"dispatch:dsid:{created['device_id']}"], 660)
         self.assertIsNotNone(DispatchDevice.objects.get(pk=created["device_id"]).last_seen_at)
         # The token works on Django.
         self.auth(reply.data["access"])
-        self.assertEqual(self.client.get("/api/dispatch-app/device/").status_code, 200)
+        self.assertEqual(self.client.get("/api/salaries/leaderboard/" + MONTH).status_code, 200)
 
     def test_session_for_an_inactive_user_says_so(self) -> None:
         created = self.create().data
@@ -377,6 +377,105 @@ class HubEndpointTests(DispatchBase):
         self.assertEqual(self.client.get("/api/dispatch-app/device/").status_code, 401)
         self.assertEqual(self.hub.calls, [])
 
+    def test_revoke_by_device_id(self) -> None:
+        created = self.create().data
+        body = {"device_id": created["device_id"]}
+        with self.captureOnCommitCallbacks(execute=True):
+            reply = self.client.post("/api/dispatch-app/devices/revoke/", body, format="json", **HUB_HEADERS)
+        self.assertEqual((reply.status_code, reply.data), (200, {"revoked": True}))
+        self.assertEqual(DispatchDevice.objects.get(pk=created["device_id"]).revoked_reason, "hub")
+        self.assertIsNone(self.redis.get(f"dispatch:dsid:{created['device_id']}"))
+        for body in ({"device_id": created["device_id"]}, {"device_id": "nope"}, {"device_id": str(uuid.uuid4())}):
+            reply = self.client.post("/api/dispatch-app/devices/revoke/", body, format="json", **HUB_HEADERS)
+            self.assertEqual((reply.status_code, reply.data), (200, {"revoked": False}))
+
+    def test_session_race_with_a_revoke(self) -> None:
+        created = self.create().data
+        device = services.live_device_for(created["device_token"])
+        real_set = state.set_state
+
+        def revoke_meanwhile(dsid: Any, active: bool) -> bool:
+            # The revoke commits (and drops the key) between our read and our write.
+            with self.captureOnCommitCallbacks(execute=True):
+                services.revoke_user(self.user.id, DispatchDevice.HUB)
+            return real_set(dsid, active)
+
+        with mock.patch.object(state, "set_state", revoke_meanwhile):
+            with self.assertRaises(services.DeviceRevoked):
+                services.exchange_session(device)
+        self.assertIsNone(self.redis.get(f"dispatch:dsid:{device.id}"))
+
+    def test_session_race_with_a_deactivation(self) -> None:
+        created = self.create().data
+        device = services.live_device_for(created["device_token"])
+        real_set = state.set_state
+
+        def deactivate_meanwhile(dsid: Any, active: bool) -> bool:
+            if active:
+                CustomUser.objects.filter(pk=self.user.pk).update(is_active=False)
+            return real_set(dsid, active)
+
+        with mock.patch.object(state, "set_state", deactivate_meanwhile):
+            reply = services.exchange_session(device)
+        self.assertFalse(reply["user"]["is_active"])
+        self.assertEqual(self.redis.get(f"dispatch:dsid:{device.id}"), "inactive")
+
+    def test_session_route_answers_401_when_revoked_meanwhile(self) -> None:
+        created = self.create().data
+        real_set = state.set_state
+
+        def revoke_meanwhile(dsid: Any, active: bool) -> bool:
+            DispatchDevice.objects.filter(pk=dsid).update(revoked_at=timezone.now(), revoked_reason="hub")
+            return real_set(dsid, active)
+
+        with mock.patch.object(state, "set_state", revoke_meanwhile):
+            reply = self.client.post("/api/dispatch-app/session/", {"device_token": created["device_token"]}, format="json", **HUB_HEADERS)
+        self.assertEqual((reply.status_code, reply.data["code"]), (401, "device_revoked"))
+        self.assertIsNone(self.redis.get(f"dispatch:dsid:{created['device_id']}"))
+
+    def test_failed_key_delete_is_retried(self) -> None:
+        created = self.create().data
+        key = f"dispatch:dsid:{created['device_id']}"
+        real_delete = self.redis.delete
+        fails = [ConnectionError("down"), ConnectionError("down")]
+
+        def flaky(*keys: str) -> int:
+            if fails:
+                raise fails.pop(0)
+            return real_delete(*keys)
+
+        slept: list = []
+        with mock.patch.object(self.redis, "delete", flaky), mock.patch.object(state, "_sleep", slept.append):
+            with self.captureOnCommitCallbacks(execute=True):
+                services.revoke_user(self.user.id, DispatchDevice.HUB)
+        self.assertIsNone(self.redis.get(key))
+        self.assertEqual(slept, [0.5])
+
+    def test_link_email(self) -> None:
+        from django.core import mail
+
+        self.create()
+        self.assertEqual(len(mail.outbox), 1)
+        sent = mail.outbox[0]
+        self.assertEqual(sent.subject, "BTM Dispatch linked to your account")
+        self.assertEqual(sent.to, ["dana@example.com"])
+        self.assertRegex(
+            sent.body,
+            r"^BTM Dispatch was linked to iPhone 15 on [A-Z][a-z]{2} \d{1,2}, \d{4} at \d{1,2}:\d\d [AP]M \w+\. "
+            r"If this was not you, unlink it in Profile > Mobile app\.$",
+        )
+
+    def test_link_email_skipped_quietly(self) -> None:
+        from django.core import mail
+
+        with override_settings(
+            EMAIL_BACKEND="anymail.backends.resend.EmailBackend", ANYMAIL={"RESEND_API_KEY": ""}
+        ):
+            self.assertEqual(self.create().status_code, 201)
+        CustomUser.objects.filter(pk=self.user.pk).update(email="")
+        self.assertEqual(self.create().status_code, 201)
+        self.assertEqual(mail.outbox, [])
+
     def test_redis_down_never_breaks_linking(self) -> None:
         with mock.patch.object(state, "_client", BrokenRedis()):
             created = self.create()
@@ -402,6 +501,8 @@ class WebEndpointTests(DispatchBase):
         )
         reply = self.client.post("/api/dispatch-app/link-code/")
         self.assertEqual(reply.status_code, 201)
+        created_at = reply.data.pop("created_at")
+        self.assertRegex(created_at, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertEqual(
             reply.data,
             {"code": "K7M2QX", "qr_text": "https://drivers.boxtruckmanage.com/link/K7M2QX", "expires_at": "2026-11-21T10:02:00Z"},
@@ -422,6 +523,33 @@ class WebEndpointTests(DispatchBase):
         self.hub.replies["/t/v1/dispatch/link-codes"] = requests.ConnectionError("down")
         reply = self.client.post("/api/dispatch-app/link-code/")
         self.assertEqual((reply.status_code, reply.data["code"]), (502, "hub_unreachable"))
+
+    def test_phone_tokens_are_refused_here(self) -> None:
+        device, _ = self.link()
+        self.auth(self.phone_token(device))
+        for reply in (
+            self.client.post("/api/dispatch-app/link-code/"),
+            self.client.delete("/api/dispatch-app/link-code/"),
+            self.client.get("/api/dispatch-app/device/"),
+            self.client.delete("/api/dispatch-app/device/"),
+        ):
+            self.assertEqual((reply.status_code, reply.data["code"]), (403, "phone_token"))
+        device.refresh_from_db()
+        self.assertTrue(device.is_live)
+        self.assertEqual(self.hub.calls, [])
+
+    @override_settings(**HUB)
+    def test_cancel_link_codes(self) -> None:
+        self.hub.replies["/t/v1/dispatch/link-codes/cancel"] = FakeResponse(200, {"cancelled": 1})
+        with self.captureOnCommitCallbacks(execute=True):
+            reply = self.client.delete("/api/dispatch-app/link-code/")
+        self.assertEqual((reply.status_code, reply.data), (200, {"ok": True}))
+        self.assertEqual(self.hub.calls, [("POST", "/t/v1/dispatch/link-codes/cancel", {"btm_user_id": self.user.id})])
+        self.hub.replies["/t/v1/dispatch/link-codes/cancel"] = requests.ConnectionError("down")
+        reply = self.client.delete("/api/dispatch-app/link-code/")
+        self.assertEqual((reply.status_code, reply.data), (200, {"ok": True}))
+        with override_settings(DRIVER_HUB_TOKEN=""):
+            self.assertEqual(self.client.delete("/api/dispatch-app/link-code/").data, {"ok": True})
 
     def test_device_none_then_linked(self) -> None:
         self.assertEqual(self.client.get("/api/dispatch-app/device/").data, {"device": None})
@@ -615,3 +743,36 @@ class BackgroundTests(TestCase):
         self.assertTrue(thread.is_alive())
         release.set()
         thread.join(timeout=5)
+
+
+class SecretCheckTests(TestCase):
+    def test_hub_token_check(self) -> None:
+        from hub.permissions import IsHubService
+
+        factory = APIRequestFactory()
+        check = IsHubService()
+        cases = [
+            ("tenant-token", "tenant-token", True),
+            ("tenant-token", "tenant-tokeN", False),
+            ("tenant-token", None, False),
+            ("", "", False),
+            ("", None, False),
+        ]
+        for configured, sent, allowed in cases:
+            headers = {} if sent is None else {"HTTP_X_HUB_TOKEN": sent}
+            with override_settings(DRIVER_HUB_TOKEN=configured):
+                self.assertEqual(check.has_permission(factory.post("/", **headers), None), allowed, (configured, sent))
+
+    def test_internal_secret_check(self) -> None:
+        from config import settings as raw_settings
+        from users.permissions import IsInternalService
+
+        factory = APIRequestFactory()
+        check = IsInternalService()
+        with mock.patch.object(raw_settings, "INTERNAL_SERVICE_SECRET", "s3cret"):
+            self.assertTrue(check.has_permission(factory.post("/", HTTP_X_INTERNAL_SECRET="s3cret"), None))
+            self.assertFalse(check.has_permission(factory.post("/", HTTP_X_INTERNAL_SECRET="s3creT"), None))
+            self.assertFalse(check.has_permission(factory.post("/"), None))
+        with mock.patch.object(raw_settings, "INTERNAL_SERVICE_SECRET", ""):
+            self.assertFalse(check.has_permission(factory.post("/", HTTP_X_INTERNAL_SECRET=""), None))
+            self.assertFalse(check.has_permission(factory.post("/"), None))

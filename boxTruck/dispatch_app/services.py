@@ -6,7 +6,9 @@ import secrets
 from datetime import timedelta
 from typing import Any
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
@@ -31,6 +33,10 @@ class UserNotFound(Exception):
 
 
 class UserInactive(Exception):
+    pass
+
+
+class DeviceRevoked(Exception):
     pass
 
 
@@ -66,7 +72,7 @@ def user_dict(user: Any) -> dict[str, Any]:
 
 def _drop_keys(ids: list[Any]) -> None:
     if ids:
-        transaction.on_commit(lambda: state.delete(*ids))
+        transaction.on_commit(lambda: state.drop(*ids))
 
 
 def revoke(queryset: Any, reason: str) -> list[Any]:
@@ -109,6 +115,7 @@ def create_device(
         )
         dsid = device.id
         transaction.on_commit(lambda: state.set_state(dsid, True))
+        after_commit(send_link_email, user.email, device.device_label or device.platform, device.created_at)
     return device, token
 
 
@@ -124,11 +131,22 @@ def mint_access(user: Any, dsid: Any) -> AccessToken:
 
 
 def exchange_session(device: DispatchDevice) -> dict[str, Any]:
-    user = device.user
+    """Device token -> access token. Raises DeviceRevoked when a revoke raced it.
+
+    The key is written first and the device and user read again after, so a
+    revoke or an is_active change that committed meanwhile (and so already
+    did its own Redis write) is never undone by this one.
+    """
+    state.set_state(device.id, device.user.is_active)
+    fresh = DispatchDevice.objects.select_related("user").filter(pk=device.pk).first()
+    if fresh is None or not fresh.is_live:
+        state.drop(device.id)
+        raise DeviceRevoked
+    user = fresh.user
+    if user.is_active != device.user.is_active:
+        state.set_state(device.id, user.is_active)
     access = mint_access(user, device.id)
-    now = timezone.now()
-    DispatchDevice.objects.filter(pk=device.pk).update(last_seen_at=now)
-    state.set_state(device.id, user.is_active)
+    DispatchDevice.objects.filter(pk=device.pk).update(last_seen_at=timezone.now())
     return {
         "access": str(access),
         # RFC 3339 in UTC with "Z", like every time the hub sends the app
@@ -143,6 +161,47 @@ def has_live_device(user_id: int, active_only: bool = False) -> bool:
     if active_only:
         devices = devices.filter(user__is_active=True)
     return devices.exists()
+
+
+# --- Link email ---------------------------------------------------------------
+
+LINK_EMAIL_SUBJECT = "BTM Dispatch linked to your account"
+
+
+def mail_configured() -> bool:
+    """The deployment's mail path is Django's EMAIL_BACKEND (anymail + Resend);
+    with Resend and no API key nothing can be sent."""
+    backend = str(getattr(settings, "EMAIL_BACKEND", "") or "")
+    if not backend:
+        return False
+    if "anymail.backends.resend" in backend:
+        return bool((getattr(settings, "ANYMAIL", None) or {}).get("RESEND_API_KEY"))
+    return True
+
+
+def link_email_body(device_label: str, linked_at: Any) -> str:
+    when = timezone.localtime(linked_at)
+    date = f"{when:%b} {when.day}, {when.year} at {when:%I:%M %p %Z}".replace(" 0", " ")
+    return (
+        f"BTM Dispatch was linked to {device_label or 'a phone'} on {date}. "
+        "If this was not you, unlink it in Profile > Mobile app."
+    )
+
+
+def send_link_email(email: str, device_label: str, linked_at: Any) -> None:
+    """Tell the BTM user a phone was linked. Skipped quietly without mail or an address."""
+    address = (email or "").strip()
+    if not address or not mail_configured():
+        return
+    try:
+        send_mail(
+            LINK_EMAIL_SUBJECT,
+            link_email_body(device_label, linked_at),
+            settings.DEFAULT_FROM_EMAIL,
+            [address],
+        )
+    except Exception as exc:  # noqa: BLE001 - the link stands either way
+        logger.warning("dispatch link email not sent: %s", exc)
 
 
 # --- Calls to the hub, fire and forget ---------------------------------------
@@ -217,6 +276,19 @@ def unlink_on_hub(user_id: int) -> None:
     """The hub drops the user's workspace: after commit, in the background."""
     if driver_hub.configured():
         after_commit(_send_unlink, user_id)
+
+
+def _send_cancel(btm_user_id: int) -> None:
+    try:
+        driver_hub.dispatch_cancel_link_codes(btm_user_id)
+    except driver_hub.DriverHubError as exc:
+        logger.warning("dispatch link codes of user %s not cancelled on the hub: %s", btm_user_id, exc)
+
+
+def cancel_codes_on_hub(user_id: int) -> None:
+    """The hub kills the user's unused link codes: after commit, in the background."""
+    if driver_hub.configured():
+        after_commit(_send_cancel, user_id)
 
 
 def user_deleted(user_id: int) -> None:

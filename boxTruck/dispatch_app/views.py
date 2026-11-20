@@ -7,8 +7,10 @@ Errors are {"error": ..., "code": ...} like the hub's own.
 """
 
 import logging
+import uuid
 from typing import Any
 
+from django.utils import timezone
 from rest_framework import status, views
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
@@ -44,12 +46,39 @@ def _int(value: Any) -> int | None:
 # --- Web --------------------------------------------------------------------
 
 
+def phone_token_refused(request: Request) -> Response | None:
+    """A phone's own token may not make link codes or unlink: only the web may."""
+    token = getattr(request, "auth", None)
+    if token is not None and hasattr(token, "get") and token.get(services.DSID_CLAIM) is not None:
+        return error(
+            status.HTTP_403_FORBIDDEN,
+            "phone_token",
+            "Do this on the BTM website, not from the app.",
+        )
+    return None
+
+
 class LinkCodeView(views.APIView):
-    """POST /api/dispatch-app/link-code/: a 2 minute code for the signed-in user to scan in the app."""
+    """POST /api/dispatch-app/link-code/: a 2 minute code for the signed-in user to scan in the app.
+
+    DELETE: the dialog closed; the hub kills the user's unused codes (background).
+    """
 
     permission_classes = [IsAuthenticated]
 
+    def delete(self, request: Request) -> Response:
+        refused = phone_token_refused(request)
+        if refused:
+            return refused
+        services.cancel_codes_on_hub(request.user.id)
+        return Response({"ok": True})
+
     def post(self, request: Request) -> Response:
+        refused = phone_token_refused(request)
+        if refused:
+            return refused
+        # Django's clock, so the web compares it with linked_at from the same clock.
+        created_at = timezone.now().strftime("%Y-%m-%dT%H:%M:%SZ")
         if not driver_hub.configured():
             return error(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -80,6 +109,7 @@ class LinkCodeView(views.APIView):
                 "code": reply.get("code"),
                 "qr_text": reply.get("qr_text"),
                 "expires_at": reply.get("expires_at"),
+                "created_at": created_at,
             },
             status=status.HTTP_201_CREATED,
         )
@@ -91,6 +121,9 @@ class DeviceView(views.APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request: Request) -> Response:
+        refused = phone_token_refused(request)
+        if refused:
+            return refused
         device = DispatchDevice.objects.filter(
             user=request.user, revoked_at__isnull=True
         ).first()
@@ -108,6 +141,9 @@ class DeviceView(views.APIView):
         )
 
     def delete(self, request: Request) -> Response:
+        refused = phone_token_refused(request)
+        if refused:
+            return refused
         user_id = request.user.id
         services.revoke_user(user_id, DispatchDevice.UNLINKED)
         # Also when nothing was live here: it clears a workspace the hub still shows.
@@ -164,22 +200,35 @@ class SessionView(HubView):
             return error(
                 status.HTTP_401_UNAUTHORIZED, "device_revoked", "This phone is no longer linked."
             )
-        reply = services.exchange_session(device)
+        try:
+            reply = services.exchange_session(device)
+        except services.DeviceRevoked:
+            return error(
+                status.HTTP_401_UNAUTHORIZED, "device_revoked", "This phone is no longer linked."
+            )
         reply["mailbox"] = mailbox_for(device.user_id)
         return Response(reply)
 
 
 class RevokeView(HubView):
-    """POST /api/dispatch-app/devices/revoke/: 200 also when already revoked or unknown."""
+    """POST /api/dispatch-app/devices/revoke/ {device_id} or {device_token}.
+
+    200 {revoked: bool}, also when already revoked or unknown.
+    """
 
     def post(self, request: Request) -> Response:
-        token = _body(request).get("device_token")
-        revoked: list = []
-        if token and isinstance(token, str):
-            revoked = services.revoke(
-                DispatchDevice.objects.filter(token_hash=services.hash_token(token)),
-                DispatchDevice.HUB,
-            )
+        data = _body(request)
+        devices = None
+        device_id = data.get("device_id")
+        token = data.get("device_token")
+        if device_id:
+            try:
+                devices = DispatchDevice.objects.filter(pk=uuid.UUID(str(device_id)))
+            except (TypeError, ValueError):
+                devices = None
+        elif token and isinstance(token, str):
+            devices = DispatchDevice.objects.filter(token_hash=services.hash_token(token))
+        revoked = services.revoke(devices, DispatchDevice.HUB) if devices is not None else []
         return Response({"revoked": bool(revoked)})
 
 

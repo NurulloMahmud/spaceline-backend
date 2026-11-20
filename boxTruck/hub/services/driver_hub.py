@@ -307,6 +307,16 @@ def dispatch_unlink(btm_user_id: int) -> dict[str, Any] | None:
     )
 
 
+def dispatch_cancel_link_codes(btm_user_id: int) -> dict[str, Any] | None:
+    """POST /t/v1/dispatch/link-codes/cancel -> {cancelled: n}: the user's unused codes die."""
+    return _request(
+        "POST",
+        "/t/v1/dispatch/link-codes/cancel",
+        json={"btm_user_id": int(btm_user_id)},
+        timeout=DISPATCH_TIMEOUT,
+    )
+
+
 def dispatch_user_status(btm_user_id: int, active: bool) -> dict[str, Any] | None:
     """POST /t/v1/dispatch/users/status: the workspace turns inactive or active."""
     return _request(
