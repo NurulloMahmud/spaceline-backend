@@ -1,4 +1,11 @@
-"""Fire and forget: hub calls run after the commit, in a thread, and never raise."""
+"""Fire and forget: hub calls run after the commit, in a thread, and never raise.
+
+The threads are not daemons, so a short-lived process (a management command,
+a shell that turns a user off) waits for the call at exit instead of dropping
+it. Each call carries the hub client's short timeout (3 s notify, 5 s status and
+unlink), so that wait is bounded, and a request never waits on the hub at all:
+the response goes out first, the thread runs beside it.
+"""
 
 import logging
 import threading
@@ -16,12 +23,14 @@ def _safe(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         logger.exception("dispatch background call %s failed", getattr(fn, "__name__", fn))
 
 
-def _start(target: Callable[[], None]) -> None:
-    threading.Thread(target=target, name="dispatch-hub", daemon=True).start()
+def _start(target: Callable[[], None]) -> threading.Thread | None:
+    thread = threading.Thread(target=target, name="dispatch-hub", daemon=False)
+    thread.start()
+    return thread
 
 
-def run_in_background(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-    _start(lambda: _safe(fn, *args, **kwargs))
+def run_in_background(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> threading.Thread | None:
+    return _start(lambda: _safe(fn, *args, **kwargs))
 
 
 def after_commit(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:

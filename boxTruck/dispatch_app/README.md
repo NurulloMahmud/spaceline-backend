@@ -27,7 +27,7 @@ Web, normal JWT (`Authorization: Bearer <access>`):
 | --- | --- |
 | `POST /api/dispatch-app/link-code/` | `201 {code, qr_text, expires_at}` from the hub's `/t/v1/dispatch/link-codes`. `503 hub_not_configured` without `DRIVER_HUB_URL` / `DRIVER_HUB_TOKEN`, `409 user_inactive`, `502 hub_unreachable` |
 | `GET /api/dispatch-app/device/` | `{device: null}` or `{device: {platform, device_label, linked_at, last_seen_at}}` |
-| `DELETE /api/dispatch-app/device/` | Revokes the live device (`unlinked`), then calls the hub's `/t/v1/dispatch/unlink` (best effort, also when nothing was live). `{ok: true}` |
+| `DELETE /api/dispatch-app/device/` | Revokes the live device (`unlinked`), then the hub's `/t/v1/dispatch/unlink` after commit in a background thread (also when nothing was live). `{ok: true}` |
 
 Hub, header `X-Hub-Token: <DRIVER_HUB_TOKEN>` (no JWT):
 
@@ -100,6 +100,16 @@ password). A Redis failure is logged and never breaks a Django request.
   `user_inactive` (the Inbox is locked for inactive users, so nothing there is
   open), Redis down 503 `auth_unavailable`. Its event stream rechecks every
   15 s and ends when the check fails. Web tokens never touch Redis.
+
+## Background hub calls
+
+`users/status`, `unlink` (web unlink and user delete) and `notify` run after
+commit in a non-daemon thread (`background.py`): the response never waits on
+the hub, and a short-lived process (management command, shell) waits for the
+call at exit instead of dropping it. The calls carry the hub client's
+timeouts (5 s status and unlink, 3 s notify), which bound that wait. These are
+requests timeouts (connect, then each read), so a hub that answers byte by byte
+could stretch one; an unreachable or silent hub cannot.
 
 ## Notifications
 

@@ -213,6 +213,12 @@ def user_status_changed(user_id: int, active: bool) -> None:
         after_commit(_send_status, user_id, active)
 
 
+def unlink_on_hub(user_id: int) -> None:
+    """The hub drops the user's workspace: after commit, in the background."""
+    if driver_hub.configured():
+        after_commit(_send_unlink, user_id)
+
+
 def user_deleted(user_id: int) -> None:
     if revoke_user(user_id, DispatchDevice.USER_DELETED) and driver_hub.configured():
         after_commit(_send_unlink, user_id)

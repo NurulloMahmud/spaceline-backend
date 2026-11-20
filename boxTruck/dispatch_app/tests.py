@@ -77,11 +77,13 @@ class HubCalls:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, Any]] = []
+        self.timeouts: list[Any] = []
         self.replies: dict[str, FakeResponse] = {}
 
     def __call__(self, method: str, url: str, json: Any = None, headers: Any = None, timeout: Any = None) -> FakeResponse:
         path = url.replace("https://hub.test", "")
         self.calls.append((method, path, json))
+        self.timeouts.append(timeout)
         reply = self.replies.get(path)
         if isinstance(reply, Exception):
             raise reply
@@ -444,7 +446,8 @@ class WebEndpointTests(DispatchBase):
     def test_unlink_when_the_hub_is_down(self) -> None:
         device, _ = self.link()
         self.hub.replies["/t/v1/dispatch/unlink"] = requests.ConnectionError("down")
-        reply = self.client.delete("/api/dispatch-app/device/")
+        with self.captureOnCommitCallbacks(execute=True):
+            reply = self.client.delete("/api/dispatch-app/device/")
         self.assertEqual((reply.status_code, reply.data), (200, {"ok": True}))
         device.refresh_from_db()
         self.assertEqual(device.revoked_reason, "unlinked")
@@ -469,6 +472,16 @@ class UserChangeTests(DispatchBase):
                 ("POST", "/t/v1/dispatch/users/status", {"btm_user_id": self.user.id, "active": True}),
             ],
         )
+
+    def test_hub_calls_use_the_short_timeouts(self) -> None:
+        self.link()
+        self.user.is_active = False
+        with self.captureOnCommitCallbacks(execute=True):
+            self.user.save()
+        with self.captureOnCommitCallbacks(execute=True):
+            self.user.delete()
+        self.assertEqual(self.hub.paths(), ["/t/v1/dispatch/users/status", "/t/v1/dispatch/unlink"])
+        self.assertEqual(self.hub.timeouts, [5, 5])
 
     def test_other_saves_and_unlinked_users_call_nothing(self) -> None:
         self.link()
@@ -567,3 +580,38 @@ class MailboxTests(TestCase):
         for reply in (FakeResponse(200, {"connected": False}), FakeResponse(500), requests.Timeout("slow")):
             with mock.patch("dispatch_app.mailbox.requests.get", side_effect=[reply]):
                 self.assertIsNone(mailbox.mailbox_for(7))
+
+
+class BackgroundTests(TestCase):
+    """The real thread runner, not the inline stand-in the other tests use."""
+
+    def test_threads_are_not_daemons_and_never_raise(self) -> None:
+        import threading
+
+        from . import background
+
+        seen: list[bool] = []
+
+        def call() -> None:
+            seen.append(threading.current_thread().daemon)
+            raise RuntimeError("hub exploded")
+
+        thread = background.run_in_background(call)
+        self.assertIsNotNone(thread)
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        # Not a daemon: the interpreter waits for it at exit.
+        self.assertEqual(seen, [False])
+
+    def test_a_slow_hub_never_holds_the_request(self) -> None:
+        import threading
+
+        from . import background
+
+        release = threading.Event()
+        started = time.monotonic()
+        thread = background.run_in_background(release.wait, 5)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertTrue(thread.is_alive())
+        release.set()
+        thread.join(timeout=5)

@@ -110,13 +110,10 @@ class DeviceView(views.APIView):
     def delete(self, request: Request) -> Response:
         user_id = request.user.id
         services.revoke_user(user_id, DispatchDevice.UNLINKED)
-        if driver_hub.configured():
-            # Also when nothing was live here: it clears a workspace the hub still shows.
-            try:
-                driver_hub.dispatch_unlink(user_id)
-            except driver_hub.DriverHubError as exc:
-                # The phone is cut off already; its next session call drops the workspace.
-                logger.warning("dispatch unlink of user %s not sent to the hub: %s", user_id, exc)
+        # Also when nothing was live here: it clears a workspace the hub still shows.
+        # In the background: the phone is cut off already, and its next session
+        # call drops the workspace even if the hub misses this.
+        services.unlink_on_hub(user_id)
         return Response({"ok": True})
 
 
