@@ -65,14 +65,23 @@ DJANGO_BANNER_RE = re.compile(
     r'Method Not Allowed|Too Many Requests|Service Unavailable): '
 )
 
-# Where an error entry can start, per format (bytes, so the file is never decoded whole).
+# Where an error entry can start, per format, matched at a line start (bytes, so the file
+# is never decoded whole). NEEDLES are plain words every such line holds: finding them with
+# bytes.find runs at memchr speed, where a multiline regex walks every byte in Python's re.
 ERROR_START_RE = {
-    'email': re.compile(rb'(?m)^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d[,.]\d{1,6} - \S+ - (?:ERROR|CRITICAL) - '),
-    'py': re.compile(rb'(?m)^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:[,.]\d{1,6})? (?:ERROR|CRITICAL) '),
-    'go': re.compile(rb'(?mi)^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d [^\n]*?(?:failed|error|panic)'),
+    'email': re.compile(rb'\d{4}-\d\d-\d\d \d\d:\d\d:\d\d[,.]\d{1,6} - \S+ - (?:ERROR|CRITICAL) - '),
+    'py': re.compile(rb'\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:[,.]\d{1,6})? (?:ERROR|CRITICAL) '),
+    'go': re.compile(rb'(?i)\d{4}/\d\d/\d\d \d\d:\d\d:\d\d [^\n]*?(?:failed|error|panic)'),
+}
+NEEDLES = {
+    'email': (b' - ERROR - ', b' - CRITICAL - '),
+    'py': (b' ERROR ', b' CRITICAL '),
+    'go': (b'failed', b'error', b'panic'),  # searched in the lowercased bytes
 }
 # Any line that starts a new entry; an error entry's lines run up to the next one.
 ANY_START_RE = re.compile(rb'(?m)^\d{4}[-/]\d\d[-/]\d\d \d\d:\d\d:\d\d')
+STAMP_AT_RE = re.compile(rb'\d{4}[-/]\d\d[-/]\d\d \d\d:\d\d:\d\d')
+LAST_START_MAX_LINES = 20000
 STAMP_LEN = 19
 
 _EMAIL_ADDR = re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+')
@@ -108,16 +117,31 @@ def _stamp_bytes(dt: datetime, fmt: str) -> bytes:
     return dt.astimezone(dt_timezone.utc).strftime(pattern).encode()
 
 
+def _candidate_lines(data: bytes, fmt: str) -> list[int]:
+    """Start offsets of the lines that hold one of the format's needles, in order."""
+    hay = data.lower() if fmt == 'go' else data
+    starts = set()
+    for needle in NEEDLES[fmt]:
+        pos = hay.find(needle)
+        while pos >= 0:
+            line_start = data.rfind(b'\n', 0, pos) + 1
+            starts.add(line_start)
+            line_end = data.find(b'\n', pos)
+            if line_end < 0:
+                break
+            pos = hay.find(needle, line_end + 1)
+    return sorted(starts)
+
+
 def error_slices(data: bytes, fmt: str, cutoff: datetime | None = None) -> str:
     """Only the error lines of `data` (at or after `cutoff`) and the lines under each,
     as text for parse(). Every other line is dropped without being looked at in Python."""
-    start_re = ERROR_START_RE['go' if fmt == 'go' else fmt]
+    start_re = ERROR_START_RE[fmt]
     floor = _stamp_bytes(cutoff, fmt) if cutoff is not None else b''
     parts = []
     pos = 0
-    for m in start_re.finditer(data):
-        begin = m.start()
-        if begin < pos:
+    for begin in _candidate_lines(data, fmt):
+        if begin < pos or not start_re.match(data, begin):
             continue
         if floor and data[begin:begin + STAMP_LEN] < floor:
             continue
@@ -278,10 +302,7 @@ def file_entries(path: str, fmt: str):
                 base = hit['done']
                 if hit['oldest'] is None:
                     hit['oldest'] = first_stamp(data, fmt)
-                last = None
-                for last in ANY_START_RE.finditer(data):
-                    pass
-                boundary = last.start() if last is not None else 0
+                boundary = _last_start(data) or 0
                 if boundary:
                     hit['entries'].extend(_scan(data[:boundary], fmt))
                     hit['done'] = base + boundary
@@ -289,6 +310,21 @@ def file_entries(path: str, fmt: str):
                 return hit['entries'] + pending, hit['oldest']
     except OSError:
         return None
+
+
+def _last_start(data: bytes) -> int | None:
+    """Offset of the last line that starts with a timestamp, walking back from the end."""
+    end = len(data)
+    for _ in range(LAST_START_MAX_LINES):
+        if end <= 0:
+            return None
+        start = data.rfind(b'\n', 0, end - 1) + 1
+        if STAMP_AT_RE.match(data, start):
+            return start
+        if start == 0:
+            return None
+        end = start
+    return None
 
 
 def _prune_cache() -> None:
