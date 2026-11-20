@@ -57,6 +57,7 @@ MY_APPS = [
     'accounting',
     'salaries',
     'hub',
+    'devconsole',
 ]
 
 INSTALLED_APPS = DJANGO_DEFAULT_APPS + THIRD_APPS + MY_APPS
@@ -332,10 +333,23 @@ BILLING_CARD_RETURN_URL = config(
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'formatters': {
+        # Timestamps let the Dev console place Django's own lines in time.
+        'console': {'format': '%(asctime)s %(levelname)s %(name)s: %(message)s'},
+    },
     'handlers': {
-        'console': {'class': 'logging.StreamHandler'},
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'console'},
     },
     'loggers': {
         'django': {'handlers': ['console'], 'level': 'INFO'},
+        # Project loggers print once: propagate is off so the root logger adds nothing.
+        **{
+            name: {'handlers': ['console'], 'level': 'INFO', 'propagate': False}
+            for name in (
+                'hiring', 'users', 'billing', 'charge', 'accounting', 'hub',
+                'devconsole', 'payroll', 'salaries', 'analytics', 'ai', 'mobile',
+                'dispatchers',
+            )
+        },
     },
 }
