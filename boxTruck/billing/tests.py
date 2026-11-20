@@ -394,3 +394,46 @@ class LoadDayFilterTests(TestCase):
         c.force_authenticate(self.user)
         r = c.get("/api/billing/loads/", {"start_date": "2026-11-06", "date_zone": "Mars/Base"})
         self.assertEqual(r.status_code, 400)
+
+
+class InternalBookLoadTests(TestCase):
+    """The email agent books a load from a verified rate con; its pays arrive as JSON floats."""
+    url = "/api/billing/internal/book-load/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(name="A", shipment_number="1000")
+        LoadStatus.objects.create(name="Booked")
+        cls.driver = Driver.objects.create(full_name="Ann", unit_number="U1", status=DriverStatus.objects.create(name="Active"))
+
+    def setUp(self):
+        import config.settings as cs
+        self.enterContext(mock.patch.object(cs, "INTERNAL_SERVICE_SECRET", "s3cret"))
+        self.client = APIClient()
+
+    def book(self, **extra):
+        import json
+        payload = {"driver_id": self.driver.id, "load_number": "LN-1", "carrier_pay": 1280.0, "driver_pay": 1150.0, **extra}
+        return self.client.post(self.url, {"payload": json.dumps(payload)}, headers={"X-Internal-Secret": "s3cret"})
+
+    def test_float_pays_make_the_load_and_its_payout(self):
+        from accounting.models import Invoice, Payout
+        r = self.book()
+        self.assertEqual(r.status_code, 201, r.data)
+        load = Load.objects.get(pk=r.data["load_id"])
+        self.assertEqual(load.carrier_pay, Decimal("1280.00"))
+        self.assertEqual(load.driver_pay, Decimal("1150.00"))
+        self.assertEqual(Payout.objects.get(load=load).gross, Decimal("1150.00"))
+        self.assertEqual(Invoice.objects.get(load=load).amount, Decimal("1280.00"))
+
+    def test_quick_pay_float_pay_takes_the_fee(self):
+        from accounting.models import Payout
+        r = self.book(payment_type="Quick Pay", driver_pay=1000.1)
+        self.assertEqual(r.status_code, 201, r.data)
+        payout = Payout.objects.get(load_id=r.data["load_id"])
+        self.assertEqual(payout.quick_pay_fee + payout.gross, Decimal("1000.10"))
+
+    def test_a_bad_pay_is_a_400(self):
+        r = self.book(carrier_pay="abc")
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(Load.objects.exists())

@@ -22,6 +22,13 @@ QUICK_PAY_PERCENT = Decimal('5')
 CENT = Decimal('0.01')
 
 
+def as_money(v):
+    """Any pay value (None, int, float, str, Decimal) as a Decimal in cents."""
+    if v is None or v == '':
+        return ZERO
+    return Decimal(str(v)).quantize(CENT, ROUND_HALF_UP)
+
+
 def money(v):
     v = Decimal(v or 0)
     return f'${v:,.2f}' if v >= 0 else f'-${-v:,.2f}'
@@ -55,7 +62,7 @@ def quick_pay_quote(gross):
 
 def shift_driver_pay(load, delta, user, why):
     """Change the load's driver pay without the load signals: the payout is already handled."""
-    old = load.driver_pay or ZERO
+    old = as_money(load.driver_pay)
     new = old + delta
     Load.objects.filter(pk=load.pk).update(driver_pay=new, updated_by=user)
     LoadHistory.objects.create(load=load, changed_by=user, description=f'Load Updated | Driver Pay: {old} -> {new} ({why})')
@@ -205,7 +212,9 @@ def take_expense_everywhere(deduction, user=None, exclude_payout=None):
 def create_for_load(load, user=None, take_expenses=True, take_fee=True):
     """Both records for a booked load. Safe to call twice: existing records are kept.
     A load booked as Quick Pay has its fee taken at once."""
-    payout, made_p = Payout.objects.get_or_create(load=load, defaults={'gross': load.driver_pay or ZERO, 'payment_type': payment_type_of(load)})
+    # A load made in code may still hold its pays as floats; the records do Decimal math.
+    driver_pay, carrier_pay = as_money(load.driver_pay), as_money(load.carrier_pay)
+    payout, made_p = Payout.objects.get_or_create(load=load, defaults={'gross': driver_pay, 'payment_type': payment_type_of(load)})
     if made_p:
         log_payout(payout, user, f'Created from load {shipment_of(load)} with the driver pay {money(load.driver_pay)}')
         if payout.payment_type == Payout.QUICK_PAY and take_fee:
@@ -213,7 +222,7 @@ def create_for_load(load, user=None, take_expenses=True, take_fee=True):
             payout.save(update_fields=['gross', 'quick_pay_fee'])
         if take_expenses:
             take_open_expenses(payout, user)
-    invoice, made_i = Invoice.objects.get_or_create(load=load, defaults={'original': load.carrier_pay or ZERO, 'amount': load.carrier_pay or ZERO})
+    invoice, made_i = Invoice.objects.get_or_create(load=load, defaults={'original': carrier_pay, 'amount': carrier_pay})
     if made_i:
         log_invoice(invoice, user, f'Created from load {shipment_of(load)} with the carrier pay {money(load.carrier_pay)}')
     return payout, invoice

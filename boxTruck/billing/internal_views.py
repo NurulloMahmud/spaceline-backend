@@ -6,6 +6,7 @@ viewsets scope every query to `request.user`, which internal callers do not
 have. Authentication is the shared `X-Internal-Secret` header.
 """
 import logging
+from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from django.utils import timezone
@@ -27,6 +28,17 @@ logger = logging.getLogger(__name__)
 def _parse_stop_datetime(value):
     """Ratecon dates arrive as a string or a list of strings per stop."""
     return parse_ratecon_datetime(value)
+
+
+def _money(value):
+    """A pay from JSON (often a float) as a Decimal, so accounting math works on the new load.
+    None stays None; anything that is not a number raises ValueError."""
+    if value is None or value == '':
+        return None
+    try:
+        return Decimal(str(value)).quantize(Decimal('0.01'))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError(f'not a number: {value!r}')
 
 
 class InternalCompanyProfileView(views.APIView):
@@ -219,6 +231,12 @@ class InternalBookLoadView(views.APIView):
         booked_by_id = payload.get('booked_by_id')
         booked_by = CustomUser.objects.filter(id=booked_by_id).first() if booked_by_id else None
 
+        try:
+            carrier_pay = _money(payload.get('carrier_pay'))
+            driver_pay = _money(payload.get('driver_pay'))
+        except ValueError as e:
+            return Response({"error": f"Bad pay: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
         status_name = payload.get('status_name') or 'Booked'
         load_status = LoadStatus.objects.filter(name__iexact=status_name).first()
 
@@ -231,8 +249,8 @@ class InternalBookLoadView(views.APIView):
                     created_by=booked_by,
                     status=load_status,
                     load_number=load_number,
-                    carrier_pay=payload.get('carrier_pay'),
-                    driver_pay=payload.get('driver_pay'),
+                    carrier_pay=carrier_pay,
+                    driver_pay=driver_pay,
                     pickup_date=_parse_stop_datetime(payload.get('pickup_date')),
                     drop_date=_parse_stop_datetime(payload.get('drop_date')),
                     note=payload.get('note'),
@@ -266,7 +284,7 @@ class InternalBookLoadView(views.APIView):
                     description=payload.get('history_note') or 'Booked automatically from a verified rate confirmation.',
                 )
         except Exception as e:
-            logger.error("internal book-load failed | error=%s", e)
+            logger.exception("internal book-load failed | error=%s", e)
             return Response(
                 {"error": f"Failed to create load: {e}"},
                 status=status.HTTP_400_BAD_REQUEST,
