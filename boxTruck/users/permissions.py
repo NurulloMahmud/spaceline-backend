@@ -1,3 +1,5 @@
+import hmac
+
 from rest_framework.permissions import BasePermission
 from config import settings
 
@@ -69,5 +71,9 @@ class IsUpdater(BasePermission):
 
 class IsInternalService(BasePermission):
     def has_permission(self, request, view):
+        # Constant-time, and an empty configured secret lets nobody in.
+        expected = settings.INTERNAL_SERVICE_SECRET
         secret = request.headers.get('X-Internal-Secret')
-        return secret == settings.INTERNAL_SERVICE_SECRET
+        if not expected or not secret:
+            return False
+        return hmac.compare_digest(str(secret).encode(), str(expected).encode())
