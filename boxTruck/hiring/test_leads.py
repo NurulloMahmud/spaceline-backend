@@ -634,8 +634,20 @@ class BotTokenTests(LeadBase):
         with patch("hiring.telegram.check_token", return_value="btm_leads_bot"), patch(
             "hiring.telegram.get_chat", return_value={"title": "BTM Leads", "type": "supergroup", "members": 3}
         ):
-            self._api(self.dev).put("/api/hiring/lead-settings/bot/", {"token": TOKEN}, format="json")
+            res = self._api(self.dev).put("/api/hiring/lead-settings/bot/", {"token": TOKEN}, format="json")
         self.assertEqual(LeadSettings.get().chat_title, "BTM Leads")
+        self.assertEqual(res.json()["chat_error"], "")
+
+    def test_a_bot_that_cannot_see_the_group_is_saved_with_a_warning(self) -> None:
+        LeadSettings.objects.update_or_create(pk=1, defaults={"chat_id": "-1002362447198", "chat_title": "Old"})
+        with patch("hiring.telegram.check_token", return_value="spaceline_box_bot"), patch(
+            "hiring.telegram.get_chat", side_effect=TG.TelegramError("Bad Request: chat not found")
+        ):
+            res = self._api(self.dev).put("/api/hiring/lead-settings/bot/", {"token": TOKEN}, format="json")
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertIn("@spaceline_box_bot cannot see the group -1002362447198", res.json()["chat_error"])
+        row = LeadSettings.get()
+        self.assertEqual((leads.bot_token(row), row.chat_title), (TOKEN, ""))
 
     def test_lead_posts_newest_first(self) -> None:
         self._team(self.a)

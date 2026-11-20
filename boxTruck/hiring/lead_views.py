@@ -186,15 +186,22 @@ class LeadBotView(views.APIView):
         row.token_saved_at = timezone.now()
         row.token_saved_by = request.user
         fields = ["bot_token_enc", "bot_username", "token_saved_at", "token_saved_by"]
+        chat_error = ""
         if row.chat_id:
-            # A chat saved before the bot existed gets its title now.
+            # A chat saved before the bot existed gets its title now. A bot that cannot see
+            # the group is still saved (it may be added next), but the caller is told, since
+            # every lead post would fail with "chat not found" until it is.
             try:
                 row.chat_title = str((telegram.get_chat(token, row.chat_id) or {}).get("title") or "")
-            except telegram.TelegramError:
+            except telegram.TelegramError as exc:
                 row.chat_title = ""
+                chat_error = (
+                    f"@{row.bot_username or 'The bot'} cannot see the group {row.chat_id}"
+                    f" ({exc or 'chat not found'}). Add the bot to that group, then press Send test."
+                )
             fields.append("chat_title")
         row.save(update_fields=fields)
-        return Response(leads.bot_json(row))
+        return Response({**leads.bot_json(row), "chat_error": chat_error})
 
     def delete(self, request: Request) -> Response:
         row = LeadSettings.get()
