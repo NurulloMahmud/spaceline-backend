@@ -1,4 +1,5 @@
 """BTM Dispatch: phone tokens checked against Django's Redis key, and the notices sent to Django."""
+import time
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -100,12 +101,46 @@ def test_event_stream_of_a_revoked_phone_ends(client, redis, monkeypatch):
     redis(FakeRedis("active", None))
     monkeypatch.setattr(dispatch, "STREAM_RECHECK_SECONDS", 0)
     lines = []
-    with client.stream("GET", f"/api/v1/events/stream?token={make_token(dsid=DSID)}") as reply:
+    headers = {"Authorization": f"Bearer {make_token(dsid=DSID)}"}
+    with client.stream("GET", "/api/v1/events/stream", headers=headers) as reply:
         assert reply.status_code == 200
         for line in reply.iter_lines():
             lines.append(line)
             assert len(lines) < 20, "the stream did not end"
     assert lines[0] == "event: connected"
+
+
+def test_event_stream_of_a_phone_ends_at_token_expiry(client, redis):
+    # The device stays live; the token runs out two seconds in.
+    redis(FakeRedis("active"))
+    token = make_token(dsid=DSID, exp=datetime.now(timezone.utc) + timedelta(seconds=2))
+    started = time.monotonic()
+    lines = []
+    with client.stream("GET", "/api/v1/events/stream", headers={"Authorization": f"Bearer {token}"}) as reply:
+        assert reply.status_code == 200
+        for line in reply.iter_lines():
+            lines.append(line)
+            assert len(lines) < 20, "the stream did not end"
+    assert lines[0] == "event: connected"
+    assert time.monotonic() - started < 10
+
+
+def test_phone_token_in_the_query_is_refused(client, redis):
+    fake = redis(FakeRedis("active"))
+    reply = client.get(f"/api/v1/events/stream?token={make_token(dsid=DSID)}")
+    assert reply.status_code == 401
+    assert reply.json()["detail"]["code"] == "use_header"
+    assert fake.keys == []
+
+
+def test_web_token_in_the_query_still_works(redis):
+    redis(BrokenRedis())
+
+    class FakeRequest:
+        headers: dict = {}
+
+    principal = auth.current_user_sse(FakeRequest(), token=make_token())
+    assert principal.user_id == 7 and principal.dsid is None
 
 
 def test_internal_mailbox_route(client, bidder_mailbox):

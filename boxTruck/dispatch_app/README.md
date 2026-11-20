@@ -102,7 +102,8 @@ password). A Redis failure is logged and never breaks a Django request.
   the key for any `dsid` token: missing 401 `device_revoked`, `inactive` 403
   `user_inactive` (the Inbox is locked for inactive users, so nothing there is
   open), Redis down 503 `auth_unavailable`. Its event stream rechecks every
-  15 s and ends when the check fails. Web tokens never touch Redis.
+  15 s and ends when the check fails or the token expires; a phone token in
+  `?token=` is refused (401 `use_header`). Web tokens never touch Redis.
 
 ## Link email
 

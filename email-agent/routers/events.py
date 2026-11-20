@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import time
 
 from typing import Any
 
@@ -67,7 +68,8 @@ async def stream(
     client_ip = _client_ip(request)
     logger.info("SSE stream opened: user=%s company=%s ip=%s", principal.user_id, company_id, client_ip)
 
-    # A phone token's stream ends within 15 seconds of the phone being unlinked.
+    # A phone token's stream ends within 15 seconds of the phone being unlinked,
+    # and when the token expires.
     wait = dispatch.STREAM_RECHECK_SECONDS if principal.dsid else HEARTBEAT_SECONDS
     loop = asyncio.get_running_loop()
 
@@ -79,6 +81,10 @@ async def stream(
             while True:
                 if await request.is_disconnected():
                     break
+                if principal.dsid and principal.exp is not None and time.time() >= principal.exp:
+                    # The app reconnects with a fresh token; the feed resumes.
+                    logger.info("SSE stream of phone %s ended: token expired", principal.dsid)
+                    break
                 if principal.dsid and loop.time() >= next_check:
                     next_check = loop.time() + dispatch.STREAM_RECHECK_SECONDS
                     try:
@@ -87,7 +93,10 @@ async def stream(
                         logger.info("SSE stream of phone %s ended: device check failed", principal.dsid)
                         break
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=wait)
+                    timeout = wait
+                    if principal.dsid and principal.exp is not None:
+                        timeout = max(0.0, min(wait, principal.exp - time.time()))
+                    event = await asyncio.wait_for(queue.get(), timeout=timeout)
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
                     continue

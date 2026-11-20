@@ -69,7 +69,9 @@ the group the driver already talks to.
 writes `dispatch:dsid:<dsid>` to: a BTM Dispatch phone token (one with a `dsid`
 claim) is accepted only while that key says `active` (see
 `services/dispatch.py` and `boxTruck/dispatch_app/README.md`). Web tokens never
-touch Redis. Broker replies and won or booked bids are passed to Django's
+touch Redis. A phone's event stream ends when the key goes (checked every 15 s)
+or when its token expires, and a phone token in `?token=` is refused (401
+`use_header`): the app sends the Authorization header on streams. Broker replies and won or booked bids are passed to Django's
 `/api/dispatch-app/internal/notify/` with `BOXTRUCK_INTERNAL_SECRET`.
 
 `PRICE_TOLERANCE_CENTS` is `0` and should stay there: it is the guard that stops

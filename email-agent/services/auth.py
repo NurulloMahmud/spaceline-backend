@@ -24,6 +24,8 @@ class Principal:
     company_name: Optional[str] = None
     # Set on BTM Dispatch phone tokens (services/dispatch.py).
     dsid: Optional[str] = None
+    # The token's expiry (epoch seconds); a phone's event stream ends there.
+    exp: Optional[float] = None
 
     @property
     def is_developer(self) -> bool:
@@ -112,7 +114,15 @@ def _decode(token: str) -> Principal:
         department=department,
         company_name=company_name,
         dsid=None if dsid is None else str(dsid),
+        exp=_exp(claims),
     )
+
+
+def _exp(claims: dict) -> Optional[float]:
+    try:
+        return float(claims["exp"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def check_device(dsid) -> None:
@@ -158,13 +168,31 @@ def current_user_sse(
     request: Request,
     token: str = Query(default=""),
 ) -> Principal:
-    """EventSource cannot set headers, so the SSE route also accepts ?token=."""
+    """EventSource cannot set headers, so the SSE route also accepts ?token=.
+
+    Not for BTM Dispatch phone tokens: a URL ends up in logs, and the app can
+    send the header, so a `dsid` token in the query is refused (use_header).
+    """
     header = request.headers.get("authorization", "")
     if header:
         return current_user(header)
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing token")
+    if _has_dsid(token):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            {"error": "Send the token in the Authorization header.", "code": "use_header"},
+        )
     return _decode(token)
+
+
+def _has_dsid(token: str) -> bool:
+    """Only to refuse a phone token early; nothing here is trusted."""
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False})
+    except jwt.InvalidTokenError:
+        return False
+    return isinstance(claims, dict) and claims.get(dispatch.DSID_CLAIM) is not None
 
 
 def scoped_company(principal: Principal = Depends(current_user)) -> int:
