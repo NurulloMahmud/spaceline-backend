@@ -12,17 +12,27 @@ Formats handled (timestamps are server local time, which is UTC):
 Lines without a timestamp continue the entry above them (tracebacks). Old Django blocks
 (``Internal Server Error: /path`` + traceback, written before Django had timestamps) are
 skipped: they have no time, and attributing them to the file's mtime would make every old
-error look new.
+error look new. Python warnings printed to stderr (``file.py:12: RuntimeWarning: ...``)
+end an entry instead of joining its trace.
+
+Each service's log and its rotated copy (``<path>.1``) are read, up to MAX_FILE_BYTES from
+the end of each. A busy log fills 5 MB in about an hour, so reading only the tail hid most
+of the day. A regex pass in C finds the error lines first, and only those lines and the
+lines under them are parsed. What a file has given is kept in memory by inode, so the next
+call (the console polls every 20 s) reads only the bytes written since, and a file that
+was just rotated to ``.1`` is not read again.
 """
 import hashlib
 import os
 import re
+import threading
+import time
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 from decouple import config
 from django.conf import settings
 
-TAIL_BYTES = 5 * 1024 * 1024
+MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_TRACE_LINES = 60
 MAX_LINE_CHARS = 2000
 
@@ -47,11 +57,23 @@ PY_RE = re.compile(
 )
 GO_RE = re.compile(r'^(\d{4})/(\d\d)/(\d\d) (\d\d:\d\d:\d\d) (.*)$')
 GO_ERROR_RE = re.compile(r'failed|error|panic', re.IGNORECASE)
+# A Python warning printed to stderr, and the source line under it.
+PY_WARNING_RE = re.compile(r'^\S+\.py:\d+: \w*Warning: ')
 # Old Django error banners with no timestamp.
 DJANGO_BANNER_RE = re.compile(
     r'^(Internal Server Error|Not Found|Unauthorized|Bad Request|Forbidden|'
     r'Method Not Allowed|Too Many Requests|Service Unavailable): '
 )
+
+# Where an error entry can start, per format (bytes, so the file is never decoded whole).
+ERROR_START_RE = {
+    'email': re.compile(rb'(?m)^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d[,.]\d{1,6} - \S+ - (?:ERROR|CRITICAL) - '),
+    'py': re.compile(rb'(?m)^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:[,.]\d{1,6})? (?:ERROR|CRITICAL) '),
+    'go': re.compile(rb'(?mi)^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d [^\n]*?(?:failed|error|panic)'),
+}
+# Any line that starts a new entry; an error entry's lines run up to the next one.
+ANY_START_RE = re.compile(rb'(?m)^\d{4}[-/]\d\d[-/]\d\d \d\d:\d\d:\d\d')
+STAMP_LEN = 19
 
 _EMAIL_ADDR = re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+')
 _UUID = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
@@ -81,21 +103,44 @@ def log_path(key: str, default: str) -> str:
     return config(f'DEV_LOG_{key.upper()}', default=default)
 
 
-def read_tail(path: str, limit: int = TAIL_BYTES):
-    """Last `limit` bytes of the file as text; None when it cannot be read."""
-    try:
-        with open(path, 'rb') as fh:
-            size = os.fstat(fh.fileno()).st_size
-            start = max(0, size - limit)
-            fh.seek(start)
-            data = fh.read(limit)
-    except OSError:
+def _stamp_bytes(dt: datetime, fmt: str) -> bytes:
+    pattern = '%Y/%m/%d %H:%M:%S' if fmt == 'go' else '%Y-%m-%d %H:%M:%S'
+    return dt.astimezone(dt_timezone.utc).strftime(pattern).encode()
+
+
+def error_slices(data: bytes, fmt: str, cutoff: datetime | None = None) -> str:
+    """Only the error lines of `data` (at or after `cutoff`) and the lines under each,
+    as text for parse(). Every other line is dropped without being looked at in Python."""
+    start_re = ERROR_START_RE['go' if fmt == 'go' else fmt]
+    floor = _stamp_bytes(cutoff, fmt) if cutoff is not None else b''
+    parts = []
+    pos = 0
+    for m in start_re.finditer(data):
+        begin = m.start()
+        if begin < pos:
+            continue
+        if floor and data[begin:begin + STAMP_LEN] < floor:
+            continue
+        line_end = data.find(b'\n', begin)
+        if line_end < 0:
+            end = len(data)
+        else:
+            nxt = ANY_START_RE.search(data, line_end + 1)
+            end = nxt.start() if nxt else len(data)
+        parts.append(data[begin:end].decode('utf-8', errors='replace'))
+        pos = end
+    return '\n'.join(p.rstrip('\n') for p in parts)
+
+
+def first_stamp(data: bytes, fmt: str) -> datetime | None:
+    m = ANY_START_RE.search(data)
+    if not m:
         return None
-    if start > 0:
-        # The first line is almost surely cut in half.
-        nl = data.find(b'\n')
-        data = data[nl + 1:] if nl >= 0 else b''
-    return data.decode('utf-8', errors='replace')
+    raw = m.group(0).decode()
+    try:
+        return _utc(datetime.strptime(raw, '%Y/%m/%d %H:%M:%S' if fmt == 'go' else '%Y-%m-%d %H:%M:%S'))
+    except ValueError:
+        return None
 
 
 def _utc(dt: datetime) -> datetime:
@@ -177,8 +222,10 @@ def parse(text: str, fmt: str):
                 current = None
             continue
 
-        # No timestamp: a continuation, a banner, or noise.
-        if line.startswith('[GIN]') or (fmt == 'py' and DJANGO_BANNER_RE.match(line)):
+        # No timestamp: a continuation, a banner, a warning, or noise.
+        if line.startswith('[GIN]') or (
+            fmt == 'py' and (DJANGO_BANNER_RE.match(line) or PY_WARNING_RE.match(line))
+        ):
             done = finish()
             if done is not None:
                 yield done
@@ -192,18 +239,86 @@ def parse(text: str, fmt: str):
         yield done
 
 
+_cache: dict = {}
+_cache_lock = threading.Lock()
+CACHE_IDLE_SECONDS = 6 * 3600
+HEAD_BYTES = 256
+
+
+def _scan(data: bytes, fmt: str) -> list:
+    return list(parse(error_slices(data, fmt), fmt))
+
+
+def file_entries(path: str, fmt: str):
+    """(error entries, first timestamp read) for one file, or None when it cannot be read.
+
+    Entries up to the start of the last timestamped line are final and kept; the lines
+    from there on may still grow a traceback, so they are parsed again next time.
+    """
+    try:
+        with open(path, 'rb') as fh:
+            st = os.fstat(fh.fileno())
+            key = (st.st_dev, st.st_ino)
+            head = fh.read(HEAD_BYTES)
+            with _cache_lock:
+                hit = _cache.get(key)
+                # A truncated or replaced file (same inode, other bytes) is read afresh.
+                if hit is None or st.st_size < hit['done'] or hit['fmt'] != fmt or hit['head'] != head:
+                    start = max(0, st.st_size - MAX_FILE_BYTES)
+                    hit = {'fmt': fmt, 'head': head, 'done': start, 'entries': [], 'oldest': None}
+                    if start > 0:
+                        # Started mid-file: the first line is almost surely cut in half.
+                        fh.seek(start)
+                        nl = fh.read(64 * 1024).find(b'\n')
+                        hit['done'] = start + nl + 1 if nl >= 0 else st.st_size
+                    _cache[key] = hit
+                hit['used'] = time.monotonic()
+                fh.seek(hit['done'])
+                data = fh.read(st.st_size - hit['done'])
+                base = hit['done']
+                if hit['oldest'] is None:
+                    hit['oldest'] = first_stamp(data, fmt)
+                last = None
+                for last in ANY_START_RE.finditer(data):
+                    pass
+                boundary = last.start() if last is not None else 0
+                if boundary:
+                    hit['entries'].extend(_scan(data[:boundary], fmt))
+                    hit['done'] = base + boundary
+                pending = _scan(data[boundary:], fmt)
+                return hit['entries'] + pending, hit['oldest']
+    except OSError:
+        return None
+
+
+def _prune_cache() -> None:
+    now = time.monotonic()
+    with _cache_lock:
+        for key in [k for k, v in _cache.items() if now - v.get('used', now) > CACHE_IDLE_SECONDS]:
+            del _cache[key]
+
+
 def collect(service: str | None, q: str, hours: int, limit: int) -> dict:
     cutoff = datetime.now(dt_timezone.utc) - timedelta(hours=hours)
     needle = q.lower()
     services = []
     groups: dict[str, dict] = {}
+    _prune_cache()
 
     for key, label, default, fmt in SERVICES:
-        text = read_tail(log_path(key, default))
-        services.append({'key': key, 'label': label, 'readable': text is not None})
-        if text is None or (service and service != key):
+        path = log_path(key, default)
+        current = file_entries(path, fmt)
+        info = {'key': key, 'label': label, 'readable': current is not None, 'since': None}
+        services.append(info)
+        if current is None or (service and service != key):
             continue
-        for entry in parse(text, fmt):
+        rotated = file_entries(path + '.1', fmt) if os.path.exists(path + '.1') else None
+        parts = [p for p in (rotated, current) if p is not None]
+        oldest = next((p[1] for p in parts if p[1] is not None), None)
+        # How far back the log goes, when that is inside the window asked for.
+        if oldest is not None and oldest > cutoff:
+            info['since'] = _iso(oldest)
+        for entry in (e for p in parts for e in p[0]):
             if entry['at'] < cutoff:
                 continue
             trace = '\n'.join(entry['trace'])

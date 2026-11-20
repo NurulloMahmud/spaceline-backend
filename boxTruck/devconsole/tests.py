@@ -22,6 +22,7 @@ def stamp(dt, fmt):
 class LogFixtureMixin:
     def setUp(self):
         super().setUp()
+        logs._cache.clear()
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.now = datetime.now(dt_timezone.utc).replace(microsecond=0, tzinfo=None)
@@ -190,18 +191,89 @@ class GroupingAndFilterTests(LogFixtureMixin, SimpleTestCase):
         self.assertEqual([x['service'] for x in logs.collect(None, 'by peer', 24, 200)['entries']], ['sylectus'])
         self.assertEqual(len(logs.collect(None, '', 24, 1)['entries']), 1)
 
-    def test_only_last_5_mb_is_read(self):
-        old = f'{stamp(self.ago(minutes=1), "comma")} - a - ERROR - ancient marker\n'
-        filler = f'{stamp(self.ago(minutes=1), "comma")} - a - INFO - ' + 'x' * 900 + '\n'
+    def test_a_busy_log_is_read_past_5_mb(self):
+        old = f'{stamp(self.ago(hours=20), "comma")} - a - ERROR - morning marker\n'
+        filler = f'{stamp(self.ago(hours=1), "comma")} - httpx - INFO - ' + 'x' * 900 + '\n'
         recent = f'{stamp(self.ago(minutes=1), "comma")} - a - ERROR - recent marker\n'
         with open(self.paths['email'], 'w') as fh:
             fh.write(old)
-            for _ in range((logs.TAIL_BYTES // len(filler)) + 50):
+            for _ in range((6 * 1024 * 1024) // len(filler)):
                 fh.write(filler)
             fh.write(recent)
-        self.assertGreater(os.path.getsize(self.paths['email']), logs.TAIL_BYTES)
         msgs = [x['message'] for x in logs.collect('email', '', 24, 200)['entries']]
-        self.assertEqual(msgs, ['recent marker'])
+        self.assertEqual(msgs, ['recent marker', 'morning marker'])
+
+    def test_rotated_copy_is_read_and_since_shows_how_far_back(self):
+        with open(self.paths['email'] + '.1', 'w') as fh:
+            fh.write(f'{stamp(self.ago(hours=10), "comma")} - services.booking - ERROR - booking failed\n')
+        self.write('email', f'{stamp(self.ago(hours=2), "comma")} - a - ERROR - after rotation\n')
+        out = logs.collect(None, '', 24, 200)
+        self.assertEqual([x['message'] for x in out['entries']], ['after rotation', 'booking failed'])
+        since = {s['key']: s['since'] for s in out['services']}
+        # The rotated copy starts 10 h back, inside the 24 h window: the console says so.
+        self.assertIsNotNone(since['email'])
+        self.assertTrue(since['email'].startswith(self.ago(hours=10).strftime('%Y-%m-%dT%H:%M:%S')))
+        # A log that goes back further than the window has nothing to say.
+        self.write('direct', f'{stamp(self.ago(hours=30), "comma")} INFO started\n')
+        self.assertIsNone({s['key']: s['since'] for s in logs.collect(None, '', 24, 200)['services']}['direct'])
+
+    def test_second_read_scans_only_new_bytes_and_keeps_the_trace_growing(self):
+        self.write('sylectus', f'{stamp(self.ago(minutes=5), "comma")} ERROR listener died\nTraceback (most recent call last):\n')
+        first = logs.collect('sylectus', '', 24, 200)['entries']
+        self.assertEqual(first[0]['trace'], 'Traceback (most recent call last):')
+        with open(self.paths['sylectus'], 'a') as fh:
+            fh.write('ConnectionResetError: by PEER\n')
+            fh.write(f'{stamp(self.ago(minutes=1), "comma")} ERROR listener died\n')
+        again = logs.collect('sylectus', '', 24, 200)['entries']
+        self.assertEqual(again[0]['count'], 2)
+        with open(self.paths['sylectus'], 'a') as fh:
+            fh.write(f'{stamp(self.ago(minutes=0), "comma")} INFO resumed\n')
+        self.assertEqual(logs.collect('sylectus', '', 24, 200)['entries'][0]['count'], 2)
+        # The first entry's trace was completed by the bytes that came later.
+        key = next(iter(logs._cache))
+        self.assertEqual(logs._cache[key]['entries'][0]['trace'],
+                         ['Traceback (most recent call last):', 'ConnectionResetError: by PEER'])
+
+    def test_a_truncated_log_is_read_afresh(self):
+        self.write('email', f'{stamp(self.ago(minutes=5), "comma")} - a - ERROR - before truncate\n' * 3)
+        self.assertEqual(logs.collect('email', '', 24, 200)['entries'][0]['count'], 3)
+        self.write('email', f'{stamp(self.ago(minutes=1), "comma")} - b - ERROR - after truncate, a longer line\n' * 4)
+        e = logs.collect('email', '', 24, 200)['entries']
+        self.assertEqual([(x['message'], x['count']) for x in e], [('after truncate, a longer line', 4)])
+
+    def test_python_warning_is_not_part_of_the_trace(self):
+        self.write('django', (
+            f'{stamp(self.ago(minutes=3), "comma")} ERROR hiring.telegram: sendMediaGroup failed: chat not found\n'
+            '/x/venv/django/db/models/fields/__init__.py:1670: RuntimeWarning: DateTimeField Load.pickup_date received a naive datetime\n'
+            '  warnings.warn(\n'
+        ))
+        e = logs.collect('django', '', 24, 200)['entries']
+        self.assertEqual(len(e), 1)
+        self.assertEqual(e[0]['trace'], '')
+
+    def test_prefilter_keeps_what_parse_would_find(self):
+        t = [stamp(self.ago(minutes=m), "comma") for m in (9, 8, 7, 6, 5)]
+        g = [stamp(self.ago(minutes=m), "slash") for m in (9, 8, 7)]
+        cases = {
+            'email': (
+                f'{t[0]} - a - INFO - fine\n{t[1]} - a - ERROR - boom\nTraceback (most recent call last):\n'
+                f'  File "x.py", line 1\nValueError: x\n{t[2]} - a - INFO - fine\n{t[3]} - b - CRITICAL - down\n'
+            ),
+            'py': (
+                f'{t[0]} INFO ok\n{t[1]} ERROR listener died\nTraceback (most recent call last):\n'
+                f'ConnectionResetError: by PEER\nInternal Server Error: /x\nold trace\n{t[4]} ERROR again\n'
+            ),
+            'go': (
+                f'{g[0]} View: fine\n[GIN] 200 | GET /x\n{g[1]} brokers: failed to refresh cache\n'
+                f'{g[2]} \x1b[31m error in sql [rows:0]\n{g[2]} panic: boom\ngoroutine 1\n'
+            ),
+        }
+        for fmt, text in cases.items():
+            whole = [(e['level'], e['message'], e['trace']) for e in logs.parse(text, fmt)]
+            fast = [(e['level'], e['message'], e['trace'])
+                    for e in logs.parse(logs.error_slices(text.encode(), fmt), fmt)]
+            self.assertEqual(fast, whole, fmt)
+            self.assertTrue(whole, fmt)
 
 
 class PermissionTests(LogFixtureMixin, TestCase):
