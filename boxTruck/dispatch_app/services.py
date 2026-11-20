@@ -101,6 +101,13 @@ def create_device(
             raise UserNotFound
         if not user.is_active:
             raise UserInactive
+        workspace = str(hub_workspace_id or "")[:64]
+        # The hub's quiet reissue (rule 2: sign-in elsewhere, logout) and a
+        # re-link on the same account keep the hub workspace: not a new link,
+        # so no link email.
+        same_workspace = bool(workspace) and DispatchDevice.objects.filter(
+            user=user, revoked_at__isnull=True, hub_workspace_id=workspace
+        ).exists()
         revoke(
             DispatchDevice.objects.filter(user=user),
             DispatchDevice.REPLACED,
@@ -109,13 +116,14 @@ def create_device(
         device = DispatchDevice.objects.create(
             user=user,
             token_hash=hash_token(token),
-            hub_workspace_id=str(hub_workspace_id or "")[:64],
+            hub_workspace_id=workspace,
             platform=str(platform or "").strip().lower()[:16],
             device_label=str(device_label or "").strip()[:120],
         )
         dsid = device.id
         transaction.on_commit(lambda: state.set_state(dsid, True))
-        after_commit(send_link_email, user.email, device.device_label or device.platform, device.created_at)
+        if not same_workspace:
+            after_commit(send_link_email, user.email, device.device_label or device.platform, device.created_at)
     return device, token
 
 

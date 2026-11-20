@@ -465,6 +465,19 @@ class HubEndpointTests(DispatchBase):
             r"If this was not you, unlink it in Profile > Mobile app\.$",
         )
 
+    def test_no_link_email_for_the_same_workspace(self) -> None:
+        from django.core import mail
+
+        self.create()
+        # The hub's reissue after a sign-in elsewhere or a logout, or a re-link
+        # on the same account: same hub workspace, no new email.
+        self.assertEqual(self.create(device_label="iPhone 16").status_code, 201)
+        self.assertEqual(self.create(platform="", device_label="").status_code, 201)
+        self.assertEqual(len(mail.outbox), 1)
+        # Another workspace (another app account) is a new link.
+        self.assertEqual(self.create(hub_workspace_id=10).status_code, 201)
+        self.assertEqual(len(mail.outbox), 2)
+
     def test_link_email_skipped_quietly(self) -> None:
         from django.core import mail
 

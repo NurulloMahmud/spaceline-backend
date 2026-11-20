@@ -113,7 +113,10 @@ commit, in a background thread, through Django's own mail path
 Dispatch linked to your account", body "BTM Dispatch was linked to <device
 label> on Nov 21, 2026 at 4:02 PM CST. If this was not you, unlink it in
 Profile > Mobile app." (the deployment's `TIME_ZONE`). Skipped quietly without
-`RESEND_API_KEY` or without an email address on the user.
+`RESEND_API_KEY` or without an email address on the user, and when the user's
+live device already belongs to the same `hub_workspace_id`: the hub's quiet
+reissue after a sign-in elsewhere or a logout, or a re-link on the same app
+account, is not a new link.
 
 ## Secrets and retries
 
