@@ -28,7 +28,16 @@ from rest_framework.exceptions import ValidationError
 
 from users.models import CustomUser
 
-from .models import Driver, DriverFile, DriverHistory, DriverStatus, HiringMove, Vehicle
+from .models import (
+    Driver,
+    DriverFile,
+    DriverHistory,
+    DriverStatus,
+    HiringMove,
+    LeadAssignment,
+    LeadPost,
+    Vehicle,
+)
 
 STAGES = ("lead", "called", "ready", "active")
 LABELS = {"lead": "Lead", "called": "Called", "ready": "Ready", "active": "Active"}
@@ -100,10 +109,19 @@ def board_queryset(now: Any = None) -> QuerySet[Driver]:
     licenses = DriverFile.objects.filter(Q(name__iexact=LICENSE_NAME) | Q(hub_kind="license")).order_by("-created_at", "-id")
     return (
         qs.filter(shown)
-        .select_related("status", "referral_by", "hiring_moved_by")
+        .select_related("status", "referral_by", "hiring_moved_by", "assigned_to")
         .prefetch_related(
             Prefetch("driverfile_set", queryset=licenses, to_attr="licenses"),
             Prefetch("hiring_moves", queryset=HiringMove.objects.select_related("changed_by")),
+            Prefetch(
+                "lead_assignments",
+                queryset=LeadAssignment.objects.select_related("user", "by").order_by("created_at", "id"),
+            ),
+            Prefetch(
+                "lead_posts",
+                queryset=LeadPost.objects.filter(kind=LeadPost.KIND_LEAD).order_by("-created_at", "-id"),
+                to_attr="lead_post_list",
+            ),
             Prefetch("vehicles", queryset=Vehicle.objects.order_by("id")),
             "second_driver",
         )
@@ -142,6 +160,16 @@ def card(driver: Driver, request: Any = None) -> dict[str, Any]:
         for m in driver.hiring_moves.all()
     ]
     has_records = _records(driver) if hasattr(driver, "has_load") else driver_has_records(driver)
+    posts = getattr(driver, "lead_post_list", None)
+    if posts is None:
+        posts = list(
+            LeadPost.objects.filter(driver=driver, kind=LeadPost.KIND_LEAD).order_by("-created_at", "-id")[:1]
+        )
+    post = posts[0] if posts else None
+    assignments = [
+        {"to": _person(a.user), "by": _person(a.by), "reason": a.reason, "at": a.created_at}
+        for a in driver.lead_assignments.all()
+    ]
     return {
         "id": driver.id,
         "full_name": driver.full_name,
@@ -165,6 +193,10 @@ def card(driver: Driver, request: Any = None) -> dict[str, Any]:
         "team": team,
         "has_records": has_records,
         "moves": moves,
+        "assigned_to": _person(driver.assigned_to),
+        "assigned_at": driver.assigned_at,
+        "assignments": assignments,
+        "telegram": {"status": post.status, "at": post.created_at, "error": post.error} if post else None,
     }
 
 
@@ -175,14 +207,24 @@ def _sort_key(c: dict[str, Any]) -> tuple:
     return (when.timestamp() if when else 0, c["id"])
 
 
-def board(request: Any = None) -> dict[str, list[dict[str, Any]]]:
-    out: dict[str, list[dict[str, Any]]] = {s: [] for s in STAGES}
-    for driver in board_queryset():
+def board(request: Any = None) -> dict[str, Any]:
+    """The four columns, plus `viewer` ({user_id, is_admin, on_team}). A lead team
+    member who is not an admin gets only the drivers assigned to them."""
+    from . import leads
+
+    user = getattr(request, "user", None)
+    qs = board_queryset()
+    if user is not None and leads.team_only(user):
+        qs = qs.filter(assigned_to=user)
+    out: dict[str, Any] = {s: [] for s in STAGES}
+    for driver in qs:
         c = card(driver, request)
         if c["stage"] in out:
             out[c["stage"]].append(c)
-    for cards in out.values():
-        cards.sort(key=_sort_key, reverse=True)
+    for stage in STAGES:
+        out[stage].sort(key=_sort_key, reverse=True)
+    if user is not None:
+        out["viewer"] = leads.viewer(user)
     return out
 
 

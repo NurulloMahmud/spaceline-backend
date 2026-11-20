@@ -182,9 +182,17 @@ class UserListSerializer(serializers.ModelSerializer):
 class UserProfileSerializer(UserListSerializer):
     """The signed-in user. The bid email letterhead and the sidebar read `company` from here."""
     company = serializers.SerializerMethodField()
+    page_access = serializers.SerializerMethodField()
 
     class Meta(UserListSerializer.Meta):
         fields = UserListSerializer.Meta.fields + ['company']
+
+    def get_page_access(self, obj):
+        # A lead team member gets the Hiring page while on the team (hiring/leads.py).
+        from hiring.leads import with_hiring_page
+
+        rows = UserPageAccessSerializer(obj.page_access.all(), many=True).data
+        return with_hiring_page(obj, list(rows), profile=True)
 
     def get_company(self, obj):
         return CompanySerializer(Company.current(), context=self.context).data

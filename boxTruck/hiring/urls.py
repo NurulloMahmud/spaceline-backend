@@ -10,6 +10,8 @@ from .views import (DriverBulkCreateHRView, DriverBulkCreateInviteView, DriverEx
                     DriverNearbyView, VehicleDropdownView,
                     TrackingDriverListView, TrackingSummaryView, HiringBoardView
                     )
+from .lead_views import (LeadBotView, LeadChatView, LeadCountView, LeadPostListView,
+                         LeadTeamMemberView, LeadTeamView, LeadTestMessageView)
 
 router = SimpleRouter()
 router.register(r'driver-statuses', DriverStatusViewSet, basename='driver-statuses') #checked
@@ -28,6 +30,13 @@ router.register(r'deposit-history', DepositHistoryViewSet, basename='deposit-his
 urlpattern = [
     path('driver-list/', DriverListView.as_view(), name='driver-list'), # checked
     path('board/', HiringBoardView.as_view(), name='hiring-board'),
+    path('lead-count/', LeadCountView.as_view(), name='lead-count'),
+    path('lead-team/', LeadTeamView.as_view(), name='lead-team'),
+    path('lead-team/<int:user_id>/', LeadTeamMemberView.as_view(), name='lead-team-member'),
+    path('lead-settings/chat/', LeadChatView.as_view(), name='lead-settings-chat'),
+    path('lead-settings/test/', LeadTestMessageView.as_view(), name='lead-settings-test'),
+    path('lead-settings/bot/', LeadBotView.as_view(), name='lead-settings-bot'),
+    path('lead-posts/', LeadPostListView.as_view(), name='lead-posts'),
     path('driver-company-modal/', DriverCompanyModalView.as_view(), name='driver-company-modal'), # checked
     path('hiring/request/', DriverBulkCreateHRView.as_view(), name='driver-create-hr'),
     path('driver/invite/', DriverBulkCreateInviteView.as_view(), name='driver-create-invite'),

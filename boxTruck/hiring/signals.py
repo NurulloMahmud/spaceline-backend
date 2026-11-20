@@ -21,6 +21,7 @@ BOARD_FIELDS = (
     "hiring_moved_at",
     "hiring_moved_by_id",
     "referral_by_id",
+    "assigned_to_id",
     "full_name",
     "phone_number",
     "email",

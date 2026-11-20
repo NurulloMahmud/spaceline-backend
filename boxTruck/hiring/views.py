@@ -12,7 +12,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework import status, viewsets, views, generics, parsers
@@ -36,6 +36,7 @@ from .pdf_generation import fill_w9, generate_contract
 from .document_ai import MAX_FILES_PER_REQUEST, build_prefill, parse_document
 from .team import NoVehicle, set_team
 from . import board as hiring_board
+from . import leads as hiring_leads
 from users.models import CustomUser, Company
 from .models import (
     CompanyFile,
@@ -47,6 +48,7 @@ from .models import (
     DriverHistory,
     DriverInviteLink,
     DriverStatus,
+    LeadTeamMember,
     Vehicle,
     VehicleEquipment,
     VehicleFile,
@@ -211,6 +213,7 @@ class DriverViewSet(viewsets.ModelViewSet):
         statements, sets them Out of service and answers 200 with
         `{"outcome": "out_of_service", "driver": ...}`."""
         driver = self.get_object()
+        _guard_lead(request, driver)
         outcome = hiring_board.remove_driver(driver, request.user)
         if outcome == "deleted":
             return Response(status=status.HTTP_204_NO_CONTENT)
@@ -229,14 +232,46 @@ class DriverViewSet(viewsets.ModelViewSet):
         stage is lead, called, ready or active; the status follows (Active for
         active, Pending otherwise). Answers the driver's board card."""
         driver = self.get_object()
+        _guard_lead(request, driver)
         stage = str((request.data or {}).get("stage", "")).strip().lower()
         hiring_board.move(driver, stage, request.user)
-        fresh = hiring_board.board_queryset().filter(pk=driver.pk).first()
-        if fresh is None:
-            fresh = hiring_board.with_records(Driver.objects.filter(pk=driver.pk)).select_related(
-                "status", "referral_by", "hiring_moved_by"
-            ).first()
-        return Response(hiring_board.card(fresh, request))
+        return Response(_board_card(driver.pk, request))
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="assign",
+        permission_classes=[IsAuthenticated],
+    )
+    def assign(self, request: Request, pk: str | None = None) -> Response:
+        """POST /hiring/drivers/{id}/assign/ {user_id}: an admin gives the lead to a
+        lead team member. Announced in the app to that person; no Telegram post, and
+        the rotation is not affected. Answers the driver's board card."""
+        if not hiring_leads.is_admin(request.user):
+            return Response(
+                {"detail": "Only Management, Developers and Dispatch managers can reassign leads."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        driver = self.get_object()
+        raw = (request.data or {}).get("user_id")
+        try:
+            user_id = int(raw)
+        except (TypeError, ValueError):
+            return Response({"detail": "user_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        member = LeadTeamMember.objects.select_related("user").filter(user_id=user_id).first()
+        if member is None:
+            return Response(
+                {"detail": "This user is not on the lead team."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not member.user.is_active:
+            return Response(
+                {"detail": "This user's account is not active."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if driver.assigned_to_id != member.user_id:
+            hiring_leads.reassign(driver, member.user, request.user)
+        return Response(_board_card(driver.pk, request))
 
     @action(
         detail=True,
@@ -392,6 +427,21 @@ class DriverViewSet(viewsets.ModelViewSet):
                 "hub_driver_id": driver.hub_driver_id,
             }
         )
+
+
+def _guard_lead(request: Request, driver: Driver) -> None:
+    """A lead team member who is not an admin handles only the leads assigned to them."""
+    if not hiring_leads.can_touch(request.user, driver):
+        raise PermissionDenied("This lead is assigned to someone else.")
+
+
+def _board_card(driver_id: int, request: Request) -> dict:
+    fresh = hiring_board.board_queryset().filter(pk=driver_id).first()
+    if fresh is None:
+        fresh = hiring_board.with_records(Driver.objects.filter(pk=driver_id)).select_related(
+            "status", "referral_by", "hiring_moved_by", "assigned_to"
+        ).first()
+    return hiring_board.card(fresh, request)
 
 
 def _vehicle_block_serializer(
@@ -1333,6 +1383,9 @@ class DriverInviteSubmitView(views.APIView):
             if claimed is None:
                 invite.driver = driver
                 invite.save(update_fields=["driver"])
+                # A new lead: dealt to the lead team and posted to Telegram once
+                # this commits, in the background (hiring/leads.py).
+                hiring_leads.lead_submitted(driver.id)
 
         def described(files):
             return [{"id": f.id, "name": f.name, "url": f.document.url} for f in files]

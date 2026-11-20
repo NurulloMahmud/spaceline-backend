@@ -114,6 +114,16 @@ class Driver(models.Model):
         blank=True,
         related_name="+",
     )
+    # The lead team dispatcher this invite-form lead was dealt to (hiring/leads.py),
+    # or the one an admin reassigned it to. Null for older drivers and an empty team.
+    assigned_to = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="assigned_leads",
+    )
+    assigned_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -460,3 +470,118 @@ class ZipLocation(models.Model):
         indexes = [
             models.Index(fields=["latitude", "longitude"], name="zip_locations_lat_lng")
         ]
+
+
+class LeadAssignment(models.Model):
+    """Who a lead was given to, by whom (null = the rotation), and when."""
+
+    ROTATION = "rotation"
+    MANUAL = "manual"
+    REASONS = [(ROTATION, "Rotation"), (MANUAL, "Manual")]
+
+    driver = models.ForeignKey(
+        Driver, on_delete=models.CASCADE, related_name="lead_assignments"
+    )
+    user = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    reason = models.CharField(max_length=20, choices=REASONS)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f"{self.driver_id} -> {self.user_id} ({self.reason})"
+
+    class Meta:
+        verbose_name = "Lead Assignment"
+        verbose_name_plural = "Lead Assignments"
+        db_table = "lead_assignments"
+        ordering = ["created_at", "id"]
+
+
+class LeadTeamMember(models.Model):
+    """A dispatcher in the lead rotation. Leads are dealt by `position`, lowest first."""
+
+    user = models.OneToOneField(
+        CustomUser, on_delete=models.CASCADE, related_name="lead_team_member"
+    )
+    # Stored without the leading @. Empty: the Telegram post names them without a mention.
+    telegram_username = models.CharField(max_length=32, blank=True, default="")
+    position = models.PositiveIntegerField()
+    added_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f"{self.position}. {self.user_id}"
+
+    class Meta:
+        verbose_name = "Lead Team Member"
+        verbose_name_plural = "Lead Team Members"
+        db_table = "lead_team_members"
+        ordering = ["position", "id"]
+
+
+class LeadSettings(models.Model):
+    """One row (pk=1): the Telegram group leads go to, the bot, and the rotation pointer."""
+
+    chat_id = models.CharField(max_length=32, blank=True, default="")
+    chat_title = models.CharField(max_length=255, blank=True, default="")
+    # Fernet with a key derived from SECRET_KEY (hiring/leads.py); never sent to the browser.
+    bot_token_enc = models.TextField(blank=True, default="")
+    bot_username = models.CharField(max_length=64, blank=True, default="")
+    token_saved_at = models.DateTimeField(null=True, blank=True)
+    token_saved_by = models.ForeignKey(
+        CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    # Position of the member who got the last rotation lead; the next one goes to
+    # the first member after it, then back to the top.
+    last_position = models.PositiveIntegerField(default=0)
+
+    @classmethod
+    def get(cls) -> "LeadSettings":
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    def __str__(self) -> str:
+        return "Lead settings"
+
+    class Meta:
+        verbose_name = "Lead Settings"
+        verbose_name_plural = "Lead Settings"
+        db_table = "lead_settings"
+
+
+class LeadPost(models.Model):
+    """One Telegram post: a new lead, or the test message from the Team window."""
+
+    KIND_LEAD = "lead"
+    KIND_TEST = "test"
+    KINDS = [(KIND_LEAD, "Lead"), (KIND_TEST, "Test")]
+    SENT = "sent"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    STATUSES = [(SENT, "Sent"), (FAILED, "Failed"), (SKIPPED, "Skipped")]
+
+    driver = models.ForeignKey(
+        Driver, on_delete=models.SET_NULL, null=True, blank=True, related_name="lead_posts"
+    )
+    kind = models.CharField(max_length=10, choices=KINDS, default=KIND_LEAD)
+    status = models.CharField(max_length=10, choices=STATUSES)
+    error = models.TextField(blank=True, default="")
+    photos = models.PositiveSmallIntegerField(default=0)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    telegram_message_id = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f"{self.kind} {self.status} {self.driver_id}"
+
+    class Meta:
+        verbose_name = "Lead Post"
+        verbose_name_plural = "Lead Posts"
+        db_table = "lead_posts"
+        ordering = ["-created_at", "-id"]

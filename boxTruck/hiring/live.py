@@ -76,19 +76,26 @@ def _run() -> None:
             _send(ids)
 
 
+def post_event(event_type: str, payload: dict) -> None:
+    """Posts one event to the email agent's internal route. Raises on failure.
+
+    Runs in the caller's thread: call it from a background thread."""
+    company_id = _company()
+    if company_id is None:
+        return
+    res = requests.post(
+        f"{settings.EMAIL_AGENT_INTERNAL_URL.rstrip('/')}/internal/v1/events",
+        json={"type": event_type, "company_id": company_id, "payload": payload},
+        headers={"X-Internal-Secret": settings.INTERNAL_SERVICE_SECRET},
+        timeout=TIMEOUT_SECONDS,
+    )
+    res.raise_for_status()
+
+
 def _send(driver_ids: list[int]) -> None:
     global _last_warning
     try:
-        company_id = _company()
-        if company_id is None:
-            return
-        res = requests.post(
-            f"{settings.EMAIL_AGENT_INTERNAL_URL.rstrip('/')}/internal/v1/events",
-            json={"type": EVENT_TYPE, "company_id": company_id, "payload": {"driver_ids": driver_ids}},
-            headers={"X-Internal-Secret": settings.INTERNAL_SERVICE_SECRET},
-            timeout=TIMEOUT_SECONDS,
-        )
-        res.raise_for_status()
+        post_event(EVENT_TYPE, {"driver_ids": driver_ids})
     except Exception as exc:  # noqa: BLE001 - the board falls back to polling
         now = time.monotonic()
         if now - _last_warning > WARN_EVERY_SECONDS:

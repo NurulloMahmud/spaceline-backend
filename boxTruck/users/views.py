@@ -282,6 +282,14 @@ class MyPageAccessView(generics.ListAPIView):
             user=self.request.user, can_view=True, page__is_active=True
         )
 
+    def list(self, request, *args, **kwargs):
+        # A lead team member gets the Hiring page while on the team (hiring/leads.py).
+        from hiring.leads import with_hiring_page
+
+        response = super().list(request, *args, **kwargs)
+        response.data = with_hiring_page(request.user, list(response.data))
+        return response
+
 
 class DispatchUsers(generics.ListAPIView):
     serializer_class = UserListSerializer
