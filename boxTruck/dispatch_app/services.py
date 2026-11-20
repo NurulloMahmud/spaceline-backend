@@ -131,7 +131,9 @@ def exchange_session(device: DispatchDevice) -> dict[str, Any]:
     state.set_state(device.id, user.is_active)
     return {
         "access": str(access),
-        "expires_at": datetime_from_epoch(access["exp"]).isoformat(),
+        # RFC 3339 in UTC with "Z", like every time the hub sends the app
+        # (the hub passes this one on as it is).
+        "expires_at": datetime_from_epoch(access["exp"]).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "user": user_dict(user),
     }
 

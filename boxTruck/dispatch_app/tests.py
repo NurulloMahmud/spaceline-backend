@@ -332,6 +332,7 @@ class HubEndpointTests(DispatchBase):
         reply = self.client.post("/api/dispatch-app/session/", {"device_token": created["device_token"]}, format="json", **HUB_HEADERS)
         self.assertEqual(reply.status_code, 200)
         self.assertEqual(set(reply.data), {"access", "expires_at", "user", "mailbox"})
+        self.assertRegex(reply.data["expires_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertEqual(reply.data["mailbox"], "dana@spaceline.test")
         self.assertTrue(reply.data["user"]["is_active"])
         access = AccessToken(reply.data["access"])

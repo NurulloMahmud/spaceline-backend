@@ -34,7 +34,7 @@ Hub, header `X-Hub-Token: <DRIVER_HUB_TOKEN>` (no JWT):
 | Method and path | Body | Reply |
 | --- | --- | --- |
 | `POST /api/dispatch-app/devices/` | `{btm_user_id, hub_workspace_id, platform, device_label}` | `201 {device_id, device_token, user: {id, first_name, last_name, email, is_active}, mailbox}`. Revokes the user's other live devices first (`replaced`, no hub call: the hub asked and applies the rule itself). `404 user_not_found`, `409 user_inactive` |
-| `POST /api/dispatch-app/session/` | `{device_token}` | `200 {access, expires_at, user, mailbox}`; `401 device_revoked`. Also for an inactive user (`user.is_active` false) |
+| `POST /api/dispatch-app/session/` | `{device_token}` | `200 {access, expires_at, user, mailbox}` (`expires_at` RFC 3339 UTC, `2026-11-21T10:10:00Z`); `401 device_revoked`. Also for an inactive user (`user.is_active` false) |
 | `POST /api/dispatch-app/devices/revoke/` | `{device_token}` | `200 {revoked: bool}`, also when already revoked or unknown |
 
 Email agent, header `X-Internal-Secret: <INTERNAL_SERVICE_SECRET>`:
