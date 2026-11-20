@@ -53,9 +53,12 @@ class Event:
         other event goes to the whole company."""
         if self.company_id != company_id:
             return False
+        if "user_ids" not in self.payload:
+            # A lead carries a driver's phone and CDL: it never goes company-wide.
+            return self.type != LEAD_ASSIGNED
         targets = self.payload.get("user_ids")
         if not isinstance(targets, list):
-            return True
+            return False
         wanted = set()
         for value in targets:
             try:

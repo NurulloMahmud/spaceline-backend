@@ -30,6 +30,13 @@ def test_an_untargeted_event_reaches_the_whole_company():
     assert not e.visible_to(2, 5)
 
 
+def test_a_lead_without_a_target_list_reaches_nobody():
+    # A lead carries a driver's phone and CDL: never company-wide by accident.
+    assert not _event(lead={"id": 1}).visible_to(1, 5)
+    assert not _event(user_ids="4", lead={"id": 1}).visible_to(1, 4)
+    assert not _event("hiring_changed", user_ids=None).visible_to(1, 5)
+
+
 def test_an_empty_target_list_reaches_nobody():
     assert not _event(user_ids=[]).visible_to(1, 4)
 

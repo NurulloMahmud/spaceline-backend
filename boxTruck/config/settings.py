@@ -334,8 +334,8 @@ LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
     'formatters': {
-        # Timestamps let the Dev console place Django's own lines in time.
-        'console': {'format': '%(asctime)s %(levelname)s %(name)s: %(message)s'},
+        # Timestamps (UTC) let the Dev console place Django's own lines in time.
+        'console': {'()': 'config.logfmt.UTCFormatter', 'fmt': '%(asctime)s %(levelname)s %(name)s: %(message)s'},
     },
     'handlers': {
         'console': {'class': 'logging.StreamHandler', 'formatter': 'console'},
@@ -343,10 +343,12 @@ LOGGING = {
     'loggers': {
         'django': {'handlers': ['console'], 'level': 'INFO'},
         # Project loggers print once: propagate is off so the root logger adds nothing.
+        # Hiring keeps its INFO lines (lead assignment, Telegram posts); the rest only warn.
+        'hiring': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
         **{
-            name: {'handlers': ['console'], 'level': 'INFO', 'propagate': False}
+            name: {'handlers': ['console'], 'level': 'WARNING', 'propagate': False}
             for name in (
-                'hiring', 'users', 'billing', 'charge', 'accounting', 'hub',
+                'users', 'billing', 'charge', 'accounting', 'hub',
                 'devconsole', 'payroll', 'salaries', 'analytics', 'ai', 'mobile',
                 'dispatchers',
             )

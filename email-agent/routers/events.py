@@ -31,7 +31,9 @@ class PublishRequest(BaseModel):
 
 
 @internal_router.post("", status_code=202)
-def publish_event(body: PublishRequest, _: bool = Depends(require_internal)) -> dict[str, Any]:
+async def publish_event(body: PublishRequest, _: bool = Depends(require_internal)) -> dict[str, Any]:
+    # async on purpose: the hub's queues belong to the event loop, so publishing from a
+    # threadpool thread could wake a waiting stream late.
     """POST /internal/v1/events {type, company_id, payload}: fan the event out to the
     company's open streams. Nothing is stored; a page that was not connected catches up
     by reloading what the event is about."""

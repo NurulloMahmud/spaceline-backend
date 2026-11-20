@@ -465,6 +465,18 @@ class ReassignTests(LeadBase):
         self.assertEqual(self.driver.assigned_to_id, self.a.pk)
         self.post_event.assert_not_called()
 
+    def test_the_driver_edit_cannot_change_the_assignment(self) -> None:
+        # Only the assign endpoint hands a lead over, so history and notification go with it.
+        for user in (self.b, self.manager):
+            self._api(user).patch(
+                f"/api/hiring/drivers/{self.driver.pk}/",
+                {"assigned_to": self.b.pk, "assigned_at": "2026-01-01T00:00:00Z"},
+                format="json",
+            )
+            self.driver.refresh_from_db()
+            self.assertEqual(self.driver.assigned_to_id, self.a.pk)
+            self.assertNotEqual(str(self.driver.assigned_at)[:10], "2026-01-01")
+
 
 class TeamApiTests(LeadBase):
     def test_get_lists_members_in_order_with_next_and_month_count(self) -> None:

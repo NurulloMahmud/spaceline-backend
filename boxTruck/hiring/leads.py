@@ -514,7 +514,7 @@ def send_test() -> tuple[bool, str]:
         LeadPost.objects.create(kind=LeadPost.KIND_TEST, status=LeadPost.SKIPPED, error=detail)
         return False, detail
     try:
-        message_id = telegram.send_text(token, row.chat_id, TEST_MESSAGE)
+        message_id = telegram.send_text(token, row.chat_id, TEST_MESSAGE, attempts=1)
     except telegram.TelegramError as exc:
         detail = str(exc) or "Telegram refused the message."
         LeadPost.objects.create(

@@ -214,8 +214,10 @@ def _format_phone(phone):
 
 def build_caption(*, full_name, phone, dispatcher_name, dispatcher_username, link, notes) -> str:
     """HTML caption (parse_mode HTML). `notes` is a list of strings, a string or None."""
-    username = str(dispatcher_username or "").strip().lstrip("@")
-    name = str(dispatcher_name or "").strip()
+    # Clipped so the caption stays well under Telegram's CAPTION_LIMIT whatever was typed.
+    username = str(dispatcher_username or "").strip().lstrip("@")[:32]
+    name = str(dispatcher_name or "").strip()[:80]
+    full_name = str(full_name or "").strip()[:120]
     if username and name:
         dispatcher = "@%s (%s)" % (username, escape(name))
     elif username:
@@ -290,8 +292,9 @@ def send_lead(token: str, chat_id: str, photos: list, caption: str) -> dict:
     return {"message_id": str(message_id) if message_id is not None else "", "attempts": attempts}
 
 
-def send_text(token: str, chat_id: str, html: str) -> str:
-    """Send an HTML text message; returns its message id."""
+def send_text(token: str, chat_id: str, html: str, attempts: int = MAX_ATTEMPTS) -> str:
+    """Send an HTML text message; returns its message id. The Team window's test passes
+    attempts=1 so a person clicking Send test never waits through the retry delays."""
     result = _call(
         token,
         "sendMessage",
@@ -301,7 +304,7 @@ def send_text(token: str, chat_id: str, html: str) -> str:
             "parse_mode": "HTML",
             "disable_web_page_preview": "true",
         },
-        attempts=MAX_ATTEMPTS,
+        attempts=max(1, int(attempts)),
     )
     message_id = result.get("message_id") if isinstance(result, dict) else None
     return str(message_id) if message_id is not None else ""

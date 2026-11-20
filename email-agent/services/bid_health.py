@@ -103,6 +103,9 @@ def compute(session: Session, company_id: int, hours: int, now: Optional[datetim
         .join(models.EmailMessage, models.EmailMessage.negotiation_id == models.Negotiation.id)
         .filter(
             models.Negotiation.company_id == company_id,
+            # A bid's first email goes out seconds after it is made; a day of margin
+            # keeps the scan to recent bids instead of the whole history.
+            models.Negotiation.created_at >= first - timedelta(days=1),
             models.EmailMessage.direction == "outbound",
         )
         .group_by(models.Negotiation.id)

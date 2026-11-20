@@ -89,6 +89,10 @@ class DriverWriteSerializer(serializers.ModelSerializer):
             "hub_invite_id",
             "hub_invite_status",
             "hub_invited_at",
+            # Leads change hands only through the assign endpoint (admins), so the
+            # history row and the notification always go with it.
+            "assigned_to",
+            "assigned_at",
         ]
 
     def validate_phone_number(self, value):
