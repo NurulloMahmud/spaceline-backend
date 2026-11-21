@@ -82,11 +82,14 @@ def payout_dict(p, detail=False):
 
 
 def invoice_dict(f, detail=False):
+    rts_id = getattr(f, 'rts_id', None)
     out = {
         'id': f.id, 'load': load_dict(f.load), 'original': f.original, 'amount': f.amount, 'short': f.amount < f.original,
         'status': f.status, 'invoiced_at': f.invoiced_at, 'paid_at': f.paid_at,
         'notes_count': len(f.notes.all()) if detail else getattr(f, 'notes_n', 0),
         'updated_at': f.updated_at, 'created_at': f.created_at,
+        # the RTS purchase this load went in, when it went through the Factoring Submission window
+        'rts': {'id': rts_id, 'account_type': getattr(f, 'rts_type', None)} if rts_id else None,
     }
     if detail:
         out['notes'] = [{'id': n.id, 'user': user_dict(n.user), 'text': n.text, 'created_at': n.created_at} for n in f.notes.all()]
@@ -96,3 +99,16 @@ def invoice_dict(f, detail=False):
 
 def invoice_default_status(f):
     return Invoice.GOOD
+
+
+def rts_purchase_dict(p):
+    return {
+        'id': p.id, 'account_type': p.account_type, 'account_label': p.get_account_type_display(),
+        'status': p.status, 'step': p.step, 'error': p.error, 'error_kind': p.error_kind, 'bad_invoice_id': p.bad_invoice_id,
+        'total': p.total, 'csv_name': p.csv_name, 'created_by': user_dict(p.created_by), 'created_at': p.created_at, 'submitted_at': p.submitted_at,
+        'lines': [
+            {'invoice_id': l.invoice_id, 'load_id': l.invoice.load_id, 'invoice_number': l.invoice_number, 'shipment': f'SH - {l.invoice_number}',
+             'reference': l.reference, 'debtor': l.debtor, 'amount': l.amount, 'pages': l.pages}
+            for l in p.lines.all()
+        ],
+    }

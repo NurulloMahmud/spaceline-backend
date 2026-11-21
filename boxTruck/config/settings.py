@@ -363,3 +363,14 @@ LOGGING = {
         },
     },
 }
+
+# RTS Financial factoring: purchases go up over FTPS as one PDF per load plus a CSV listing them.
+# The login is the RTS account number. Express stays off until RTS says how it is sent; giving it
+# its own login here is one way, and turns the choice on in the Factoring Submission window.
+RTS_HOST = config('RTS_HOST', default='ftps.rtsfinancial.com')
+RTS_PORT = config('RTS_PORT', default=21, cast=int)
+RTS_FTP_TLS = config('RTS_FTP_TLS', default=True, cast=bool)
+RTS_ACCOUNTS = {
+    'standard': {'login': config('SPACELINE_CLIENT', default=''), 'password': config('SPACELINE_PASSWORD', default='')},
+    'express': {'login': config('RTS_EXPRESS_CLIENT', default=''), 'password': config('RTS_EXPRESS_PASSWORD', default='')},
+}

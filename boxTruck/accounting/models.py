@@ -185,3 +185,57 @@ def available_for(deduction, payout):
 
 def open_deductions(driver):
     return [d for d in annotate_debt(Deduction.objects.filter(driver=driver, is_deleted=False)).order_by('date', 'id') if d.owed_sum > 0]
+
+
+# --- RTS Financial purchases -----------------------------------------------------------------------
+
+class RtsPurchase(models.Model):
+    """One submission to RTS Financial: what RTS Pro calls a purchase, one line per load.
+
+    It is sent all or nothing. The loads change only once the purchase is in; a failure leaves
+    every invoice as it was. The id is the batch number people see.
+    """
+    STANDARD, EXPRESS = 'standard', 'express'
+    ACCOUNT_TYPES = [(STANDARD, 'Standard'), (EXPRESS, 'Express')]
+    SENDING, SUBMITTED, FAILED = 'sending', 'submitted', 'failed'
+    STATUSES = [(SENDING, 'Sending'), (SUBMITTED, 'Submitted'), (FAILED, 'Failed')]
+    # the step the job is on while sending, or the one it failed at
+    PREPARING, UPLOADING, SUBMITTING = 0, 1, 2
+
+    account_type = models.CharField(max_length=20, choices=ACCOUNT_TYPES, default=STANDARD)
+    status = models.CharField(max_length=20, choices=STATUSES, default=SENDING)
+    step = models.PositiveSmallIntegerField(default=PREPARING)
+    error = models.TextField(blank=True, default='')
+    # bad_file, down, partial, unsure, stale: what the window says and offers after a failure
+    error_kind = models.CharField(max_length=20, blank=True, default='')
+    bad_invoice = models.ForeignKey('Invoice', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    total = models.DecimalField(max_digits=20, decimal_places=2, default=ZERO)
+    csv_name = models.CharField(max_length=255, blank=True, default='')
+    csv_file = models.FileField(upload_to='rts_purchases/', null=True, blank=True)
+    created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'rts_purchases'
+        ordering = ['-id']
+
+    def __str__(self):
+        return f'RTS purchase #{self.id} ({self.status})'
+
+
+class RtsPurchaseLine(models.Model):
+    """One load in a purchase, as it was sent: RTS's invoice #, customer, PO # and amount."""
+    purchase = models.ForeignKey(RtsPurchase, on_delete=models.CASCADE, related_name='lines')
+    invoice = models.ForeignKey('Invoice', on_delete=models.CASCADE, related_name='rts_lines')
+    invoice_number = models.CharField(max_length=50)
+    debtor = models.CharField(max_length=255)
+    reference = models.CharField(max_length=100)
+    amount = models.DecimalField(max_digits=20, decimal_places=2)
+    packet = models.FileField(upload_to='rts_purchases/', null=True, blank=True)
+    pages = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = 'rts_purchase_lines'
+        ordering = ['id']

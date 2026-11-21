@@ -14,10 +14,11 @@ from billing.models import LoadStatus
 from payroll.models import Deduction, DeductionHistory, DeductionType
 from users.pagination import CustomPagination
 
+from . import rts
 from .models import (
-    Invoice, InvoiceNote, Payout, PayoutExpense, PayoutNote, ZERO, annotate_debt, available_for, debt_of,
+    Invoice, InvoiceNote, Payout, PayoutExpense, PayoutNote, RtsPurchase, RtsPurchaseLine, ZERO, annotate_debt, available_for, debt_of,
 )
-from .serializers import deduction_dict, invoice_dict, link_dict, payout_dict, user_dict
+from .serializers import deduction_dict, invoice_dict, link_dict, payout_dict, rts_purchase_dict, user_dict
 from .services import (
     log_invoice, log_payout, money, overpayment_expense, raise_driver_pay, set_load_status, set_payment_type, take_expense_everywhere, take_quick_pay_fee,
 )
@@ -367,7 +368,12 @@ INVOICE_RELATED = ('load', 'load__status', 'load__driver', 'load__broker', 'load
 
 
 def invoice_queryset():
-    return Invoice.objects.select_related(*INVOICE_RELATED).prefetch_related('load__loadfile_set').annotate(notes_n=Count('notes', distinct=True))
+    sent = RtsPurchaseLine.objects.filter(invoice=OuterRef('pk'), purchase__status=RtsPurchase.SUBMITTED).order_by('-purchase_id')
+    return Invoice.objects.select_related(*INVOICE_RELATED).prefetch_related('load__loadfile_set').annotate(
+        notes_n=Count('notes', distinct=True),
+        rts_id=Subquery(sent.values('purchase_id')[:1]),
+        rts_type=Subquery(sent.values('purchase__account_type')[:1]),
+    )
 
 
 def invoice_filters(request, qs, with_status=True):
@@ -617,3 +623,91 @@ class ExpenseDetailView(views.APIView):
         d.save(update_fields=['is_deleted', 'last_updated'])
         DeductionHistory.objects.create(deduction=d, changed_by=request.user, description='Deduction Deleted')
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --- RTS Financial: Factoring Submission ----------------------------------------------------------
+
+def purchase_queryset():
+    return RtsPurchase.objects.select_related('created_by').prefetch_related('lines__invoice')
+
+
+class RtsView(views.APIView):
+    """What the Factoring Submission window needs up front: account types, today's count and any
+    purchase still sending, so a window closed mid-way can pick it up again."""
+    permission_classes = [IsAuthenticated, IsAccounting]
+
+    def get(self, request):
+        rts.mark_stale()
+        active = purchase_queryset().filter(status=RtsPurchase.SENDING).first()
+        return Response({
+            'account_types': rts.account_types(),
+            'sent_today': rts.sent_today(),
+            'company': rts.Company.current().name,
+            'active': rts_purchase_dict(active) if active else None,
+        })
+
+
+class RtsCandidatesView(views.APIView):
+    """Every invoice still Good to invoice, each with what stops it from going to RTS."""
+    permission_classes = [IsAuthenticated, IsAccounting]
+
+    def get(self, request):
+        qs = invoice_queryset().filter(status=Invoice.GOOD).order_by(F('load__delivered_at').asc(nulls_last=True), 'id')
+        return Response({'results': [{**invoice_dict(f), 'blockers': rts.blockers(f)} for f in qs]})
+
+
+class RtsPurchasesView(views.APIView):
+    """POST {invoices: [ids], account_type}: one purchase with every one of them, sent in the background."""
+    permission_classes = [IsAuthenticated, IsAccounting]
+
+    def post(self, request):
+        rts.mark_stale()
+        kind = request.data.get('account_type')
+        if kind not in dict(RtsPurchase.ACCOUNT_TYPES):
+            raise ValidationError({'account_type': 'Choose Standard or Express.'})
+        if not rts.account(kind):
+            raise ValidationError({'account_type': f'{dict(RtsPurchase.ACCOUNT_TYPES)[kind]} is not set up for RTS yet.'})
+        raw = request.data.get('invoices')
+        if not isinstance(raw, list) or not raw:
+            raise ValidationError({'invoices': 'Choose at least one load.'})
+        try:
+            ids = sorted({int(x) for x in raw})
+        except (TypeError, ValueError):
+            raise ValidationError({'invoices': 'Must be invoice ids.'})
+        with transaction.atomic():
+            # lock the rows first: the annotated list query groups, and Postgres can't lock a GROUP BY
+            list(Invoice.objects.select_for_update().filter(pk__in=ids).values_list('id', flat=True))
+            found = list(invoice_queryset().filter(pk__in=ids))
+            if len(found) != len(ids):
+                raise ValidationError({'invoices': 'Some of these invoices no longer exist. Refresh and choose again.'})
+            busy = set(RtsPurchaseLine.objects.filter(invoice_id__in=ids, purchase__status=RtsPurchase.SENDING).values_list('invoice_id', flat=True))
+            problems = {}
+            for f in found:
+                why = ['Already being sent'] if f.id in busy else ['Already sent or paid'] if f.status != Invoice.GOOD else rts.blockers(f)
+                if why:
+                    problems[f'SH - {f.load.shipment}'] = why
+            if problems:
+                raise ValidationError({'invoices': [f'{k}: {", ".join(v)}' for k, v in problems.items()]})
+            found.sort(key=lambda f: (f.load.delivered_at is None, f.load.delivered_at, f.id))
+            p = RtsPurchase.objects.create(account_type=kind, created_by=request.user, total=sum((f.amount for f in found), ZERO), csv_name=rts.CSV_NAME)
+            RtsPurchaseLine.objects.bulk_create([
+                RtsPurchaseLine(purchase=p, invoice=f, invoice_number=str(f.load.shipment), debtor=f.load.broker.name, reference=f.load.load_number.strip(), amount=f.amount)
+                for f in found
+            ])
+            transaction.on_commit(lambda: run_purchase(p.id))
+        return Response(rts_purchase_dict(purchase_queryset().get(pk=p.pk)), status=status.HTTP_201_CREATED)
+
+
+def run_purchase(purchase_id):
+    """The job runs beside the request, in a thread of its own (tests run it in place)."""
+    import threading
+
+    threading.Thread(target=rts.safe_run, args=(purchase_id,), name=f'rts-purchase-{purchase_id}', daemon=False).start()
+
+
+class RtsPurchaseView(views.APIView):
+    permission_classes = [IsAuthenticated, IsAccounting]
+
+    def get(self, request, pk):
+        rts.mark_stale()
+        return Response(rts_purchase_dict(get_object_or_404(purchase_queryset(), pk=pk)))

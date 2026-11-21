@@ -4,6 +4,7 @@ from .views import (
     ExpenseDetailView, ExpenseListView, ExpenseSummaryView,
     InvoiceDetailView, InvoiceListView, InvoiceNotesView, InvoiceSummaryView,
     LoadStatusView, PayoutDetailView, PayoutExpensesView, PayoutListView, PayoutNotesView, PayoutOpenExpensesView, PayoutSummaryView,
+    RtsCandidatesView, RtsPurchaseView, RtsPurchasesView, RtsView,
 )
 
 urlpatterns = [
@@ -22,4 +23,8 @@ urlpatterns = [
     path('expenses/', ExpenseListView.as_view(), name='accounting-expenses'),
     path('expenses/summary/', ExpenseSummaryView.as_view(), name='accounting-expenses-summary'),
     path('expenses/<int:pk>/', ExpenseDetailView.as_view(), name='accounting-expense'),
+    path('rts/', RtsView.as_view(), name='accounting-rts'),
+    path('rts/candidates/', RtsCandidatesView.as_view(), name='accounting-rts-candidates'),
+    path('rts/purchases/', RtsPurchasesView.as_view(), name='accounting-rts-purchases'),
+    path('rts/purchases/<int:pk>/', RtsPurchaseView.as_view(), name='accounting-rts-purchase'),
 ]
